@@ -1,0 +1,395 @@
+"""Configuration loading for Alpha Agent."""
+
+from __future__ import annotations
+
+import os
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
+
+DEFAULT_CONFIG_TOML = """# Alpha Agent local configuration.
+# Environment variables still override these values for one-off runs or deploys.
+
+[runtime]
+db_path = "~/.alpha-agent/alpha.db"
+log_dir = "~/.alpha-agent/logs"
+gateway_status_path = "~/.alpha-agent/gateway-status.json"
+
+[llm]
+provider = "mock"
+model = ""
+
+[compatible]
+base_url = "https://api.openai.com/v1"
+api_key = ""
+
+[memory]
+working_memory_limit = 12
+retrieval_limit = 8
+
+[deepseek]
+api_key = ""
+reasoning_enabled = true
+reasoning_effort = ""
+
+[codex]
+access_token = ""
+"""
+
+CONFIG_KEY_TYPES: dict[str, type] = {
+    "runtime.db_path": str,
+    "runtime.log_dir": str,
+    "runtime.gateway_status_path": str,
+    "llm.provider": str,
+    "llm.model": str,
+    "compatible.base_url": str,
+    "compatible.api_key": str,
+    "memory.working_memory_limit": int,
+    "memory.retrieval_limit": int,
+    "deepseek.api_key": str,
+    "deepseek.reasoning_enabled": bool,
+    "deepseek.reasoning_effort": str,
+    "codex.access_token": str,
+}
+
+CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
+    "llm.provider": {
+        "mock",
+        "openai-compatible",
+        "openai",
+        "compatible",
+        "deepseek",
+        "codex",
+        "openai-codex",
+        "openai_codex",
+    },
+    "deepseek.reasoning_effort": {"", "low", "medium", "high", "max", "xhigh"},
+}
+
+POSITIVE_INT_CONFIG_KEYS = {
+    "memory.working_memory_limit",
+    "memory.retrieval_limit",
+}
+
+SECRET_CONFIG_KEYS = {
+    "compatible.api_key",
+    "deepseek.api_key",
+    "codex.access_token",
+}
+
+
+@dataclass(frozen=True)
+class AlphaConfig:
+    """Runtime settings loaded from environment variables and defaults."""
+
+    db_path: Path
+    log_dir: Path
+    gateway_status_path: Path
+    llm_provider: str = "mock"
+    llm_model: str = ""
+    compatible_base_url: str | None = None
+    compatible_api_key: str | None = None
+    working_memory_limit: int = 12
+    retrieval_limit: int = 8
+    deepseek_api_key: str | None = None
+    deepseek_reasoning_enabled: bool = True
+    deepseek_reasoning_effort: str | None = None
+    codex_access_token: str | None = None
+
+
+def default_config_path() -> Path:
+    """Return the default user config path."""
+
+    return Path(os.getenv("ALPHA_CONFIG_PATH", "~/.alpha-agent/config.toml")).expanduser()
+
+
+def write_default_config(path: str | Path | None = None, *, overwrite: bool = False) -> bool:
+    """Write a default TOML config file.
+
+    Returns True when the file was written and False when it already existed.
+    """
+
+    config_path = Path(path).expanduser() if path is not None else default_config_path()
+    if config_path.exists() and not overwrite:
+        return False
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(DEFAULT_CONFIG_TOML, encoding="utf-8")
+    return True
+
+
+def set_config_value(
+    dotted_key: str,
+    raw_value: str,
+    *,
+    config_path: str | Path | None = None,
+) -> Any:
+    """Set one supported config value in the TOML config file and return parsed value."""
+
+    key = _normalize_config_key(dotted_key)
+    expected_type = CONFIG_KEY_TYPES[key]
+    parsed_value = _parse_config_value(raw_value, expected_type)
+    parsed_value = _validate_config_value(key, parsed_value)
+    path = Path(config_path).expanduser() if config_path is not None else default_config_path()
+    write_default_config(path)
+    config_data = _load_toml_config(path)
+    section_name, field_name = key.split(".", 1)
+    section = config_data.setdefault(section_name, {})
+    if not isinstance(section, dict):
+        raise ValueError(f"Config section {section_name!r} is not editable")
+    section[field_name] = parsed_value
+    _write_toml_config(path, config_data)
+    return parsed_value
+
+
+def read_config_value(
+    dotted_key: str,
+    *,
+    config_path: str | Path | None = None,
+    reveal_secret: bool = False,
+) -> str:
+    """Read one supported config value from the TOML config file."""
+
+    key = _normalize_config_key(dotted_key)
+    path = Path(config_path).expanduser() if config_path is not None else default_config_path()
+    write_default_config(path)
+    config_data = _load_toml_config(path)
+    section_name, field_name = key.split(".", 1)
+    value = _section(config_data, section_name).get(field_name, "")
+    if key in SECRET_CONFIG_KEYS and not reveal_secret:
+        return "***" if value else ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _normalize_config_key(dotted_key: str) -> str:
+    key = dotted_key.strip().lower()
+    if key not in CONFIG_KEY_TYPES:
+        raise ValueError(f"Unsupported config key: {dotted_key}")
+    return key
+
+
+def _parse_config_value(raw_value: str, expected_type: type) -> Any:
+    if expected_type is bool:
+        value = raw_value.strip().lower()
+        if value in {"1", "true", "yes", "on"}:
+            return True
+        if value in {"0", "false", "no", "off"}:
+            return False
+        raise ValueError(f"Expected boolean value, got: {raw_value}")
+    if expected_type is int:
+        try:
+            return int(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"Expected integer value, got: {raw_value}") from exc
+    return raw_value
+
+
+def _validate_config_value(key: str, value: Any) -> Any:
+    if key in CONFIG_KEY_ALLOWED_VALUES:
+        normalized = str(value).strip().lower()
+        allowed = CONFIG_KEY_ALLOWED_VALUES[key]
+        if normalized not in allowed:
+            options = ", ".join(sorted(option or "<empty>" for option in allowed))
+            raise ValueError(f"Invalid value for {key}: {value}. Allowed values: {options}")
+        return normalized
+    if key in POSITIVE_INT_CONFIG_KEYS and isinstance(value, int) and value <= 0:
+        raise ValueError(f"{key} must be greater than 0")
+    return value
+
+
+def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
+    sections = ("runtime", "llm", "compatible", "memory", "deepseek", "codex")
+    lines = [
+        "# Alpha Agent local configuration.",
+        "# Environment variables still override these values for one-off runs or deploys.",
+        "",
+    ]
+    for section_name in sections:
+        section = _section(config_data, section_name)
+        if not section:
+            continue
+        lines.append(f"[{section_name}]")
+        for field_name, value in section.items():
+            lines.append(f"{field_name} = {_toml_literal(value)}")
+        lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _toml_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _int_value(value: Any, default: int) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bool_value(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _load_toml_config(config_file: str | Path | None) -> dict[str, Any]:
+    path = Path(config_file).expanduser() if config_file is not None else default_config_path()
+    if not path.exists():
+        return {}
+    with path.open("rb") as handle:
+        loaded = tomllib.load(handle)
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _section(config_data: dict[str, Any], name: str) -> dict[str, Any]:
+    value = config_data.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def _string_setting(
+    config_data: dict[str, Any],
+    section: str,
+    key: str,
+    default: str | None = None,
+) -> str | None:
+    value = _section(config_data, section).get(key)
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped or None
+    return default
+
+
+def _env_or_config(
+    env_name: str,
+    config_data: dict[str, Any],
+    section: str,
+    key: str,
+    default: str | None = None,
+) -> str | None:
+    env_value = os.getenv(env_name)
+    if env_value is not None and env_value != "":
+        return env_value
+    return _string_setting(config_data, section, key, default)
+
+
+def load_config(
+    env_file: str | Path | None = ".env",
+    config_file: str | Path | None = None,
+) -> AlphaConfig:
+    """Load configuration from TOML, optional .env, and environment variables."""
+
+    if env_file:
+        load_dotenv(env_file, override=False)
+
+    config_data = _load_toml_config(config_file)
+    memory = _section(config_data, "memory")
+    deepseek = _section(config_data, "deepseek")
+
+    db_path = Path(
+        _env_or_config(
+            "ALPHA_DB_PATH",
+            config_data,
+            "runtime",
+            "db_path",
+            "~/.alpha-agent/alpha.db",
+        )
+        or "~/.alpha-agent/alpha.db"
+    ).expanduser()
+    log_dir = Path(
+        _env_or_config("ALPHA_LOG_DIR", config_data, "runtime", "log_dir", "~/.alpha-agent/logs")
+        or "~/.alpha-agent/logs"
+    ).expanduser()
+    gateway_status_path = Path(
+        _env_or_config(
+            "ALPHA_GATEWAY_STATUS_PATH",
+            config_data,
+            "runtime",
+            "gateway_status_path",
+            "~/.alpha-agent/gateway-status.json",
+        )
+        or "~/.alpha-agent/gateway-status.json"
+    ).expanduser()
+    return AlphaConfig(
+        db_path=db_path,
+        log_dir=log_dir,
+        gateway_status_path=gateway_status_path,
+        llm_provider=(
+            _env_or_config("ALPHA_LLM_PROVIDER", config_data, "llm", "provider", "mock") or "mock"
+        ).strip().lower(),
+        llm_model=_env_or_config("ALPHA_LLM_MODEL", config_data, "llm", "model", "") or "",
+        compatible_base_url=_env_or_config(
+            "ALPHA_COMPATIBLE_BASE_URL",
+            config_data,
+            "compatible",
+            "base_url",
+        ),
+        compatible_api_key=_env_or_config(
+            "ALPHA_COMPATIBLE_API_KEY",
+            config_data,
+            "compatible",
+            "api_key",
+        ),
+        working_memory_limit=_int_env(
+            "ALPHA_WORKING_MEMORY_LIMIT",
+            _int_value(memory.get("working_memory_limit"), 12),
+        ),
+        retrieval_limit=_int_env(
+            "ALPHA_RETRIEVAL_LIMIT",
+            _int_value(memory.get("retrieval_limit"), 8),
+        ),
+        deepseek_api_key=_env_or_config(
+            "ALPHA_DEEPSEEK_API_KEY",
+            config_data,
+            "deepseek",
+            "api_key",
+        ),
+        deepseek_reasoning_enabled=(
+            _bool_env(
+                "ALPHA_DEEPSEEK_REASONING_ENABLED",
+                _bool_value(deepseek.get("reasoning_enabled"), True),
+            )
+        ),
+        deepseek_reasoning_effort=_env_or_config(
+            "ALPHA_DEEPSEEK_REASONING_EFFORT",
+            config_data,
+            "deepseek",
+            "reasoning_effort",
+        ),
+        codex_access_token=(
+            os.getenv("ALPHA_CODEX_ACCESS_TOKEN")
+            or os.getenv("ALPHA_CODEX_API_KEY")
+            or _string_setting(config_data, "codex", "access_token")
+        ),
+    )

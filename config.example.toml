@@ -1,0 +1,28 @@
+# Alpha Agent local configuration.
+# Copy to ~/.alpha-agent/config.toml or run `uv run alpha config init`.
+
+[runtime]
+db_path = "~/.alpha-agent/alpha.db"
+log_dir = "~/.alpha-agent/logs"
+gateway_status_path = "~/.alpha-agent/gateway-status.json"
+
+[llm]
+provider = "mock"
+# Leave empty to use the selected provider's default model.
+model = ""
+
+[compatible]
+base_url = "https://api.openai.com/v1"
+api_key = ""
+
+[memory]
+working_memory_limit = 12
+retrieval_limit = 8
+
+[deepseek]
+api_key = ""
+reasoning_enabled = true
+reasoning_effort = ""
+
+[codex]
+access_token = ""

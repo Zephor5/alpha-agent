@@ -1,0 +1,33 @@
+"""Minimal tool interface reserved for future tool execution."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A requested tool invocation."""
+
+    name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """Result returned by a tool."""
+
+    name: str
+    content: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class Tool(Protocol):
+    """Protocol for future tool implementations."""
+
+    name: str
+    description: str
+
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
+        """Run the tool with validated arguments."""

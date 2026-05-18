@@ -1,0 +1,28 @@
+"""Deterministic mock LLM provider."""
+
+from __future__ import annotations
+
+from alpha_agent.llm.base import ChatMessage, LLMResponse
+
+
+class MockLLMProvider:
+    """Local deterministic provider for tests and development."""
+
+    name = "mock"
+
+    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
+        user_message = messages[-1]["content"] if messages else ""
+        has_memory = any(
+            section in user_message
+            for section in ("Working Memory", "Relevant User Facts", "Relevant Episodes")
+        )
+        suffix = " I found memory context for this turn." if has_memory else ""
+        current_message = self._extract_current_message(user_message)
+        content = f"Mock response: I heard you say: {current_message}.{suffix}"
+        return LLMResponse(content=content, model="mock", provider=self.name, metadata={})
+
+    def _extract_current_message(self, prompt_content: str) -> str:
+        marker = "## Current User Message"
+        if marker not in prompt_content:
+            return prompt_content.strip()[:200]
+        return prompt_content.split(marker, 1)[1].strip().strip('"')[:200]
