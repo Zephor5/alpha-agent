@@ -230,12 +230,6 @@ class AlphaAgent:
 
             self._check_canceled(session_id, "before_user_event")
             user_event = self._write_user_event(session_id, user_message)
-            self._update_working_memory(
-                session_id=session_id,
-                content=f"User: {user_message}",
-                source_event_id=user_event.id,
-                priority=0.6,
-            )
 
             requested_tool_calls = self.tool_executor.normalize_calls(tool_calls)
             requested_tool_results = self._execute_tool_calls(
@@ -340,9 +334,13 @@ class AlphaAgent:
             assistant_event = self._write_assistant_event(session_id, llm_response)
             self._update_working_memory(
                 session_id=session_id,
-                content=f"Assistant: {llm_response.content}",
+                content=(
+                    "Recent turn:\n"
+                    f"User: {user_message}\n"
+                    f"Assistant: {llm_response.content}"
+                ),
                 source_event_id=assistant_event.id,
-                priority=0.45,
+                priority=0.6,
             )
 
             extraction_source_event_ids = [

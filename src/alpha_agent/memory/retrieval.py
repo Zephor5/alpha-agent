@@ -83,7 +83,11 @@ class MemoryRetriever:
     def _rank_procedural(self, query: str, limit: int) -> list[RankedMemory]:
         searched = self.store.search_procedural(query, limit=limit * 3)
         recent = self.store.list_procedural_memories(limit=limit * 3)
-        candidates = self._dedupe([*searched, *recent])
+        candidates = [
+            memory
+            for memory in self._dedupe([*searched, *recent])
+            if self._procedural_text_relevance(query, memory) > 0
+        ]
         ranked = [
             RankedMemory(
                 memory=m,
@@ -94,6 +98,12 @@ class MemoryRetriever:
         ]
         ranked.sort(key=lambda item: item.score, reverse=True)
         return ranked[:limit]
+
+    def _procedural_text_relevance(self, query: str, memory: ProceduralMemory) -> float:
+        return keyword_score(
+            query,
+            " ".join([memory.name, memory.description, memory.trigger]),
+        )
 
     def _score(
         self,

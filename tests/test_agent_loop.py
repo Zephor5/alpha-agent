@@ -97,6 +97,48 @@ def test_agent_honors_configured_retrieval_limit(tmp_path: Path) -> None:
     assert retriever.seen_limit == 2
 
 
+def test_agent_does_not_inject_current_user_message_as_retrieved_context(
+    tmp_path: Path,
+) -> None:
+    class RecordingProvider:
+        name = "recording-provider"
+
+        def __init__(self) -> None:
+            self.requests: list[list[ChatMessage]] = []
+
+        def complete(self, messages: list[ChatMessage], **kwargs: Any) -> LLMResponse:
+            self.requests.append(messages)
+            return LLMResponse(
+                content="recorded response",
+                model="mock",
+                provider=self.name,
+                metadata={},
+                finish_reason="stop",
+            )
+
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    working = WorkingMemoryManager(store)
+    provider = RecordingProvider()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        working_memory=working,
+        retriever=MemoryRetriever(store, working),
+    )
+
+    agent.respond("first question", session_id="s1")
+    agent.respond("second question", session_id="s1")
+
+    second_request = provider.requests[-1]
+    assert second_request[-1] == {"role": "user", "content": "second question"}
+    prior_context = "\n\n".join(
+        str(message.get("content", "")) for message in second_request[:-1]
+    )
+    assert "User: second question" not in prior_context
+    assert "## Current User Message" not in prior_context
+
+
 def test_agent_logs_raw_llm_request_and_response(tmp_path: Path) -> None:
     class MetadataProvider:
         name = "metadata-provider"

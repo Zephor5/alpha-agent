@@ -194,6 +194,11 @@ P1 Agent Loop implementation notes:
 - `alpha debug prompt MESSAGE` remains supported. `alpha debug prompt
   --session ...` can include gateway source fields and prints the built prompt,
   retrieved memory ids, and retrieval scores from `memory_access_log`.
+- Prompt construction separates stable system identity, optional reference-only
+  retrieved context, and the current user message as a real chat message. The
+  current turn is not written into working memory before retrieval, and
+  procedural memories require explicit textual relevance before their procedure
+  bodies can enter the prompt.
 - `alpha memory review MESSAGE --session ...` previews extracted candidates
   without writing semantic/episodic/procedural memory. CLI flags support
   approve-all, reject-all, per-candidate approve/reject, and selected candidate

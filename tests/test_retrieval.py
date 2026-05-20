@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from alpha_agent.memory.episodic import EpisodicMemoryManager
+from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
@@ -45,3 +46,16 @@ def test_retrieval_ranking_without_vectors(tmp_path: Path) -> None:
 
     assert context.semantic_memories[0].object == "sqlite memory"
     assert context.episodic_memories[0].summary.startswith("Important decision")
+
+
+def test_procedural_retrieval_requires_textual_relevance(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    ProceduralMemoryManager(store).load_builtin_skills()
+    retriever = MemoryRetriever(store, WorkingMemoryManager(store))
+
+    unrelated = retriever.retrieve_context("What tools do you have?", "session-1", limit=3)
+    matched = retriever.retrieve_context("debug this failing command", "session-1", limit=3)
+
+    assert unrelated.procedural_memories == []
+    assert [memory.name for memory in matched.procedural_memories] == ["Debug Loop"]
