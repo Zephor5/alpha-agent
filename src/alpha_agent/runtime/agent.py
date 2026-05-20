@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -32,6 +34,7 @@ from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, To
 from alpha_agent.tools.base import ToolCall
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
+from alpha_agent.utils.time import utc_now_iso
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,8 @@ class AlphaAgent:
         llm_retry_sleep_seconds: float = 0.0,
         max_tool_iterations: int = 8,
         max_llm_rounds: int | None = None,
+        llm_debug_logging: bool = False,
+        llm_trace_log_path: str | Path | None = None,
     ):
         self.store = store
         self.llm_provider = llm_provider
@@ -175,6 +180,10 @@ class AlphaAgent:
             llm_provider,
             max_retries=max_llm_retries,
             retry_sleep_seconds=llm_retry_sleep_seconds,
+        )
+        self.llm_debug_logging = llm_debug_logging
+        self.llm_trace_log_path = (
+            Path(llm_trace_log_path).expanduser() if llm_trace_log_path else None
         )
         self._canceled_sessions: set[str] = set()
 
@@ -469,45 +478,118 @@ class AlphaAgent:
         tool_choice: LLMToolChoice | None,
     ) -> RetriedLLMCompletion:
         self._check_canceled(session_id, "before_llm")
+        llm_call_id = new_id("llm")
+        request_log = (
+            _llm_request_log(messages=messages, tools=tools, tool_choice=tool_choice)
+            if self.llm_debug_logging
+            else None
+        )
+        started_metadata: dict[str, Any] = {
+            "llm_call_id": llm_call_id,
+            "provider": self.llm_provider.name,
+            "round": round_name,
+            "prompt_token_estimate": prompt_token_estimate,
+            "max_retries": self.llm_completion.max_retries,
+            "tool_count": len(tools) if tools is not None else 0,
+            "tool_choice": tool_choice,
+        }
+        if request_log is not None:
+            started_metadata["request"] = request_log
         started_event = self.store.insert_event(
             create_runtime_event(
                 session_id=session_id,
                 event_type="llm.started",
                 content="LLM call started.",
-                metadata={
-                    "provider": self.llm_provider.name,
-                    "round": round_name,
-                    "prompt_token_estimate": prompt_token_estimate,
-                    "max_retries": self.llm_completion.max_retries,
-                    "tool_count": len(tools) if tools is not None else 0,
-                    "tool_choice": tool_choice,
-                },
+                metadata=started_metadata,
             )
         )
-        completion = self.llm_completion.complete(
-            list(messages),
-            tools=tools,
-            tool_choice=tool_choice,
-        )
+        if request_log is not None:
+            self._append_llm_trace(
+                event="llm.request",
+                metadata={
+                    "llm_call_id": llm_call_id,
+                    "session_id": session_id,
+                    "round": round_name,
+                    "provider": self.llm_provider.name,
+                    "prompt_token_estimate": prompt_token_estimate,
+                    "request": request_log,
+                },
+            )
+        try:
+            completion = self.llm_completion.complete(
+                list(messages),
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+        except LLMCallError as exc:
+            if request_log is not None:
+                self._append_llm_trace(
+                    event="llm.error",
+                    metadata={
+                        "llm_call_id": llm_call_id,
+                        "session_id": session_id,
+                        "round": round_name,
+                        "provider": self.llm_provider.name,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "retry_count": exc.retry_count,
+                        "request": request_log,
+                    },
+                )
+            raise
         self._check_canceled(session_id, "after_llm")
+        response_log = (
+            _llm_response_log(completion.response) if self.llm_debug_logging else None
+        )
+        response_metadata = _llm_metadata_for_event(
+            completion.response.metadata,
+            include_raw_payloads=self.llm_debug_logging,
+        )
+        completed_metadata: dict[str, Any] = {
+            "llm_call_id": llm_call_id,
+            "provider": completion.response.provider,
+            "model": completion.response.model,
+            "round": round_name,
+            "retry_count": completion.retry_count,
+            "started_event_id": started_event.id,
+            "finish_reason": completion.response.finish_reason,
+            "tool_call_count": len(completion.response.tool_calls),
+            "response_metadata": response_metadata,
+        }
+        if response_log is not None:
+            completed_metadata["response"] = response_log
         self.store.insert_event(
             create_runtime_event(
                 session_id=session_id,
                 event_type="llm.completed",
                 content="LLM call completed.",
-                metadata={
-                    "provider": completion.response.provider,
-                    "model": completion.response.model,
-                    "round": round_name,
-                    "retry_count": completion.retry_count,
-                    "started_event_id": started_event.id,
-                    "finish_reason": completion.response.finish_reason,
-                    "tool_call_count": len(completion.response.tool_calls),
-                    "response_metadata": completion.response.metadata,
-                },
+                metadata=completed_metadata,
             )
         )
+        if response_log is not None:
+            self._append_llm_trace(
+                event="llm.response",
+                metadata={
+                    "llm_call_id": llm_call_id,
+                    "retry_count": completion.retry_count,
+                    "response": response_log,
+                },
+            )
         return completion
+
+    def _append_llm_trace(self, *, event: str, metadata: dict[str, Any]) -> None:
+        if not self.llm_debug_logging or self.llm_trace_log_path is None:
+            return
+        self.llm_trace_log_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": utc_now_iso(),
+            "level": "debug",
+            "event": event,
+            "metadata": _json_safe(metadata),
+        }
+        with self.llm_trace_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
 
     def _write_assistant_event(self, session_id: str, llm_response: LLMResponse) -> Event:
         return self.store.insert_event(
@@ -518,7 +600,10 @@ class AlphaAgent:
                 metadata={
                     "provider": llm_response.provider,
                     "model": llm_response.model,
-                    "provider_metadata": llm_response.metadata,
+                    "provider_metadata": _llm_metadata_for_event(
+                        llm_response.metadata,
+                        include_raw_payloads=self.llm_debug_logging,
+                    ),
                 },
             )
         )
@@ -853,3 +938,61 @@ class AlphaAgent:
             "semantic": [item.id for item in context.semantic_memories],
             "procedural": [item.id for item in context.procedural_memories],
         }
+
+
+def _llm_request_log(
+    *,
+    messages: list[ChatMessage],
+    tools: Sequence[LLMToolDefinitionInput] | None,
+    tool_choice: LLMToolChoice | None,
+) -> dict[str, Any]:
+    return {
+        "messages": _json_safe(messages),
+        "tools": _json_safe(list(tools)) if tools is not None else None,
+        "tool_choice": _json_safe(tool_choice),
+    }
+
+
+def _llm_response_log(response: LLMResponse) -> dict[str, Any]:
+    return {
+        "content": response.content,
+        "model": response.model,
+        "provider": response.provider,
+        "metadata": _json_safe(
+            {
+                key: value
+                for key, value in response.metadata.items()
+                if key != "request_payload"
+            }
+        ),
+        "tool_calls": [tool_call.to_dict() for tool_call in response.tool_calls],
+        "finish_reason": response.finish_reason,
+    }
+
+
+def _llm_metadata_for_event(
+    metadata: dict[str, Any],
+    *,
+    include_raw_payloads: bool,
+) -> dict[str, Any]:
+    if include_raw_payloads:
+        return _json_safe(metadata)
+    return _json_safe(
+        {
+            key: value
+            for key, value in metadata.items()
+            if key not in {"request_payload", "response_payload"}
+        }
+    )
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        return _json_safe(asdict(value))
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_json_safe(item) for item in value]
+    return str(value)

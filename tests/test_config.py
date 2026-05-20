@@ -21,6 +21,7 @@ gateway_status_path = "~/custom-alpha/status.json"
 [llm]
 provider = "deepseek"
 model = "deepseek-v4-pro"
+debug_logging = true
 
 [compatible]
 base_url = "https://compatible.example/v1"
@@ -52,6 +53,7 @@ reasoning_effort = "high"
     assert config.compatible_api_key == "compatible-key"
     assert config.deepseek_reasoning_enabled is False
     assert config.deepseek_reasoning_effort == "high"
+    assert config.llm_debug_logging is True
 
 
 def test_environment_overrides_config_file(
@@ -74,6 +76,7 @@ api_key = "compatible-file-key"
         encoding="utf-8",
     )
     monkeypatch.setenv("ALPHA_LLM_PROVIDER", "mock")
+    monkeypatch.setenv("ALPHA_LLM_DEBUG_LOGGING", "true")
     monkeypatch.setenv("ALPHA_DEEPSEEK_API_KEY", "from-env")
     monkeypatch.setenv("ALPHA_COMPATIBLE_BASE_URL", "from-env")
     monkeypatch.setenv("ALPHA_COMPATIBLE_API_KEY", "compatible-env-key")
@@ -81,6 +84,7 @@ api_key = "compatible-file-key"
     config = load_config(env_file=None, config_file=config_path)
 
     assert config.llm_provider == "mock"
+    assert config.llm_debug_logging is True
     assert config.deepseek_api_key == "from-env"
     assert config.compatible_base_url == "from-env"
     assert config.compatible_api_key == "compatible-env-key"
@@ -140,15 +144,18 @@ def test_config_cli_set_and_get(
     runner = CliRunner()
 
     set_provider = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
+    set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
     set_limit = runner.invoke(app, ["config", "set", "memory.retrieval_limit", "5"])
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
 
     assert set_provider.exit_code == 0
+    assert set_debug.exit_code == 0
     assert set_limit.exit_code == 0
     assert get_provider.exit_code == 0
     assert "codex" in get_provider.output
     config = load_config(env_file=None, config_file=config_path)
     assert config.llm_provider == "codex"
+    assert config.llm_debug_logging is True
     assert config.retrieval_limit == 5
 
 

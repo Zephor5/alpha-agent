@@ -93,6 +93,13 @@ Print the prompt without calling the LLM:
 uv run alpha debug prompt "what do you remember about my preferences?"
 ```
 
+Inspect raw LLM request/response traces from CLI runs:
+
+```bash
+uv run alpha config set llm.debug_logging true
+tail -f ~/.alpha-agent/logs/llm.jsonl
+```
+
 Inspect the gateway operational shell:
 
 ```bash
@@ -112,9 +119,9 @@ Run `uv run alpha config init` to create it. You can also point to another file
 with `ALPHA_CONFIG_PATH`.
 
 Use `alpha config set <section.key> <value>` for supported keys such as
-`llm.provider`, `llm.model`, `deepseek.api_key`, `codex.access_token`, and
-`memory.retrieval_limit`. Secret values are masked by `alpha config get` unless
-you pass `--reveal-secret`.
+`llm.provider`, `llm.model`, `llm.debug_logging`, `deepseek.api_key`,
+`codex.access_token`, and `memory.retrieval_limit`. Secret values are masked by
+`alpha config get` unless you pass `--reveal-secret`.
 
 Environment variables and `.env` still work as overrides for one-off runs,
 deployment, and secrets. Precedence is:
@@ -154,6 +161,8 @@ Useful environment overrides:
   Defaults to `mock`.
 - `ALPHA_LLM_MODEL`: Optional model override for the selected provider. Empty
   uses the provider default.
+- `ALPHA_LLM_DEBUG_LOGGING`: Set to `true` to write full LLM request/response
+  traces. Defaults to `false`.
 - `ALPHA_COMPATIBLE_BASE_URL`: Base URL for a chat completions compatible API.
 - `ALPHA_COMPATIBLE_API_KEY`: API key for the compatible provider.
 - `ALPHA_DEEPSEEK_API_KEY`: DeepSeek API key when `ALPHA_LLM_PROVIDER=deepseek`.

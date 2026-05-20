@@ -10,6 +10,8 @@ gateway_status_path = "~/.alpha-agent/gateway-status.json"
 provider = "mock"
 # Leave empty to use the selected provider's default model.
 model = ""
+# Writes full LLM request/response payloads to debug logs when true.
+debug_logging = false
 
 [compatible]
 base_url = "https://api.openai.com/v1"

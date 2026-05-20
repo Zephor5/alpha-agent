@@ -297,6 +297,10 @@ def test_openai_compatible_provider_parses_tool_calls(monkeypatch: pytest.Monkey
     assert response.metadata["raw_tool_calls"] == raw_tool_calls
     assert response.metadata["normalized_tool_calls"][0]["raw_arguments"] == '{"query":"alpha"}'
     assert response.metadata["tool_calls"][0]["arguments"] == {"query": "alpha"}
+    assert response.metadata["request_payload"]["messages"] == [
+        {"role": "user", "content": "ping"}
+    ]
+    assert response.metadata["response_payload"]["id"] == "chatcmpl-compat"
 
 
 def test_openai_compatible_provider_preserves_tool_messages_in_request(
@@ -387,6 +391,8 @@ def test_codex_provider_uses_responses_payload(monkeypatch: pytest.MonkeyPatch) 
 
     assert response.content == "codex pong"
     assert response.provider == "codex"
+    assert response.metadata["request_payload"] == captured["json"]
+    assert response.metadata["response_payload"] == {"id": "resp-1", "output_text": "codex pong"}
     assert captured["url"] == "https://chatgpt.com/backend-api/codex/responses"
     assert captured["headers"]["Authorization"] == "Bearer codex-token"
     assert captured["json"]["model"] == "gpt-5.3-codex"

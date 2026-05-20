@@ -64,7 +64,11 @@ class CodexResponsesProvider:
             content=_extract_response_text(payload),
             model=str(payload.get("model", self.model)),
             provider=self.name,
-            metadata={"response_id": payload.get("id")},
+            metadata={
+                "response_id": payload.get("id"),
+                "request_payload": body,
+                "response_payload": payload,
+            },
         )
 
 

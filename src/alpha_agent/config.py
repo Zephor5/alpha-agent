@@ -21,6 +21,7 @@ gateway_status_path = "~/.alpha-agent/gateway-status.json"
 [llm]
 provider = "mock"
 model = ""
+debug_logging = false
 
 [compatible]
 base_url = "https://api.openai.com/v1"
@@ -45,6 +46,7 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "runtime.gateway_status_path": str,
     "llm.provider": str,
     "llm.model": str,
+    "llm.debug_logging": bool,
     "compatible.base_url": str,
     "compatible.api_key": str,
     "memory.working_memory_limit": int,
@@ -90,6 +92,7 @@ class AlphaConfig:
     gateway_status_path: Path
     llm_provider: str = "mock"
     llm_model: str = ""
+    llm_debug_logging: bool = False
     compatible_base_url: str | None = None
     compatible_api_key: str | None = None
     working_memory_limit: int = 12
@@ -349,6 +352,10 @@ def load_config(
             _env_or_config("ALPHA_LLM_PROVIDER", config_data, "llm", "provider", "mock") or "mock"
         ).strip().lower(),
         llm_model=_env_or_config("ALPHA_LLM_MODEL", config_data, "llm", "model", "") or "",
+        llm_debug_logging=_bool_env(
+            "ALPHA_LLM_DEBUG_LOGGING",
+            _bool_value(_section(config_data, "llm").get("debug_logging"), False),
+        ),
         compatible_base_url=_env_or_config(
             "ALPHA_COMPATIBLE_BASE_URL",
             config_data,

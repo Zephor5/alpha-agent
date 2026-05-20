@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -70,10 +71,18 @@ class DeepSeekProvider:
         )
         response.raise_for_status()
         payload: dict[str, Any] = response.json()
-        return openai_compatible_response(
+        normalized = openai_compatible_response(
             payload=payload,
             fallback_model=self.model,
             provider=self.name,
+        )
+        return replace(
+            normalized,
+            metadata={
+                **normalized.metadata,
+                "request_payload": body,
+                "response_payload": payload,
+            },
         )
 
 

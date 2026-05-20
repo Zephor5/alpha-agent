@@ -107,6 +107,8 @@ def _build_agent(config: AlphaConfig) -> AlphaAgent:
         working_memory=working,
         retriever=retriever,
         retrieval_limit=config.retrieval_limit,
+        llm_debug_logging=config.llm_debug_logging,
+        llm_trace_log_path=config.log_dir / "llm.jsonl",
     )
 
 
@@ -351,6 +353,7 @@ def config_show() -> None:
     if config.llm_provider in {"openai-compatible", "openai", "compatible"}:
         table.add_row("compatible_base_url", config.compatible_base_url or "")
     table.add_row("llm_model", _display_model(config))
+    table.add_row("llm_debug_logging", str(config.llm_debug_logging).lower())
     table.add_row("working_memory_limit", str(config.working_memory_limit))
     table.add_row("retrieval_limit", str(config.retrieval_limit))
     console.print(table)

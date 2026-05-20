@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +95,95 @@ def test_agent_honors_configured_retrieval_limit(tmp_path: Path) -> None:
     agent.respond("hello", session_id="s1")
 
     assert retriever.seen_limit == 2
+
+
+def test_agent_logs_raw_llm_request_and_response(tmp_path: Path) -> None:
+    class MetadataProvider:
+        name = "metadata-provider"
+
+        def complete(self, messages: list[ChatMessage], **kwargs: Any) -> LLMResponse:
+            return LLMResponse(
+                content="logged response",
+                model="mock",
+                provider=self.name,
+                metadata={
+                    "request_payload": {"messages": messages},
+                    "response_payload": {"id": "resp-1"},
+                },
+                finish_reason="stop",
+            )
+
+    trace_path = tmp_path / "logs" / "llm.jsonl"
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    working = WorkingMemoryManager(store)
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MetadataProvider(),
+        working_memory=working,
+        retriever=MemoryRetriever(store, working),
+        llm_debug_logging=True,
+        llm_trace_log_path=trace_path,
+    )
+
+    agent.respond("hello", session_id="s1")
+
+    events = store.list_events(session_id="s1", limit=20)
+    started = next(event for event in events if event.metadata.get("event_type") == "llm.started")
+    completed = next(
+        event for event in events if event.metadata.get("event_type") == "llm.completed"
+    )
+    assert started.metadata["request"]["messages"][0]["role"] == "system"
+    assert started.metadata["request"]["tool_choice"] is None
+    assert completed.metadata["response"]["content"] == "logged response"
+    assert completed.metadata["response"]["metadata"] == {"response_payload": {"id": "resp-1"}}
+    assert completed.metadata["response"]["tool_calls"] == []
+
+    entries = [
+        json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [entry["event"] for entry in entries] == ["llm.request", "llm.response"]
+    assert entries[0]["metadata"]["request"] == started.metadata["request"]
+    assert entries[1]["metadata"]["response"] == completed.metadata["response"]
+    assert set(entries[1]["metadata"]) == {"llm_call_id", "retry_count", "response"}
+    assert "request_payload" not in entries[1]["metadata"]["response"]["metadata"]
+
+
+def test_agent_omits_raw_llm_logs_unless_debug_logging_is_enabled(tmp_path: Path) -> None:
+    class MetadataProvider:
+        name = "metadata-provider"
+
+        def complete(self, messages: list[ChatMessage], **kwargs: Any) -> LLMResponse:
+            return LLMResponse(
+                content="quiet response",
+                model="mock",
+                provider=self.name,
+                metadata={"raw_payload": {"id": "resp-1"}},
+                finish_reason="stop",
+            )
+
+    trace_path = tmp_path / "logs" / "llm.jsonl"
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    working = WorkingMemoryManager(store)
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MetadataProvider(),
+        working_memory=working,
+        retriever=MemoryRetriever(store, working),
+        llm_trace_log_path=trace_path,
+    )
+
+    agent.respond("hello", session_id="s1")
+
+    events = store.list_events(session_id="s1", limit=20)
+    started = next(event for event in events if event.metadata.get("event_type") == "llm.started")
+    completed = next(
+        event for event in events if event.metadata.get("event_type") == "llm.completed"
+    )
+    assert "request" not in started.metadata
+    assert "response" not in completed.metadata
+    assert not trace_path.exists()
 
 
 def test_tool_registry_exports_provider_neutral_llm_tool_definitions() -> None:
