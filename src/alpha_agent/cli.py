@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+import json
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -22,6 +23,7 @@ from alpha_agent.gateway.config import (
     gateway_runtime_config,
 )
 from alpha_agent.gateway.logging import append_gateway_log
+from alpha_agent.gateway.models import ConversationSource
 from alpha_agent.gateway.status import (
     GatewayStatus,
     gateway_tables_available,
@@ -42,6 +44,7 @@ from alpha_agent.llm.openai_compatible import (
 from alpha_agent.memory.consolidation import ConsolidationService
 from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
+from alpha_agent.memory.review import MemoryReviewService, edit_candidate
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.memory.working import WorkingMemoryManager
 from alpha_agent.runtime.agent import AlphaAgent
@@ -129,6 +132,174 @@ def _render_gateway_status(status: GatewayStatus, *, status_path: str) -> None:
     typer.echo(f"DB path: {status.db_path}")
     typer.echo(f"Log dir: {status.log_dir}")
     typer.echo(f"Status path: {status_path}")
+
+
+def _render_candidates(candidates: list[Any]) -> None:
+    table = Table(title="Memory Review Candidates")
+    table.add_column("Candidate", justify="right")
+    table.add_column("Type")
+    table.add_column("Content")
+    table.add_column("Subject")
+    table.add_column("Predicate")
+    table.add_column("Object")
+    table.add_column("Salience", justify="right")
+    table.add_column("Confidence", justify="right")
+    for index, candidate in enumerate(candidates, start=1):
+        table.add_row(
+            str(index),
+            candidate.type,
+            candidate.content,
+            candidate.subject or "",
+            candidate.predicate or "",
+            candidate.object or "",
+            f"{candidate.salience:.2f}",
+            f"{candidate.confidence:.2f}",
+        )
+    console.print(table)
+    for index, candidate in enumerate(candidates, start=1):
+        console.print(
+            "Candidate "
+            f"{index}: type={candidate.type} content={candidate.content} "
+            f"subject={candidate.subject or ''} predicate={candidate.predicate or ''} "
+            f"object={candidate.object or ''} salience={candidate.salience:.2f} "
+            f"confidence={candidate.confidence:.2f}"
+        )
+
+
+def _memory_access_rows(
+    store: MemoryStore,
+    *,
+    query: str,
+    retrieved_ids: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    ids_by_type = {
+        memory_type: ids
+        for memory_type, ids in retrieved_ids.items()
+        if memory_type != "working" and ids
+    }
+    if not ids_by_type:
+        return []
+    rows: list[dict[str, Any]] = []
+    with store.connect() as conn:
+        for memory_type, memory_ids in ids_by_type.items():
+            placeholders = ",".join("?" for _ in memory_ids)
+            query_rows = conn.execute(
+                f"""
+                SELECT memory_id, memory_type, score, accessed_at
+                FROM memory_access_log
+                WHERE query = ?
+                  AND memory_type = ?
+                  AND memory_id IN ({placeholders})
+                ORDER BY accessed_at DESC
+                """,
+                (query, memory_type, *memory_ids),
+            ).fetchall()
+            seen: set[str] = set()
+            for row in query_rows:
+                memory_id = str(row["memory_id"])
+                if memory_id in seen:
+                    continue
+                seen.add(memory_id)
+                access_count = _memory_access_count(conn, str(row["memory_type"]), memory_id)
+                rows.append(
+                    {
+                        "memory_id": memory_id,
+                        "memory_type": str(row["memory_type"]),
+                        "retrieval_score": float(row["score"]),
+                        "access_count": access_count,
+                        "accessed_at": str(row["accessed_at"]),
+                    }
+                )
+    order = {
+        (memory_type, memory_id): index
+        for memory_type, ids in ids_by_type.items()
+        for index, memory_id in enumerate(ids)
+    }
+    rows.sort(key=lambda row: order.get((row["memory_type"], row["memory_id"]), 0))
+    return rows
+
+
+def _memory_access_count(conn: Any, memory_type: str, memory_id: str) -> int:
+    if memory_type == "episodic":
+        row = conn.execute(
+            "SELECT access_count FROM episodic_memories WHERE id = ?",
+            (memory_id,),
+        ).fetchone()
+        return int(row["access_count"]) if row else 0
+    return 0
+
+
+def _source_from_gateway_session(store: MemoryStore, session_id: str) -> ConversationSource | None:
+    with store.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM gateway_session_mappings
+            WHERE session_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        memory_scope = json.loads(row["memory_scope"] or "{}")
+    except json.JSONDecodeError:
+        memory_scope = {}
+    return ConversationSource(
+        platform=row["platform"],
+        chat_id=row["chat_id"],
+        chat_type=row["chat_type"],
+        user_id=row["user_id"],
+        user_name=memory_scope.get("user_name"),
+        thread_id=row["thread_id"],
+        metadata=memory_scope.get("external_metadata", {}),
+    )
+
+
+def _merge_source_context(
+    base: ConversationSource | None,
+    *,
+    session_id: str,
+    platform: str | None,
+    chat_id: str | None,
+    chat_type: str | None,
+    user_id: str | None,
+    user_name: str | None,
+    thread_id: str | None,
+    message_id: str | None,
+) -> ConversationSource | None:
+    if base is None and not any(
+        value is not None
+        for value in (platform, chat_id, chat_type, user_id, user_name, thread_id, message_id)
+    ):
+        return None
+    return ConversationSource(
+        platform=platform or (base.platform if base else "debug"),
+        chat_id=chat_id or (base.chat_id if base else session_id),
+        chat_type=chat_type or (base.chat_type if base else "dm"),
+        user_id=user_id or (base.user_id if base else "debug-user"),
+        user_name=user_name if user_name is not None else (base.user_name if base else None),
+        thread_id=thread_id if thread_id is not None else (base.thread_id if base else None),
+        message_id=message_id,
+        metadata=dict(base.metadata) if base else {},
+    )
+
+
+def _render_source_context(source: ConversationSource | None) -> None:
+    if source is None:
+        return
+    table = Table(title="Gateway Source Context")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("platform", source.platform)
+    table.add_row("chat_id", source.chat_id)
+    table.add_row("chat_type", str(source.chat_type))
+    table.add_row("user_id", source.user_id)
+    table.add_row("user_name", source.user_name or "")
+    table.add_row("thread_id", source.thread_id or "")
+    table.add_row("message_id", source.message_id or "")
+    console.print(table)
 
 
 @app.command("init")
@@ -439,6 +610,115 @@ def consolidate() -> None:
     console.print(report.render())
 
 
+@memory_app.command("review")
+def memory_review(
+    message: Annotated[str, typer.Argument(help="Message to extract memory candidates from.")],
+    session: Annotated[
+        str,
+        typer.Option("--session", "-s", help="Session id for approved review source events."),
+    ] = "memory-review",
+    approve_all: Annotated[
+        bool,
+        typer.Option("--approve-all", help="Store all extracted candidates."),
+    ] = False,
+    approve: Annotated[
+        list[int] | None,
+        typer.Option("--approve", help="1-based candidate index to store; can be repeated."),
+    ] = None,
+    reject_all: Annotated[
+        bool,
+        typer.Option("--reject-all", help="Reject all extracted candidates without storing."),
+    ] = False,
+    reject: Annotated[
+        list[int] | None,
+        typer.Option("--reject", help="1-based candidate index to skip; can be repeated."),
+    ] = None,
+    candidate_index: Annotated[
+        int,
+        typer.Option("--candidate", help="1-based candidate index to edit and approve."),
+    ] = 1,
+    edit_content: Annotated[
+        str | None,
+        typer.Option("--edit-content", help="Replacement content for the edited candidate."),
+    ] = None,
+    edit_subject: Annotated[
+        str | None,
+        typer.Option("--edit-subject", help="Replacement semantic subject."),
+    ] = None,
+    edit_predicate: Annotated[
+        str | None,
+        typer.Option("--edit-predicate", help="Replacement semantic predicate."),
+    ] = None,
+    edit_object: Annotated[
+        str | None,
+        typer.Option("--edit-object", help="Replacement semantic object."),
+    ] = None,
+) -> None:
+    """Preview extracted memory candidates and store only explicit approvals."""
+
+    edit_requested = any(
+        value is not None for value in (edit_content, edit_subject, edit_predicate, edit_object)
+    )
+    approve_indices = set(approve or [])
+    reject_indices = set(reject or [])
+    if reject_all and (approve_all or approve_indices or reject_indices or edit_requested):
+        raise typer.BadParameter("--reject-all cannot be combined with other review actions.")
+    if approve_all and approve_indices:
+        raise typer.BadParameter("Use either --approve-all or --approve, not both.")
+    if approve_indices & reject_indices:
+        raise typer.BadParameter("A candidate cannot be both approved and rejected.")
+
+    config = load_config()
+    service = MemoryReviewService(_store(config))
+    candidates = service.preview(message)
+    _render_candidates(candidates)
+    if not candidates:
+        console.print("No memory candidates extracted.")
+        return
+    if reject_all:
+        console.print(f"Rejected {len(candidates)} candidate(s).")
+        return
+
+    valid_indices = set(range(1, len(candidates) + 1))
+    requested_indices = approve_indices | reject_indices
+    if requested_indices - valid_indices:
+        raise typer.BadParameter("Candidate indexes must refer to extracted candidates.")
+
+    reviewed_candidates = list(candidates)
+    if edit_requested:
+        if candidate_index < 1 or candidate_index > len(candidates):
+            raise typer.BadParameter("--candidate must refer to an extracted candidate.")
+        reviewed_candidates[candidate_index - 1] = edit_candidate(
+            candidates[candidate_index - 1],
+            content=edit_content,
+            subject=edit_subject,
+            predicate=edit_predicate,
+            object_value=edit_object,
+        )
+        console.print(f"Edited candidate {candidate_index}.")
+        if not approve_all and not approve_indices:
+            approve_indices.add(candidate_index)
+
+    if approve_all:
+        selected_indices = valid_indices - reject_indices
+    else:
+        selected_indices = approve_indices - reject_indices
+    if reject_indices:
+        console.print(f"Rejected {len(reject_indices)} candidate(s).")
+    if selected_indices:
+        selected = [
+            candidate
+            for index, candidate in enumerate(reviewed_candidates, start=1)
+            if index in selected_indices
+        ]
+        stored = service.approve(message=message, session_id=session, candidates=selected)
+        console.print(f"Approved {len(stored)} candidate(s).")
+        return
+    console.print(
+        "Preview only; no candidates stored. Use --approve-all, --reject-all, or edit flags."
+    )
+
+
 @memory_app.command()
 def stats() -> None:
     """Show counts by memory type."""
@@ -470,7 +750,41 @@ def skills_list() -> None:
 
 
 @debug_app.command()
-def prompt(message: Annotated[str, typer.Argument(help="Message to build a prompt for.")]) -> None:
+def prompt(
+    message: Annotated[str, typer.Argument(help="Message to build a prompt for.")],
+    session: Annotated[
+        str,
+        typer.Option("--session", "-s", help="Session id whose working memory should be used."),
+    ] = "debug",
+    platform: Annotated[
+        str | None,
+        typer.Option("--platform", help="Gateway platform for source context."),
+    ] = None,
+    chat_id: Annotated[
+        str | None,
+        typer.Option("--chat-id", help="Gateway chat id for source context."),
+    ] = None,
+    chat_type: Annotated[
+        str | None,
+        typer.Option("--chat-type", help="Gateway chat type for source context."),
+    ] = None,
+    user_id: Annotated[
+        str | None,
+        typer.Option("--user-id", help="Gateway user id for source context."),
+    ] = None,
+    user_name: Annotated[
+        str | None,
+        typer.Option("--user-name", help="Gateway user name for source context."),
+    ] = None,
+    thread_id: Annotated[
+        str | None,
+        typer.Option("--thread-id", help="Gateway thread id for source context."),
+    ] = None,
+    message_id: Annotated[
+        str | None,
+        typer.Option("--message-id", help="Gateway message id for source context."),
+    ] = None,
+) -> None:
     """Print the prompt that would be sent to the LLM without calling the LLM."""
 
     config = load_config()
@@ -478,8 +792,57 @@ def prompt(message: Annotated[str, typer.Argument(help="Message to build a promp
     ProceduralMemoryManager(store).load_builtin_skills()
     working = WorkingMemoryManager(store, limit=config.working_memory_limit)
     retriever = MemoryRetriever(store, working)
-    context = retriever.retrieve_context(message, session_id="debug", limit=config.retrieval_limit)
+    source = _merge_source_context(
+        _source_from_gateway_session(store, session),
+        session_id=session,
+        platform=platform,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        user_id=user_id,
+        user_name=user_name,
+        thread_id=thread_id,
+        message_id=message_id,
+    )
+    context = retriever.retrieve_context(message, session_id=session, limit=config.retrieval_limit)
+    retrieved_ids = {
+        "working": [item.id for item in context.working_memory],
+        "episodic": [memory.id for memory in context.episodic_memories],
+        "semantic": [memory.id for memory in context.semantic_memories],
+        "procedural": [memory.id for memory in context.procedural_memories],
+    }
+    access_rows = _memory_access_rows(store, query=message, retrieved_ids=retrieved_ids)
     messages = PromptBuilder().build(message, context)
+    console.print(f"Session: {session}")
+    _render_source_context(source)
+    retrieved_table = Table(title="Retrieved Memory Trace")
+    retrieved_table.add_column("Type")
+    retrieved_table.add_column("ID")
+    retrieved_table.add_column("Retrieval Score", justify="right")
+    retrieved_table.add_column("Access Count", justify="right")
+    retrieved_table.add_column("Accessed At")
+    scored = {(row["memory_type"], row["memory_id"]): row for row in access_rows}
+    for memory_type, memory_ids in retrieved_ids.items():
+        for memory_id in memory_ids:
+            row = scored.get((memory_type, memory_id))
+            retrieved_table.add_row(
+                memory_type,
+                memory_id,
+                f"{row['retrieval_score']:.4f}" if row else "",
+                str(row["access_count"]) if row else "",
+                row["accessed_at"] if row else "",
+            )
+    console.print(retrieved_table)
+    for memory_type, memory_ids in retrieved_ids.items():
+        for memory_id in memory_ids:
+            row = scored.get((memory_type, memory_id))
+            retrieval_score = f"{row['retrieval_score']:.4f}" if row else ""
+            access_count = str(row["access_count"]) if row else ""
+            accessed_at = row["accessed_at"] if row else ""
+            console.print(
+                f"Retrieved: type={memory_type} id={memory_id} "
+                f"retrieval_score={retrieval_score} access_count={access_count} "
+                f"accessed_at={accessed_at}"
+            )
     for chat_message in messages:
         console.rule(chat_message["role"])
         console.print(chat_message["content"])

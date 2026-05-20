@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from typing import cast
+
+from alpha_agent.llm.base import ChatMessage
 from alpha_agent.memory.models import (
     EpisodicMemory,
     ProceduralMemory,
@@ -72,10 +75,30 @@ def test_prompt_includes_memory_sections() -> None:
     )
 
     messages = PromptBuilder().build("What should we do?", context)
-    prompt = messages[1]["content"]
+    prompt = cast(str, messages[1].get("content"))
 
     assert "## Working Memory" in prompt
     assert "## Relevant User Facts" in prompt
     assert "## Relevant Episodes" in prompt
     assert "## Relevant Skills" in prompt
     assert "## Current User Message" in prompt
+
+
+def test_rough_token_estimate_tolerates_tool_call_assistant_messages() -> None:
+    messages: list[ChatMessage] = [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup_memory", "arguments": '{"query":"hello"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "result"},
+    ]
+
+    assert PromptBuilder().rough_token_estimate(messages) == len("helloresult") // 4

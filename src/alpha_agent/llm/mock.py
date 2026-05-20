@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from alpha_agent.llm.base import ChatMessage, LLMResponse
+from collections.abc import Sequence
+
+from alpha_agent.llm.base import (
+    ChatMessage,
+    LLMResponse,
+    LLMToolChoice,
+    LLMToolDefinitionInput,
+)
 
 
 class MockLLMProvider:
@@ -10,8 +17,14 @@ class MockLLMProvider:
 
     name = "mock"
 
-    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
-        user_message = messages[-1]["content"] if messages else ""
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        user_message = _message_content(messages[-1]) if messages else ""
         has_memory = any(
             section in user_message
             for section in ("Working Memory", "Relevant User Facts", "Relevant Episodes")
@@ -26,3 +39,8 @@ class MockLLMProvider:
         if marker not in prompt_content:
             return prompt_content.strip()[:200]
         return prompt_content.split(marker, 1)[1].strip().strip('"')[:200]
+
+
+def _message_content(message: ChatMessage) -> str:
+    content = message.get("content")
+    return content if isinstance(content, str) else ""

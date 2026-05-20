@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from alpha_agent.config import AlphaConfig
-from alpha_agent.llm.base import ChatMessage, LLMResponse
+from alpha_agent.llm.base import (
+    ChatMessage,
+    LLMResponse,
+    LLMToolChoice,
+    LLMToolDefinitionInput,
+)
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_DEFAULT_MODEL = "gpt-5.3-codex"
@@ -33,7 +39,13 @@ class CodexResponsesProvider:
         self.model = config.llm_model or CODEX_DEFAULT_MODEL
         self.timeout = timeout
 
-    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
         """Call the Responses API and normalize the assistant text."""
 
         body = codex_responses_payload(model=self.model, messages=messages)
@@ -91,14 +103,14 @@ def codex_responses_payload(*, model: str, messages: list[ChatMessage]) -> dict[
     """Convert OpenAI-style chat messages to a minimal Responses API payload."""
 
     instructions = "\n\n".join(
-        message["content"].strip()
+        _message_content(message).strip()
         for message in messages
-        if message["role"] == "system" and message["content"].strip()
+        if message["role"] == "system" and _message_content(message).strip()
     )
     input_items = [
         _message_to_input_item(message)
         for message in messages
-        if message["role"] != "system" and message["content"].strip()
+        if message["role"] != "system" and _message_content(message).strip()
     ]
     payload: dict[str, Any] = {
         "model": model,
@@ -112,7 +124,7 @@ def codex_responses_payload(*, model: str, messages: list[ChatMessage]) -> dict[
 
 def _message_to_input_item(message: ChatMessage) -> dict[str, Any]:
     role = message["role"]
-    content = message["content"]
+    content = _message_content(message)
     if role == "assistant":
         return {
             "role": "assistant",
@@ -127,6 +139,11 @@ def _message_to_input_item(message: ChatMessage) -> dict[str, Any]:
         "role": "user",
         "content": [{"type": "input_text", "text": content}],
     }
+
+
+def _message_content(message: ChatMessage) -> str:
+    content = message.get("content")
+    return content if isinstance(content, str) else ""
 
 
 def _extract_response_text(payload: dict[str, Any]) -> str:

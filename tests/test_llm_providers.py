@@ -7,8 +7,10 @@ import httpx
 import pytest
 
 from alpha_agent.config import AlphaConfig
+from alpha_agent.llm.base import ChatMessage, LLMToolDefinition
 from alpha_agent.llm.codex import CodexResponsesProvider, resolve_codex_access_token
 from alpha_agent.llm.deepseek import DEEPSEEK_BASE_URL, DeepSeekProvider
+from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
 
 
 def _response(status_code: int, payload: dict[str, Any]) -> httpx.Response:
@@ -74,6 +76,154 @@ def test_deepseek_v4_request_includes_thinking_wire_shape(
     assert captured["json"]["reasoning_effort"] == "high"
 
 
+def test_deepseek_provider_sends_tools_and_tool_choice_wire_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs["json"]
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-1",
+                "model": "deepseek-chat",
+                "choices": [{"message": {"content": "pong"}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+
+    DeepSeekProvider(config).complete(
+        [{"role": "user", "content": "ping"}],
+        tools=[
+            LLMToolDefinition(
+                name="lookup_memory",
+                description="Look up relevant memory.",
+                parameters={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            )
+        ],
+        tool_choice={"type": "function", "function": {"name": "lookup_memory"}},
+    )
+
+    assert captured["json"]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_memory",
+                "description": "Look up relevant memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+        }
+    ]
+    assert captured["json"]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "lookup_memory"},
+    }
+
+
+def test_deepseek_provider_parses_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "lookup_memory",
+                "arguments": '{"query":"alpha","limit":2}',
+            },
+        }
+    ]
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-1",
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {"content": None, "tool_calls": raw_tool_calls},
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+
+    response = DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
+
+    assert response.content == ""
+    assert response.finish_reason == "tool_calls"
+    assert len(response.tool_calls) == 1
+    tool_call = response.tool_calls[0]
+    assert tool_call.id == "call_1"
+    assert tool_call.name == "lookup_memory"
+    assert tool_call.arguments == {"query": "alpha", "limit": 2}
+    assert tool_call.raw_arguments == '{"query":"alpha","limit":2}'
+    assert response.metadata["response_id"] == "chatcmpl-1"
+    assert response.metadata["finish_reason"] == "tool_calls"
+    assert response.metadata["raw_tool_calls"] == raw_tool_calls
+    assert response.metadata["tool_calls"][0]["arguments"] == {"query": "alpha", "limit": 2}
+    assert response.metadata["normalized_tool_calls"][0]["raw_arguments"] == (
+        '{"query":"alpha","limit":2}'
+    )
+
+
+def test_deepseek_provider_preserves_invalid_tool_call_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-1",
+                "model": "deepseek-chat",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_bad",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup_memory",
+                                        "arguments": '{"query":',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+
+    response = DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
+
+    tool_call = response.tool_calls[0]
+    assert tool_call.arguments == {}
+    assert tool_call.raw_arguments == '{"query":'
+    assert "arguments_parse_error" in tool_call.metadata
+    assert tool_call.metadata["raw_arguments"] == '{"query":'
+    assert response.metadata["tool_calls"][0]["metadata"]["raw_arguments"] == '{"query":'
+    assert "arguments_parse_error" in response.metadata["tool_calls"][0]["metadata"]
+
+
 def test_deepseek_chat_omits_thinking_for_v3(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -95,6 +245,100 @@ def test_deepseek_chat_omits_thinking_for_v3(monkeypatch: pytest.MonkeyPatch) ->
 
     assert "thinking" not in captured["json"]
     assert "reasoning_effort" not in captured["json"]
+    assert "tools" not in captured["json"]
+    assert "tool_choice" not in captured["json"]
+
+
+def test_openai_compatible_provider_parses_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "lookup_memory",
+                "arguments": '{"query":"alpha"}',
+            },
+        }
+    ]
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-compat",
+                "model": "gpt-compatible",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {"content": None, "tool_calls": raw_tool_calls},
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(
+        compatible_base_url="https://compatible.example",
+        compatible_api_key="compatible-key",
+        llm_model="gpt-compatible",
+    )
+
+    response = OpenAICompatibleProvider(config).complete(
+        [{"role": "user", "content": "ping"}]
+    )
+
+    assert response.content == ""
+    assert response.finish_reason == "tool_calls"
+    assert response.tool_calls[0].id == "call_1"
+    assert response.tool_calls[0].name == "lookup_memory"
+    assert response.tool_calls[0].arguments == {"query": "alpha"}
+    assert response.metadata["response_id"] == "chatcmpl-compat"
+    assert response.metadata["finish_reason"] == "tool_calls"
+    assert response.metadata["raw_tool_calls"] == raw_tool_calls
+    assert response.metadata["normalized_tool_calls"][0]["raw_arguments"] == '{"query":"alpha"}'
+    assert response.metadata["tool_calls"][0]["arguments"] == {"query": "alpha"}
+
+
+def test_openai_compatible_provider_preserves_tool_messages_in_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs["json"]
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-compat",
+                "model": "gpt-compatible",
+                "choices": [{"message": {"content": "done"}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(
+        compatible_base_url="https://compatible.example",
+        compatible_api_key="compatible-key",
+        llm_model="gpt-compatible",
+    )
+    messages: list[ChatMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup_memory", "arguments": '{"query":"alpha"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"result":"ok"}'},
+    ]
+
+    OpenAICompatibleProvider(config).complete(messages)
+
+    assert captured["json"]["messages"] == messages
 
 
 def test_codex_provider_uses_explicit_oauth_access_token() -> None:

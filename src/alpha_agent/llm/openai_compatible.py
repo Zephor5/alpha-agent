@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
 from alpha_agent.config import AlphaConfig
-from alpha_agent.llm.base import ChatMessage, LLMResponse
+from alpha_agent.llm.base import (
+    ChatMessage,
+    LLMResponse,
+    LLMToolChoice,
+    LLMToolDefinitionInput,
+    openai_compatible_response,
+    openai_compatible_tool_choice_payload,
+    openai_compatible_tool_payload,
+)
 
 OPENAI_COMPATIBLE_DEFAULT_MODEL = "gpt-4o-mini"
 
@@ -27,24 +36,33 @@ class OpenAICompatibleProvider:
         self.model = config.llm_model or OPENAI_COMPATIBLE_DEFAULT_MODEL
         self.timeout = timeout
 
-    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
         """Call the configured compatible chat completions API."""
 
+        body: dict[str, Any] = {"model": self.model, "messages": messages}
+        if tools is not None:
+            body["tools"] = [openai_compatible_tool_payload(tool) for tool in tools]
+        if tool_choice is not None:
+            body["tool_choice"] = openai_compatible_tool_choice_payload(tool_choice)
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
-            json={"model": self.model, "messages": messages},
+            json=body,
             timeout=self.timeout,
         )
         response.raise_for_status()
         payload: dict[str, Any] = response.json()
-        content = payload["choices"][0]["message"]["content"]
-        return LLMResponse(
-            content=str(content),
-            model=str(payload.get("model", self.model)),
+        return openai_compatible_response(
+            payload=payload,
+            fallback_model=self.model,
             provider=self.name,
-            metadata={"response_id": payload.get("id")},
         )

@@ -38,7 +38,7 @@ Behavior rules:
     def rough_token_estimate(self, messages: list[ChatMessage]) -> int:
         """Estimate prompt tokens with a simple character-based approximation."""
 
-        return sum(len(message["content"]) for message in messages) // 4
+        return sum(len(_message_content(message)) for message in messages) // 4
 
     def _working_memory_section(self, context: RetrievedContext) -> str:
         if not context.working_memory:
@@ -70,3 +70,8 @@ Behavior rules:
             for memory in context.procedural_memories
         ]
         return "## Relevant Skills\n" + "\n".join(lines)
+
+
+def _message_content(message: ChatMessage) -> str:
+    content = message.get("content")
+    return content if isinstance(content, str) else ""

@@ -126,7 +126,7 @@ P0 implementation notes:
 Current `AlphaAgent.respond()` is a clean MVP. The next step is to keep it
 explicit while making it useful for real channels and longer tasks.
 
-- [ ] Split the turn pipeline into named services without hiding flow:
+- [x] Split the turn pipeline into named services without hiding flow:
   - event write.
   - working memory update.
   - retrieval.
@@ -136,7 +136,7 @@ explicit while making it useful for real channels and longer tasks.
   - extraction.
   - consolidation trigger decision.
   - delivery event emission.
-- [ ] Add structured turn events:
+- [x] Add structured turn events:
   - `turn.started`
   - `memory.retrieved`
   - `llm.started`
@@ -144,27 +144,61 @@ explicit while making it useful for real channels and longer tasks.
   - `memory.extracted`
   - `turn.completed`
   - `turn.failed`
-- [ ] Add tool execution as an explicit subsystem:
+- [x] Add tool execution as an explicit subsystem:
   - keep tool registry small.
   - no hidden agent framework.
   - include `tool.started`, `tool.completed`, `tool.failed`.
   - require deterministic result serialization into events.
-- [ ] Add interrupt/cancel support:
+- [x] Add interrupt/cancel support:
   - cancellation flag by session_id.
   - gateway `/stop` command.
   - safe cleanup of in-flight provider/tool call where possible.
-- [ ] Add bounded retry policy:
+- [x] Add bounded retry policy:
   - provider HTTP retry for transient errors.
   - no infinite agent loops.
   - record retry count in turn debug metadata.
-- [ ] Add prompt/debug inspection for channel turns:
+- [x] Add prompt/debug inspection for channel turns:
   - `alpha debug prompt --session ...`
   - include gateway source context.
   - include retrieved memory ids and ranking scores.
-- [ ] Add memory review mode:
+- [x] Add memory review mode:
   - show extracted candidates before storing.
   - approve/reject/edit candidates.
-  - start with CLI, then expose through Feishu/WeChat commands.
+  - start with CLI.
+
+P1 Agent Loop implementation notes:
+
+- The turn pipeline is split into explicit runtime methods while keeping
+  `AlphaAgent.respond()` as the visible orchestration path.
+- Structured turn, memory, LLM, tool, completion, and failure events are stored
+  in the normal event log metadata.
+- Tool execution remains bounded and explicit. Caller-supplied tool calls are
+  local one-shot executions. Provider-returned OpenAI-compatible tool calls now
+  run through a bounded multi-step loop controlled by `max_tool_iterations` and
+  `max_llm_rounds`: each assistant `tool_calls` message is followed immediately
+  by matching `role=tool` results before the next model call. When the bound is
+  reached, the runtime makes one no-tools `finalize` request for a best-effort
+  answer; if that still requests tools, the turn fails observably.
+- DeepSeek and OpenAI-compatible providers share the same tool-call wire model:
+  `tools`, `tool_choice`, assistant `tool_calls`, and `role=tool` messages with
+  `tool_call_id`. Missing provider tool ids and `finish_reason=tool_calls`
+  without normalized calls fail before execution. Recoverable provider tool
+  execution failures are recorded as `tool.failed` events and returned to the
+  model as deterministic JSON tool results so the next LLM round can correct.
+- Cancellation is synchronous and cooperative. The runtime checks session
+  cancellation flags at safe boundaries before/after user event, retrieval, LLM,
+  and tool stages. It cannot preempt a blocking provider or tool call that does
+  not return control.
+- Retry is bounded around transient provider HTTP failures only; retry counts
+  are recorded in turn debug metadata and runtime events.
+- `alpha debug prompt MESSAGE` remains supported. `alpha debug prompt
+  --session ...` can include gateway source fields and prints the built prompt,
+  retrieved memory ids, and retrieval scores from `memory_access_log`.
+- `alpha memory review MESSAGE --session ...` previews extracted candidates
+  without writing semantic/episodic/procedural memory. CLI flags support
+  approve-all, reject-all, per-candidate approve/reject, and selected candidate
+  edit-and-approve. Platform review commands for Feishu/WeChat remain future
+  adapter work tracked in the integration sections.
 
 ## P1: Feishu Integration
 
@@ -214,6 +248,7 @@ implementation shows a mature and official-ish integration path.
   - image/file receive.
   - file/image send.
   - interactive card buttons for approve/deny memory candidates.
+  - expose memory review decisions through Feishu commands or cards.
   - reaction events as command inputs only if genuinely useful.
 - [ ] Add tests:
   - webhook token/signature validation.
@@ -248,6 +283,7 @@ before writing code.
   - message id and fingerprint dedup.
   - text chunking for long replies.
   - basic typing status if supported.
+  - memory review command/buttons after the CLI review flow proves useful.
   - conservative media support later.
 - [ ] Keep Alpha's internal source model platform-neutral:
   - platform=`weixin`.
