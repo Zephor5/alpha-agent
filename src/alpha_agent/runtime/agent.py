@@ -234,8 +234,6 @@ class AlphaAgent:
         self,
         user_message: str,
         session_id: str,
-        *,
-        tool_calls: Sequence[ToolCall | Mapping[str, Any]] | None = None,
     ) -> AgentTurnResult:
         """Run one explicit agent turn."""
 
@@ -253,36 +251,6 @@ class AlphaAgent:
             user_record = self._write_user_message(session_id, user_message)
             debug["user_message_id"] = user_record.id
             debug["user_message_ordinal"] = user_record.ordinal
-
-            requested_tool_calls = self._ensure_caller_tool_call_ids(
-                self.tool_executor.normalize_calls(tool_calls)
-            )
-            requested_tool_messages: list[ConversationMessage] = []
-            runtime_reminders: list[str] = []
-            requested_tool_results = self._execute_tool_calls(
-                session_id=session_id,
-                calls=requested_tool_calls,
-                source="caller",
-            )
-            if requested_tool_results:
-                requested_tool_messages.append(
-                    self._write_assistant_tool_call_message(
-                        session_id=session_id,
-                        calls=requested_tool_calls,
-                        source="caller",
-                    )
-                )
-                requested_tool_messages.extend(
-                    self._write_tool_result_messages(
-                        session_id=session_id,
-                        results=requested_tool_results,
-                        source="caller",
-                    )
-                )
-            runtime_reminders.extend(
-                self._runtime_reminders_from_tool_results(requested_tool_results)
-            )
-            debug["tool_call_count"] = len(requested_tool_results)
 
             self._check_canceled(session_id, "before_retrieval")
             context = self._retrieve_memory(user_message, session_id)
@@ -305,7 +273,6 @@ class AlphaAgent:
                 user_message,
                 context,
                 session_context=session_context,
-                runtime_reminders=runtime_reminders,
             )
             model_tools = self.tool_registry.to_llm_tool_definitions()
             model_tool_choice: LLMToolChoice | None = "auto" if model_tools else None
@@ -320,7 +287,6 @@ class AlphaAgent:
                     user_ordinal=user_record.ordinal,
                     retrieved_context=context,
                     session_context=session_context,
-                    runtime_reminders=runtime_reminders,
                     messages=messages,
                     model_tools=model_tools or None,
                     prompt_token_estimate=prompt_token_estimate,
@@ -374,7 +340,6 @@ class AlphaAgent:
                 provider_tool_call_message = self._write_assistant_tool_call_message(
                     session_id=session_id,
                     calls=provider_tool_calls,
-                    source="provider",
                     llm_response=llm_response,
                 )
                 provider_tool_messages.append(provider_tool_call_message)
@@ -386,13 +351,11 @@ class AlphaAgent:
                 provider_results = self._execute_tool_calls(
                     session_id=session_id,
                     calls=provider_tool_calls,
-                    source="provider",
                     recover_errors=True,
                 )
                 provider_result_messages = self._write_tool_result_messages(
                     session_id=session_id,
                     results=provider_results,
-                    source="provider",
                 )
                 provider_tool_messages.extend(provider_result_messages)
                 debug["tool_call_count"] += len(provider_results)
@@ -431,7 +394,6 @@ class AlphaAgent:
             extraction_source_message_ids = [
                 user_record.id,
                 assistant_record.id,
-                *[message.id for message in requested_tool_messages],
                 *[message.id for message in provider_tool_messages],
             ]
             candidates = self._extract_memory(
@@ -511,13 +473,11 @@ class AlphaAgent:
         context: RetrievedContext,
         *,
         session_context: SessionContextProjection,
-        runtime_reminders: Sequence[str],
     ) -> list[ChatMessage]:
         return self.prompt_builder.build(
             user_message,
             context,
             session_context=session_context,
-            runtime_reminders=runtime_reminders,
         )
 
     def _maybe_compress_initial_context(
@@ -528,7 +488,6 @@ class AlphaAgent:
         user_ordinal: int,
         retrieved_context: RetrievedContext,
         session_context: SessionContextProjection,
-        runtime_reminders: Sequence[str],
         messages: list[ChatMessage],
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         prompt_token_estimate: int,
@@ -686,7 +645,6 @@ class AlphaAgent:
                 user_message,
                 retrieved_context,
                 session_context=provisional_projection,
-                runtime_reminders=runtime_reminders,
             )
             rebuilt_prompt_token_estimate = self.prompt_builder.estimate_prompt_tokens(
                 rebuilt_messages,
@@ -734,7 +692,6 @@ class AlphaAgent:
                 user_message,
                 retrieved_context,
                 session_context=rebuilt_context,
-                runtime_reminders=runtime_reminders,
             )
             rebuilt_prompt_token_estimate = self.prompt_builder.estimate_prompt_tokens(
                 rebuilt_messages,
@@ -1018,10 +975,9 @@ class AlphaAgent:
         *,
         session_id: str,
         calls: list[ToolCall],
-        source: str,
         llm_response: LLMResponse | None = None,
     ) -> ConversationMessage:
-        provider_metadata: dict[str, Any] = {"source": source}
+        provider_metadata: dict[str, Any] = {}
         if llm_response is not None:
             provider_metadata.update(
                 {
@@ -1042,7 +998,6 @@ class AlphaAgent:
             tool_calls=tool_calls,
             provider_metadata=provider_metadata,
             metadata={
-                "source": source,
                 "tool_call_ids": [self._required_tool_call_id(call) for call in calls],
             },
         )
@@ -1052,7 +1007,6 @@ class AlphaAgent:
         *,
         session_id: str,
         results: list[ExecutedToolResult],
-        source: str,
     ) -> list[ConversationMessage]:
         messages: list[ConversationMessage] = []
         for item in results:
@@ -1064,7 +1018,6 @@ class AlphaAgent:
                     tool_call_id=self._required_tool_call_id(item.call),
                     tool_result_id=item.trace.id,
                     provider_metadata={
-                        "source": source,
                         "tool_name": item.result.name,
                     },
                     metadata={
@@ -1074,16 +1027,6 @@ class AlphaAgent:
                 )
             )
         return messages
-
-    def _runtime_reminders_from_tool_results(
-        self,
-        results: list[ExecutedToolResult],
-    ) -> list[str]:
-        return [
-            f"Tool {item.result.name}: {item.result.content}"
-            for item in results
-            if item.result.content.strip()
-        ]
 
     def _extract_memory(
         self,
@@ -1257,22 +1200,6 @@ class AlphaAgent:
             if not call.id:
                 raise ToolProtocolError(f"Provider tool call for {call.name} is missing an id")
 
-    def _ensure_caller_tool_call_ids(self, calls: list[ToolCall]) -> list[ToolCall]:
-        normalized: list[ToolCall] = []
-        for call in calls:
-            if call.id:
-                normalized.append(call)
-                continue
-            normalized.append(
-                ToolCall(
-                    name=call.name,
-                    arguments=dict(call.arguments),
-                    id=new_id("call"),
-                    metadata=dict(call.metadata),
-                )
-            )
-        return normalized
-
     def _wire_tool_call(self, call: ToolCall) -> ChatCompletionToolCall:
         raw_arguments = call.metadata.get("raw_arguments")
         arguments = (
@@ -1297,7 +1224,6 @@ class AlphaAgent:
         *,
         session_id: str,
         calls: list[ToolCall],
-        source: str,
         recover_errors: bool = False,
     ) -> list[ExecutedToolResult]:
         return self.tool_executor.execute(
@@ -1306,7 +1232,6 @@ class AlphaAgent:
                 session_id=session_id,
                 event_type=event_type,
                 content=content,
-                source=source,
                 metadata=metadata,
             ),
             check_canceled=lambda stage: self._check_canceled(session_id, stage),
@@ -1319,16 +1244,13 @@ class AlphaAgent:
         session_id: str,
         event_type: str,
         content: str,
-        source: str,
         metadata: dict[str, Any],
     ) -> RuntimeTrace:
-        trace_metadata = {"source": source}
-        trace_metadata.update(metadata)
         return self.store.append_runtime_trace(
             session_id=session_id,
             event_type=event_type,
             content=content,
-            metadata=trace_metadata,
+            metadata=metadata,
         )
 
     def _check_canceled(self, session_id: str, stage: str) -> None:

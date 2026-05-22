@@ -31,8 +31,7 @@ from alpha_agent.runtime.context_compression import (
     CompressionFocus,
     CompressionResult,
 )
-from alpha_agent.runtime.tools import ToolExecutionError
-from alpha_agent.tools.base import ToolCall, ToolResult
+from alpha_agent.tools.base import ToolResult
 from alpha_agent.tools.registry import ToolRegistry
 
 
@@ -1272,7 +1271,6 @@ def test_provider_tool_call_parse_error_becomes_tool_result_and_model_recovers(
     assert tool.run_count == 0
     assert tool_failed.metadata["tool_name"] == "lookup"
     assert tool_failed.metadata["error_type"] == "ToolExecutionError"
-    assert tool_failed.metadata["source"] == "provider"
     assert '"failed":true' in tool_failed.content
     assert '"error_type":"ToolExecutionError"' in tool_failed.content
     assert not any(event.event_type == "turn.failed" for event in events)
@@ -1332,7 +1330,6 @@ def test_provider_unknown_tool_becomes_tool_result_and_model_recovers(
     assert len(provider.calls) == 2
     assert tool_failed.metadata["tool_name"] == "missing_provider_tool"
     assert tool_failed.metadata["error_type"] == "ToolExecutionError"
-    assert tool_failed.metadata["source"] == "provider"
     assert '"failed":true' in tool_failed.content
     assert '"error":"Unknown tool: missing_provider_tool"' in tool_failed.content
     assert follow_up_messages[-1]["role"] == "tool"
@@ -1404,7 +1401,6 @@ def test_provider_tool_runtime_exception_becomes_tool_result_and_model_recovers(
     assert len(provider.calls) == 2
     assert tool_failed.metadata["tool_name"] == "explode_provider"
     assert tool_failed.metadata["error_type"] == "RuntimeError"
-    assert tool_failed.metadata["source"] == "provider"
     assert '"failed":true' in tool_failed.content
     assert '"error":"provider boom"' in tool_failed.content
     assert '"error_type":"RuntimeError"' in tool_failed.content
@@ -1469,57 +1465,28 @@ def test_agent_cancellation_writes_failed_event_and_clears_flag(tmp_path: Path) 
     assert not agent.is_canceled("s1")
 
 
-def test_agent_executes_explicit_tool_calls_with_deterministic_events(tmp_path: Path) -> None:
-    class EchoTool:
-        name = "echo"
-        description = "Echo arguments."
+def test_provider_tool_cancellation_after_run_records_tool_failed(
+    tmp_path: Path,
+) -> None:
+    class ToolCallingProvider:
+        name = "tool-calling"
 
-        def run(self, arguments: dict[str, Any]) -> ToolResult:
-            return ToolResult(
-                name=self.name,
-                content="echoed",
-                metadata={"arguments": arguments},
+        def complete(self, messages: list[ChatMessage], **kwargs: Any) -> LLMResponse:
+            return LLMResponse(
+                content="",
+                provider=self.name,
+                model="mock",
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_cancel",
+                        name="cancel_after_run",
+                        arguments={},
+                        raw_arguments="{}",
+                    )
+                ],
             )
 
-    registry = ToolRegistry()
-    registry.register(EchoTool())
-    store = MemoryStore(tmp_path / "alpha.db")
-    store.initialize()
-    agent = AlphaAgent(
-        store=store,
-        llm_provider=MockLLMProvider(),
-        retriever=MemoryRetriever(store),
-        tool_registry=registry,
-    )
-
-    result = agent.respond(
-        "use the tool",
-        session_id="s1",
-        tool_calls=[ToolCall(name="echo", arguments={"b": 2, "a": 1})],
-    )
-
-    events = list(reversed(store.list_runtime_traces(session_id="s1", limit=20)))
-    tool_started = next(
-        event for event in events if event.event_type == "tool.started"
-    )
-    tool_completed = next(
-        event for event in events if event.event_type == "tool.completed"
-    )
-    assert tool_started.metadata["source"] == "caller"
-    assert tool_completed.metadata["source"] == "caller"
-    assert tool_completed.content == (
-        '{"content":"echoed","metadata":{"arguments":{"a":1,"b":2}},"name":"echo"}'
-    )
-    assert tool_completed.metadata["result"]["metadata"]["arguments"] == {"a": 1, "b": 2}
-    messages = store.list_conversation_messages("s1")
-    assert [message.role for message in messages] == ["user", "assistant", "tool", "assistant"]
-    assert messages[1].tool_calls[0]["function"]["name"] == "echo"
-    assert messages[2].tool_call_id == messages[1].tool_calls[0]["id"]
-    assert messages[2].raw_content == tool_completed.content
-    assert result.debug["tool_call_count"] == 1
-
-
-def test_tool_cancellation_after_run_records_tool_failed(tmp_path: Path) -> None:
     class CancelAfterRunTool:
         name = "cancel_after_run"
         description = "Cancel after successful run."
@@ -1536,18 +1503,14 @@ def test_tool_cancellation_after_run_records_tool_failed(tmp_path: Path) -> None
     store.initialize()
     agent = AlphaAgent(
         store=store,
-        llm_provider=MockLLMProvider(),
+        llm_provider=ToolCallingProvider(),
         retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
     registry.register(CancelAfterRunTool(agent))
 
     with pytest.raises(AgentCanceledError):
-        agent.respond(
-            "use the tool",
-            session_id="s1",
-            tool_calls=[ToolCall(name="cancel_after_run")],
-        )
+        agent.respond("use the tool", session_id="s1")
 
     events = store.list_runtime_traces(session_id="s1", limit=20)
     tool_failed = next(
@@ -1560,115 +1523,6 @@ def test_tool_cancellation_after_run_records_tool_failed(tmp_path: Path) -> None
     assert tool_failed.metadata["error_type"] == "AgentCanceledError"
     assert turn_failed.metadata["status"] == "canceled"
     assert turn_failed.metadata["stage"] == "after_tool"
-
-
-def test_tool_result_serialization_failure_records_tool_failed(tmp_path: Path) -> None:
-    class UnserializableTool:
-        name = "unserializable"
-        description = "Return non-json metadata."
-
-        def run(self, arguments: dict[str, Any]) -> ToolResult:
-            return ToolResult(name=self.name, content="done", metadata={"bad": object()})
-
-    registry = ToolRegistry()
-    registry.register(UnserializableTool())
-    store = MemoryStore(tmp_path / "alpha.db")
-    store.initialize()
-    agent = AlphaAgent(
-        store=store,
-        llm_provider=MockLLMProvider(),
-        retriever=MemoryRetriever(store),
-        tool_registry=registry,
-    )
-
-    with pytest.raises(ToolExecutionError):
-        agent.respond(
-            "use the tool",
-            session_id="s1",
-            tool_calls=[ToolCall(name="unserializable")],
-        )
-
-    events = store.list_runtime_traces(session_id="s1", limit=20)
-    tool_failed = next(
-        event for event in events if event.event_type == "tool.failed"
-    )
-    turn_failed = next(
-        event for event in events if event.event_type == "turn.failed"
-    )
-    assert tool_failed.metadata["tool_name"] == "unserializable"
-    assert tool_failed.metadata["error_type"] == "TypeError"
-    assert turn_failed.metadata["stage"] == "tool"
-
-
-def test_unknown_tool_records_tool_failed_and_turn_failed_tool_stage(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "alpha.db")
-    store.initialize()
-    agent = AlphaAgent(
-        store=store,
-        llm_provider=MockLLMProvider(),
-        retriever=MemoryRetriever(store),
-        tool_registry=ToolRegistry(),
-    )
-
-    with pytest.raises(ToolExecutionError):
-        agent.respond(
-            "use the tool",
-            session_id="s1",
-            tool_calls=[ToolCall(name="missing_tool")],
-        )
-
-    events = store.list_runtime_traces(session_id="s1", limit=20)
-    tool_failed = next(
-        event for event in events if event.event_type == "tool.failed"
-    )
-    turn_failed = next(
-        event for event in events if event.event_type == "turn.failed"
-    )
-    assert tool_failed.metadata["tool_name"] == "missing_tool"
-    assert tool_failed.metadata["error_type"] == "ToolExecutionError"
-    assert "Unknown tool: missing_tool" in tool_failed.content
-    assert turn_failed.metadata["stage"] == "tool"
-
-
-def test_tool_run_exception_records_tool_failed_and_turn_failed_tool_stage(
-    tmp_path: Path,
-) -> None:
-    class ExplodingTool:
-        name = "explode"
-        description = "Raise during run."
-
-        def run(self, arguments: dict[str, Any]) -> ToolResult:
-            raise RuntimeError("boom")
-
-    registry = ToolRegistry()
-    registry.register(ExplodingTool())
-    store = MemoryStore(tmp_path / "alpha.db")
-    store.initialize()
-    agent = AlphaAgent(
-        store=store,
-        llm_provider=MockLLMProvider(),
-        retriever=MemoryRetriever(store),
-        tool_registry=registry,
-    )
-
-    with pytest.raises(ToolExecutionError):
-        agent.respond(
-            "use the tool",
-            session_id="s1",
-            tool_calls=[ToolCall(name="explode")],
-        )
-
-    events = store.list_runtime_traces(session_id="s1", limit=20)
-    tool_failed = next(
-        event for event in events if event.event_type == "tool.failed"
-    )
-    turn_failed = next(
-        event for event in events if event.event_type == "turn.failed"
-    )
-    assert tool_failed.metadata["tool_name"] == "explode"
-    assert tool_failed.metadata["error_type"] == "RuntimeError"
-    assert tool_failed.content == "boom"
-    assert turn_failed.metadata["stage"] == "tool"
 
 
 def test_agent_retry_exhaustion_records_llm_stage_and_retry_count(tmp_path: Path) -> None:
