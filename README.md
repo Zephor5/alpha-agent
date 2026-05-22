@@ -27,7 +27,8 @@ See `docs/TODO.md` for the current Hermes-informed roadmap.
 Human-like memory in this project means separating memory by role instead of
 putting everything into one transcript:
 
-- Working memory: active short-lived context for the current session.
+- Session context: append-only conversation messages plus optional compressed
+  summaries for long-running sessions.
 - Episodic memory: specific experiences and remembered events.
 - Semantic memory: durable facts, preferences, and user-specific knowledge.
 - Procedural memory: reusable ways of doing things, stored as skills.
@@ -120,8 +121,9 @@ with `ALPHA_CONFIG_PATH`.
 
 Use `alpha config set <section.key> <value>` for supported keys such as
 `llm.provider`, `llm.model`, `llm.debug_logging`, `deepseek.api_key`,
-`codex.access_token`, and `memory.retrieval_limit`. Secret values are masked by
-`alpha config get` unless you pass `--reveal-secret`.
+`codex.access_token`, `memory.retrieval_limit`, and `context.max_prompt_tokens`.
+Secret values are masked by `alpha config get` unless you pass
+`--reveal-secret`.
 
 Environment variables and `.env` still work as overrides for one-off runs,
 deployment, and secrets. Precedence is:
@@ -147,6 +149,16 @@ reasoning_enabled = true
 
 [codex]
 access_token = ""
+
+[memory]
+retrieval_limit = 8
+
+[context]
+max_prompt_tokens = 6000
+compression_threshold_ratio = 0.85
+recent_tail_messages = 8
+min_summary_tokens = 256
+max_summary_tokens = 1024
 ```
 
 Useful environment overrides:
@@ -168,8 +180,13 @@ Useful environment overrides:
 - `ALPHA_DEEPSEEK_API_KEY`: DeepSeek API key when `ALPHA_LLM_PROVIDER=deepseek`.
 - `ALPHA_CODEX_ACCESS_TOKEN`: Optional Codex OAuth bearer token. If omitted,
   Alpha tries `CODEX_HOME/auth.json` or `~/.codex/auth.json`.
-- `ALPHA_WORKING_MEMORY_LIMIT`: Active context item limit. Defaults to `12`.
 - `ALPHA_RETRIEVAL_LIMIT`: Retrieval limit per memory layer. Defaults to `8`.
+- `ALPHA_CONTEXT_MAX_PROMPT_TOKENS`: Prompt budget before compression.
+- `ALPHA_CONTEXT_COMPRESSION_THRESHOLD_RATIO`: Ratio of the prompt budget that
+  triggers compression.
+- `ALPHA_CONTEXT_RECENT_TAIL_MESSAGES`: Uncompressed transcript tail to preserve.
+- `ALPHA_CONTEXT_MIN_SUMMARY_TOKENS`: Lower target for compressed summaries.
+- `ALPHA_CONTEXT_MAX_SUMMARY_TOKENS`: Upper target for compressed summaries.
 
 The mock provider works without an API key:
 

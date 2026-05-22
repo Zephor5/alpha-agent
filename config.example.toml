@@ -18,8 +18,14 @@ base_url = "https://api.openai.com/v1"
 api_key = ""
 
 [memory]
-working_memory_limit = 12
 retrieval_limit = 8
+
+[context]
+max_prompt_tokens = 6000
+compression_threshold_ratio = 0.85
+recent_tail_messages = 8
+min_summary_tokens = 256
+max_summary_tokens = 1024
 
 [deepseek]
 api_key = ""

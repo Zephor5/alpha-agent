@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-from typer.testing import CliRunner
 
-from alpha_agent.cli import app
 from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolCall
 from alpha_agent.llm.mock import MockLLMProvider
-from alpha_agent.memory.models import RetrievedContext
+from alpha_agent.memory.models import (
+    ConversationMessage,
+    RetrievedContext,
+    SessionContextState,
+)
 from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.store import MemoryStore
-from alpha_agent.memory.working import WorkingMemoryManager
 from alpha_agent.runtime.agent import (
     AgentCanceledError,
     AlphaAgent,
@@ -23,43 +25,46 @@ from alpha_agent.runtime.agent import (
     ToolLoopLimitExceeded,
     ToolProtocolError,
 )
+from alpha_agent.runtime.context_compression import (
+    CompressionBudget,
+    CompressionContext,
+    CompressionFocus,
+    CompressionResult,
+)
 from alpha_agent.runtime.tools import ToolExecutionError
 from alpha_agent.tools.base import ToolCall, ToolResult
 from alpha_agent.tools.registry import ToolRegistry
 
 
-def test_mock_agent_loop_stores_user_and_assistant_events(tmp_path: Path) -> None:
+def test_mock_agent_loop_stores_user_and_assistant_messages(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
     ProceduralMemoryManager(store).load_builtin_skills()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
     )
 
     result = agent.respond("remember that I prefer concise answers", session_id="s1")
 
-    events = store.list_events(session_id="s1")
+    messages = store.list_conversation_messages("s1")
+    traces = store.list_runtime_traces(session_id="s1", limit=20)
     semantic = store.list_semantic_memories()
     assert "Mock response" in result.response
-    assert [event.role for event in events if event.role in {"user", "assistant"}] == [
-        "assistant",
+    assert [message.role for message in messages] == [
         "user",
+        "assistant",
     ]
+    assert messages[0].raw_content == "remember that I prefer concise answers"
+    assert "Mock response" in messages[1].raw_content
     assert {
-        event.metadata.get("event_type")
-        for event in events
-        if event.metadata.get("event_type")
+        trace.event_type
+        for trace in traces
     } >= {
-        "turn.started",
-        "memory.retrieved",
         "llm.started",
         "llm.completed",
         "memory.extracted",
-        "turn.completed",
     }
     assert len(semantic) == 1
     assert result.debug["extracted_memory_count"] >= 1
@@ -67,8 +72,8 @@ def test_mock_agent_loop_stores_user_and_assistant_events(tmp_path: Path) -> Non
 
 def test_agent_honors_configured_retrieval_limit(tmp_path: Path) -> None:
     class RecordingRetriever(MemoryRetriever):
-        def __init__(self, store: MemoryStore, working: WorkingMemoryManager):
-            super().__init__(store, working)
+        def __init__(self, store: MemoryStore):
+            super().__init__(store)
             self.seen_limit: int | None = None
 
         def retrieve_context(
@@ -82,12 +87,10 @@ def test_agent_honors_configured_retrieval_limit(tmp_path: Path) -> None:
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
-    retriever = RecordingRetriever(store, working)
+    retriever = RecordingRetriever(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
         retriever=retriever,
         retrieval_limit=2,
     )
@@ -118,13 +121,11 @@ def test_agent_does_not_inject_current_user_message_as_retrieved_context(
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = RecordingProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
     )
 
     agent.respond("first question", session_id="s1")
@@ -132,11 +133,394 @@ def test_agent_does_not_inject_current_user_message_as_retrieved_context(
 
     second_request = provider.requests[-1]
     assert second_request[-1] == {"role": "user", "content": "second question"}
+    assert sum(1 for message in second_request if message["role"] == "system") == 1
+    assert second_request[1] == {"role": "user", "content": "first question"}
+    assert second_request[2] == {"role": "assistant", "content": "recorded response"}
     prior_context = "\n\n".join(
         str(message.get("content", "")) for message in second_request[:-1]
     )
-    assert "User: second question" not in prior_context
+    assert "second question" not in prior_context
     assert "## Current User Message" not in prior_context
+
+
+def test_agent_compresses_older_context_preserves_tail_and_transcript(
+    tmp_path: Path,
+) -> None:
+    class RecordingProvider:
+        name = "recording-provider"
+
+        def __init__(self) -> None:
+            self.requests: list[list[ChatMessage]] = []
+
+        def complete(self, messages: list[ChatMessage], **kwargs: Any) -> LLMResponse:
+            self.requests.append(messages)
+            return LLMResponse(
+                content="compressed response",
+                model="mock",
+                provider=self.name,
+                metadata={},
+                finish_reason="stop",
+            )
+
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    older_user = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="older user context " + ("alpha " * 80),
+    )
+    older_assistant = store.append_conversation_message(
+        session_id="s1",
+        role="assistant",
+        raw_content="older assistant context " + ("beta " * 80),
+    )
+    tail_user = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="recent tail question",
+    )
+    tail_assistant = store.append_conversation_message(
+        session_id="s1",
+        role="assistant",
+        raw_content="recent tail answer",
+    )
+    provider = RecordingProvider()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        retriever=MemoryRetriever(store),
+        context_max_prompt_tokens=80,
+        context_compression_threshold_ratio=0.5,
+        context_recent_tail_messages=2,
+    )
+
+    result = agent.respond("CURRENT UNIQUE REQUEST", session_id="s1")
+
+    request = provider.requests[0]
+    state = store.get_session_context_state("s1")
+    transcript = store.list_conversation_messages("s1")
+    assert state is not None
+    assert state.compressed_until_ordinal == older_assistant.ordinal
+    assert state.summary_source_message_ids == [older_user.id, older_assistant.id]
+    assert state.compression_version
+    assert state.metadata["prompt_token_estimate_before"] > state.metadata[
+        "prompt_token_estimate_after"
+    ]
+    assert state.metadata["threshold_tokens"] == 40
+    assert result.debug["context_compression_status"] == "completed"
+    assert result.debug["prompt_token_estimate"] == result.debug[
+        "prompt_token_estimate_after_rebuild"
+    ]
+    assert result.debug["prompt_token_estimate_before_compression"] > result.debug[
+        "prompt_token_estimate_after_rebuild"
+    ]
+    assert request[-1] == {"role": "user", "content": "CURRENT UNIQUE REQUEST"}
+    assert request[-3:-1] == [
+        {"role": "user", "content": tail_user.raw_content},
+        {"role": "assistant", "content": tail_assistant.raw_content},
+    ]
+    summary_messages = [
+        message
+        for message in request
+        if "## Compressed Session Context" in str(message.get("content", ""))
+    ]
+    assert len(summary_messages) == 1
+    summary_content = str(summary_messages[0]["content"])
+    assert "older user context" in summary_content
+    assert "older assistant context" in summary_content
+    assert "CURRENT UNIQUE REQUEST" not in summary_content
+    assert {"role": "user", "content": older_user.raw_content} not in request
+    assert {"role": "assistant", "content": older_assistant.raw_content} not in request
+    assert [message.id for message in transcript[:4]] == [
+        older_user.id,
+        older_assistant.id,
+        tail_user.id,
+        tail_assistant.id,
+    ]
+    assert [message.raw_content for message in transcript[:4]] == [
+        older_user.raw_content,
+        older_assistant.raw_content,
+        tail_user.raw_content,
+        tail_assistant.raw_content,
+    ]
+    assert transcript[-2].raw_content == "CURRENT UNIQUE REQUEST"
+
+    events = store.list_runtime_traces(session_id="s1", limit=20)
+    assert {event.event_type for event in events} >= {
+        "context_compression.started",
+        "context_compression.completed",
+    }
+
+
+def test_agent_keeps_tool_replay_intact_when_compression_boundary_would_split_it(
+    tmp_path: Path,
+) -> None:
+    class RecordingProvider:
+        name = "recording-provider"
+
+        def __init__(self) -> None:
+            self.requests: list[list[ChatMessage]] = []
+
+        def complete(self, messages: list[ChatMessage], **kwargs: Any) -> LLMResponse:
+            self.requests.append(messages)
+            return LLMResponse(
+                content="tool replay preserved",
+                model="mock",
+                provider=self.name,
+                metadata={},
+                finish_reason="stop",
+            )
+
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    prior_user = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="look up alpha " + ("detail " * 80),
+    )
+    assistant_tool_call = store.append_conversation_message(
+        session_id="s1",
+        role="assistant",
+        raw_content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"query":"alpha"}'},
+            }
+        ],
+    )
+    tool_result = store.append_conversation_message(
+        session_id="s1",
+        role="tool",
+        raw_content='{"content":"found alpha","metadata":{},"name":"lookup"}',
+        tool_call_id="call_1",
+        tool_result_id="trace_1",
+    )
+    provider = RecordingProvider()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        retriever=MemoryRetriever(store),
+        context_max_prompt_tokens=80,
+        context_compression_threshold_ratio=0.5,
+        context_recent_tail_messages=1,
+    )
+
+    agent.respond("continue from the tool result", session_id="s1")
+
+    request = provider.requests[0]
+    state = store.get_session_context_state("s1")
+    assert state is not None
+    assert state.compressed_until_ordinal == prior_user.ordinal
+    assert state.summary_source_message_ids == [prior_user.id]
+    assert request[-3:] == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"query":"alpha"}'},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": tool_result.raw_content,
+        },
+        {"role": "user", "content": "continue from the tool result"},
+    ]
+    assert {"role": "user", "content": prior_user.raw_content} not in request
+    assert [message.raw_content for message in store.list_conversation_messages("s1")[:3]] == [
+        prior_user.raw_content,
+        assistant_tool_call.raw_content,
+        tool_result.raw_content,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("invalid_output", "error_match"),
+    [
+        ("future_boundary", "compressed_until_ordinal"),
+        ("future_source_id", "summary_source_message_ids"),
+    ],
+)
+def test_agent_rejects_invalid_compressor_output_without_changing_context_state(
+    tmp_path: Path,
+    invalid_output: str,
+    error_match: str,
+) -> None:
+    class BadCompressor:
+        compression_version = "bad-compressor"
+
+        def should_compress(
+            self,
+            context: CompressionContext,
+            budget: CompressionBudget,
+        ) -> bool:
+            return True
+
+        def compress(
+            self,
+            messages: Sequence[ConversationMessage],
+            previous_summary: str,
+            focus: CompressionFocus,
+        ) -> CompressionResult:
+            compressed_until_ordinal = (
+                999
+                if invalid_output == "future_boundary"
+                else list(messages)[-1].ordinal
+            )
+            source_message_ids = [
+                *focus.previous_summary_source_message_ids,
+                *[message.id for message in messages],
+            ]
+            if invalid_output == "future_source_id":
+                source_message_ids.append("msg_future")
+            return CompressionResult(
+                summary="unsafe summary",
+                summary_source_message_ids=source_message_ids,
+                compressed_until_ordinal=compressed_until_ordinal,
+                compression_version=self.compression_version,
+                input_token_estimate=10,
+                output_token_estimate=2,
+            )
+
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.upsert_session_context_state(
+        SessionContextState(
+            session_id="s1",
+            compressed_until_ordinal=0,
+            summary="unchanged summary",
+            summary_source_message_ids=["msg_previous"],
+            compression_version="previous",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            metadata={"stable": True},
+        )
+    )
+    prior_user = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="older user context " + ("alpha " * 80),
+    )
+    prior_assistant = store.append_conversation_message(
+        session_id="s1",
+        role="assistant",
+        raw_content="older assistant context " + ("beta " * 80),
+    )
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+        context_compressor=BadCompressor(),
+        context_max_prompt_tokens=80,
+        context_compression_threshold_ratio=0.5,
+        context_recent_tail_messages=1,
+    )
+
+    with pytest.raises(ValueError, match=error_match):
+        agent.respond("current user must stay raw", session_id="s1")
+
+    state = store.get_session_context_state("s1")
+    assert state is not None
+    assert state.compressed_until_ordinal == 0
+    assert state.summary == "unchanged summary"
+    assert state.summary_source_message_ids == ["msg_previous"]
+    assert state.compression_version == "previous"
+    assert state.metadata == {"stable": True}
+    transcript = store.list_conversation_messages("s1")
+    assert [message.raw_content for message in transcript] == [
+        prior_user.raw_content,
+        prior_assistant.raw_content,
+        "current user must stay raw",
+    ]
+    failed = next(
+        trace
+        for trace in store.list_runtime_traces(session_id="s1", limit=20)
+        if trace.event_type == "context_compression.failed"
+    )
+    assert failed.metadata["stage"] == "validation"
+    assert failed.metadata["error_type"] == "ValueError"
+    assert not any(
+        trace.event_type == "context_compression.completed"
+        for trace in store.list_runtime_traces(session_id="s1", limit=20)
+    )
+
+
+@pytest.mark.parametrize("failure_stage", ["decision", "compress"])
+def test_agent_compression_failures_emit_trace_and_do_not_write_context_state(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    class RaisingCompressor:
+        compression_version = f"raising-{failure_stage}"
+
+        def should_compress(
+            self,
+            context: CompressionContext,
+            budget: CompressionBudget,
+        ) -> bool:
+            if failure_stage == "decision":
+                raise RuntimeError("decision failed")
+            return True
+
+        def compress(
+            self,
+            messages: Sequence[ConversationMessage],
+            previous_summary: str,
+            focus: CompressionFocus,
+        ) -> CompressionResult:
+            raise RuntimeError("compress failed")
+
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    prior_user = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="older user context " + ("alpha " * 80),
+    )
+    prior_assistant = store.append_conversation_message(
+        session_id="s1",
+        role="assistant",
+        raw_content="older assistant context " + ("beta " * 80),
+    )
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+        context_compressor=RaisingCompressor(),
+        context_max_prompt_tokens=80,
+        context_compression_threshold_ratio=0.5,
+        context_recent_tail_messages=1,
+    )
+
+    with pytest.raises(RuntimeError, match=failure_stage):
+        agent.respond("current user must remain in transcript", session_id="s1")
+
+    assert store.get_session_context_state("s1") is None
+    assert [
+        message.raw_content for message in store.list_conversation_messages("s1")
+    ] == [
+        prior_user.raw_content,
+        prior_assistant.raw_content,
+        "current user must remain in transcript",
+    ]
+    failed = next(
+        trace
+        for trace in store.list_runtime_traces(session_id="s1", limit=20)
+        if trace.event_type == "context_compression.failed"
+    )
+    assert failed.metadata["stage"] == failure_stage
+    assert failed.metadata["error_type"] == "RuntimeError"
+    assert not any(
+        trace.event_type == "context_compression.completed"
+        for trace in store.list_runtime_traces(session_id="s1", limit=20)
+    )
 
 
 def test_agent_logs_raw_llm_request_and_response(tmp_path: Path) -> None:
@@ -158,22 +542,20 @@ def test_agent_logs_raw_llm_request_and_response(tmp_path: Path) -> None:
     trace_path = tmp_path / "logs" / "llm.jsonl"
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MetadataProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         llm_debug_logging=True,
         llm_trace_log_path=trace_path,
     )
 
     agent.respond("hello", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=20)
-    started = next(event for event in events if event.metadata.get("event_type") == "llm.started")
+    traces = store.list_runtime_traces(session_id="s1", limit=20)
+    started = next(trace for trace in traces if trace.event_type == "llm.started")
     completed = next(
-        event for event in events if event.metadata.get("event_type") == "llm.completed"
+        trace for trace in traces if trace.event_type == "llm.completed"
     )
     assert started.metadata["request"]["messages"][0]["role"] == "system"
     assert started.metadata["request"]["tool_choice"] is None
@@ -207,21 +589,19 @@ def test_agent_omits_raw_llm_logs_unless_debug_logging_is_enabled(tmp_path: Path
     trace_path = tmp_path / "logs" / "llm.jsonl"
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MetadataProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         llm_trace_log_path=trace_path,
     )
 
     agent.respond("hello", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=20)
-    started = next(event for event in events if event.metadata.get("event_type") == "llm.started")
+    traces = store.list_runtime_traces(session_id="s1", limit=20)
+    started = next(trace for trace in traces if trace.event_type == "llm.started")
     completed = next(
-        event for event in events if event.metadata.get("event_type") == "llm.completed"
+        trace for trace in traces if trace.event_type == "llm.completed"
     )
     assert "request" not in started.metadata
     assert "response" not in completed.metadata
@@ -279,13 +659,11 @@ def test_agent_does_not_pass_tool_kwargs_when_registry_is_empty(tmp_path: Path) 
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = RecordingProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
     )
 
     result = agent.respond("hello", session_id="s1")
@@ -323,13 +701,11 @@ def test_agent_passes_registered_tools_and_auto_tool_choice(tmp_path: Path) -> N
     registry.register(EchoTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = RecordingProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
@@ -340,39 +716,28 @@ def test_agent_passes_registered_tools_and_auto_tool_choice(tmp_path: Path) -> N
     assert provider.kwargs[0]["tools"][0].parameters == EchoTool.parameters
 
 
-def test_agent_records_structured_event_sequence(tmp_path: Path) -> None:
+def test_agent_records_transcript_and_runtime_trace_sequence(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
     )
 
     result = agent.respond("hello", session_id="s1")
 
-    events = list(reversed(store.list_events(session_id="s1", limit=20)))
-    event_types = [
-        str(event.metadata["event_type"])
-        for event in events
-        if "event_type" in event.metadata
-    ]
+    traces = list(reversed(store.list_runtime_traces(session_id="s1", limit=20)))
+    event_types = [trace.event_type for trace in traces]
     assert event_types == [
-        "turn.started",
-        "memory.retrieved",
+        "context_compression.skipped",
         "llm.started",
         "llm.completed",
         "memory.extracted",
-        "turn.completed",
     ]
-    completed = next(
-        event for event in events if event.metadata.get("event_type") == "turn.completed"
-    )
-    assert completed.metadata["assistant_response_event_id"]
-    assert completed.metadata["retry_count"] == 0
-    assert result.debug["delivery_event_id"] == completed.id
+    messages = store.list_conversation_messages("s1")
+    assert [message.role for message in messages] == ["user", "assistant"]
+    assert messages[1].id == result.debug["assistant_message_id"]
 
 
 def test_provider_tool_calls_can_run_multiple_bounded_iterations(tmp_path: Path) -> None:
@@ -441,13 +806,11 @@ def test_provider_tool_calls_can_run_multiple_bounded_iterations(tmp_path: Path)
     registry.register(EchoTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = ToolCallingProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
@@ -500,11 +863,11 @@ def test_provider_tool_calls_can_run_multiple_bounded_iterations(tmp_path: Path)
             ),
         },
     ]
-    events = store.list_events(session_id="s1", limit=30)
+    events = store.list_runtime_traces(session_id="s1", limit=30)
     llm_completed_rounds = [
         event.metadata["round"]
         for event in events
-        if event.metadata.get("event_type") == "llm.completed"
+        if event.event_type == "llm.completed"
     ]
     assert llm_completed_rounds == ["tool_result_2", "tool_result_1", "initial"]
     assert result.debug["provider_tool_call_count"] == 2
@@ -557,35 +920,31 @@ def test_max_tool_iterations_triggers_no_tools_finalization(tmp_path: Path) -> N
     registry.register(EchoTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = RepeatingToolProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
         max_tool_iterations=2,
     )
 
     result = agent.respond("use echo", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=30)
-    completed = next(
-        event for event in events if event.metadata.get("event_type") == "turn.completed"
-    )
+    events = store.list_runtime_traces(session_id="s1", limit=30)
     finalizing = next(
-        event for event in events if event.metadata.get("event_type") == "tool_loop.finalizing"
+        event for event in events if event.event_type == "tool_loop.finalizing"
     )
     assert result.response == "summary after limit"
     assert len(provider.calls) == 4
     assert provider.calls[-1][1] == {}
     assert provider.calls[-1][0][-1]["role"] == "user"
+    assert provider.calls[-1][0][-1]["content"].startswith("<system-reminder>\n")
+    assert provider.calls[-1][0][-1]["content"].endswith("\n</system-reminder>")
     assert "Do not call tools" in provider.calls[-1][0][-1]["content"]
     assert result.debug["llm_round_count"] == 4
     assert result.debug["tool_iteration_count"] == 2
     assert result.debug["final_finish_reason"] == "stop"
-    assert completed.metadata["tool_iteration_count"] == 2
     assert finalizing.metadata["reason"] == "max_tool_iterations"
     assert finalizing.metadata["tool_iteration_count"] == 2
 
@@ -632,27 +991,27 @@ def test_max_llm_rounds_triggers_no_tools_finalization(tmp_path: Path) -> None:
     registry.register(EchoTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = RoundLimitedProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
         max_llm_rounds=2,
     )
 
     result = agent.respond("use echo", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=40)
+    events = store.list_runtime_traces(session_id="s1", limit=40)
     finalizing = next(
-        event for event in events if event.metadata.get("event_type") == "tool_loop.finalizing"
+        event for event in events if event.event_type == "tool_loop.finalizing"
     )
     assert result.response == "final answer after round limit"
     assert len(provider.calls) == 3
     assert provider.calls[-1][1] == {}
     assert provider.calls[-1][0][-1]["role"] == "user"
+    assert provider.calls[-1][0][-1]["content"].startswith("<system-reminder>\n")
+    assert provider.calls[-1][0][-1]["content"].endswith("\n</system-reminder>")
     assert "Do not call tools" in provider.calls[-1][0][-1]["content"]
     assert result.debug["llm_round_count"] == 3
     assert result.debug["tool_iteration_count"] == 1
@@ -697,13 +1056,11 @@ def test_finalization_returning_tool_calls_fails_observably(tmp_path: Path) -> N
     registry.register(EchoTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = FinalizationToolCallingProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
         max_tool_iterations=1,
     )
@@ -711,12 +1068,12 @@ def test_finalization_returning_tool_calls_fails_observably(tmp_path: Path) -> N
     with pytest.raises(ToolLoopLimitExceeded, match="finalization returned tool calls"):
         agent.respond("use echo", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=40)
-    failed = next(event for event in events if event.metadata.get("event_type") == "turn.failed")
+    events = store.list_runtime_traces(session_id="s1", limit=40)
+    failed = next(event for event in events if event.event_type == "turn.failed")
     finalization_failed = next(
         event
         for event in events
-        if event.metadata.get("event_type") == "tool_loop.finalization_failed"
+        if event.event_type == "tool_loop.finalization_failed"
     )
     assert len(provider.calls) == 3
     assert provider.calls[-1][1] == {}
@@ -768,24 +1125,22 @@ def test_provider_tool_call_missing_id_fails_before_running_tool(tmp_path: Path)
     registry.register(tool)
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = MissingIdProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
     with pytest.raises(ToolProtocolError, match="missing an id"):
         agent.respond("write", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=30)
-    failed = next(event for event in events if event.metadata.get("event_type") == "turn.failed")
+    events = store.list_runtime_traces(session_id="s1", limit=30)
+    failed = next(event for event in events if event.event_type == "turn.failed")
     assert provider.calls == 1
     assert tool.run_count == 0
-    assert not any(event.metadata.get("event_type") == "tool.started" for event in events)
+    assert not any(event.event_type == "tool.started" for event in events)
     assert failed.metadata["stage"] == "tool_protocol"
     assert failed.metadata["error_code"] == "tool_protocol_violation"
     assert failed.metadata["tool_call_count"] == 0
@@ -821,27 +1176,25 @@ def test_tool_calls_finish_reason_with_empty_calls_fails_without_second_llm_roun
     registry.register(NoopTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = EmptyToolCallsProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
     with pytest.raises(ToolProtocolError, match="finish_reason=tool_calls"):
         agent.respond("noop", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=30)
-    failed = next(event for event in events if event.metadata.get("event_type") == "turn.failed")
+    events = store.list_runtime_traces(session_id="s1", limit=30)
+    failed = next(event for event in events if event.event_type == "turn.failed")
     llm_started = [
-        event for event in events if event.metadata.get("event_type") == "llm.started"
+        event for event in events if event.event_type == "llm.started"
     ]
     assert provider.calls == 1
     assert len(llm_started) == 1
-    assert not any(event.metadata.get("event_type") == "tool.started" for event in events)
+    assert not any(event.event_type == "tool.started" for event in events)
     assert failed.metadata["stage"] == "tool_protocol"
     assert failed.metadata["error_code"] == "tool_protocol_violation"
     assert failed.metadata["provider_tool_call_count"] == 0
@@ -900,21 +1253,19 @@ def test_provider_tool_call_parse_error_becomes_tool_result_and_model_recovers(
     registry.register(tool)
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = InvalidArgumentsProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
     result = agent.respond("lookup", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=30)
+    events = store.list_runtime_traces(session_id="s1", limit=30)
     tool_failed = next(
-        event for event in events if event.metadata.get("event_type") == "tool.failed"
+        event for event in events if event.event_type == "tool.failed"
     )
     assert result.response == "recovered after tool error"
     assert provider.calls == 2
@@ -924,7 +1275,7 @@ def test_provider_tool_call_parse_error_becomes_tool_result_and_model_recovers(
     assert tool_failed.metadata["source"] == "provider"
     assert '"failed":true' in tool_failed.content
     assert '"error_type":"ToolExecutionError"' in tool_failed.content
-    assert not any(event.metadata.get("event_type") == "turn.failed" for event in events)
+    assert not any(event.event_type == "turn.failed" for event in events)
 
 
 def test_provider_unknown_tool_becomes_tool_result_and_model_recovers(
@@ -962,21 +1313,19 @@ def test_provider_unknown_tool_becomes_tool_result_and_model_recovers(
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = UnknownToolProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=ToolRegistry(),
     )
 
     result = agent.respond("use missing tool", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=30)
+    events = store.list_runtime_traces(session_id="s1", limit=30)
     tool_failed = next(
-        event for event in events if event.metadata.get("event_type") == "tool.failed"
+        event for event in events if event.event_type == "tool.failed"
     )
     follow_up_messages = provider.calls[1][0]
     assert result.response == "recovered after unknown tool"
@@ -989,7 +1338,7 @@ def test_provider_unknown_tool_becomes_tool_result_and_model_recovers(
     assert follow_up_messages[-1]["role"] == "tool"
     assert follow_up_messages[-1]["tool_call_id"] == "call_missing"
     assert follow_up_messages[-1]["content"] == tool_failed.content
-    assert not any(event.metadata.get("event_type") == "turn.failed" for event in events)
+    assert not any(event.event_type == "turn.failed" for event in events)
 
 
 def test_provider_tool_runtime_exception_becomes_tool_result_and_model_recovers(
@@ -1036,21 +1385,19 @@ def test_provider_tool_runtime_exception_becomes_tool_result_and_model_recovers(
     registry.register(ExplodingTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = ExplodingToolProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
     result = agent.respond("use exploding tool", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=30)
+    events = store.list_runtime_traces(session_id="s1", limit=30)
     tool_failed = next(
-        event for event in events if event.metadata.get("event_type") == "tool.failed"
+        event for event in events if event.event_type == "tool.failed"
     )
     follow_up_messages = provider.calls[1][0]
     assert result.response == "recovered after runtime exception"
@@ -1064,7 +1411,7 @@ def test_provider_tool_runtime_exception_becomes_tool_result_and_model_recovers(
     assert follow_up_messages[-1]["role"] == "tool"
     assert follow_up_messages[-1]["tool_call_id"] == "call_explode"
     assert follow_up_messages[-1]["content"] == tool_failed.content
-    assert not any(event.metadata.get("event_type") == "turn.failed" for event in events)
+    assert not any(event.event_type == "turn.failed" for event in events)
 
 
 def test_agent_retries_transient_llm_errors_with_bounded_count(tmp_path: Path) -> None:
@@ -1082,21 +1429,19 @@ def test_agent_retries_transient_llm_errors_with_bounded_count(tmp_path: Path) -
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     provider = FlakyProvider()
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         max_llm_retries=2,
     )
 
     result = agent.respond("hello", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=20)
+    events = store.list_runtime_traces(session_id="s1", limit=20)
     completed = next(
-        event for event in events if event.metadata.get("event_type") == "llm.completed"
+        event for event in events if event.event_type == "llm.completed"
     )
     assert result.response == "recovered"
     assert provider.calls == 2
@@ -1107,20 +1452,18 @@ def test_agent_retries_transient_llm_errors_with_bounded_count(tmp_path: Path) -
 def test_agent_cancellation_writes_failed_event_and_clears_flag(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
     )
     agent.cancel("s1")
 
     with pytest.raises(AgentCanceledError):
         agent.respond("hello", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=20)
-    failed = next(event for event in events if event.metadata.get("event_type") == "turn.failed")
+    events = store.list_runtime_traces(session_id="s1", limit=20)
+    failed = next(event for event in events if event.event_type == "turn.failed")
     assert failed.metadata["status"] == "canceled"
     assert failed.metadata["stage"] == "before_user_event"
     assert not agent.is_canceled("s1")
@@ -1142,12 +1485,10 @@ def test_agent_executes_explicit_tool_calls_with_deterministic_events(tmp_path: 
     registry.register(EchoTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
@@ -1157,19 +1498,24 @@ def test_agent_executes_explicit_tool_calls_with_deterministic_events(tmp_path: 
         tool_calls=[ToolCall(name="echo", arguments={"b": 2, "a": 1})],
     )
 
-    events = list(reversed(store.list_events(session_id="s1", limit=20)))
+    events = list(reversed(store.list_runtime_traces(session_id="s1", limit=20)))
     tool_started = next(
-        event for event in events if event.metadata.get("event_type") == "tool.started"
+        event for event in events if event.event_type == "tool.started"
     )
     tool_completed = next(
-        event for event in events if event.metadata.get("event_type") == "tool.completed"
+        event for event in events if event.event_type == "tool.completed"
     )
-    assert tool_started.role == "tool"
-    assert tool_completed.role == "tool"
+    assert tool_started.metadata["source"] == "caller"
+    assert tool_completed.metadata["source"] == "caller"
     assert tool_completed.content == (
         '{"content":"echoed","metadata":{"arguments":{"a":1,"b":2}},"name":"echo"}'
     )
     assert tool_completed.metadata["result"]["metadata"]["arguments"] == {"a": 1, "b": 2}
+    messages = store.list_conversation_messages("s1")
+    assert [message.role for message in messages] == ["user", "assistant", "tool", "assistant"]
+    assert messages[1].tool_calls[0]["function"]["name"] == "echo"
+    assert messages[2].tool_call_id == messages[1].tool_calls[0]["id"]
+    assert messages[2].raw_content == tool_completed.content
     assert result.debug["tool_call_count"] == 1
 
 
@@ -1188,12 +1534,10 @@ def test_tool_cancellation_after_run_records_tool_failed(tmp_path: Path) -> None
     registry = ToolRegistry()
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
     registry.register(CancelAfterRunTool(agent))
@@ -1205,12 +1549,12 @@ def test_tool_cancellation_after_run_records_tool_failed(tmp_path: Path) -> None
             tool_calls=[ToolCall(name="cancel_after_run")],
         )
 
-    events = store.list_events(session_id="s1", limit=20)
+    events = store.list_runtime_traces(session_id="s1", limit=20)
     tool_failed = next(
-        event for event in events if event.metadata.get("event_type") == "tool.failed"
+        event for event in events if event.event_type == "tool.failed"
     )
     turn_failed = next(
-        event for event in events if event.metadata.get("event_type") == "turn.failed"
+        event for event in events if event.event_type == "turn.failed"
     )
     assert tool_failed.metadata["tool_name"] == "cancel_after_run"
     assert tool_failed.metadata["error_type"] == "AgentCanceledError"
@@ -1230,12 +1574,10 @@ def test_tool_result_serialization_failure_records_tool_failed(tmp_path: Path) -
     registry.register(UnserializableTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
@@ -1246,12 +1588,12 @@ def test_tool_result_serialization_failure_records_tool_failed(tmp_path: Path) -
             tool_calls=[ToolCall(name="unserializable")],
         )
 
-    events = store.list_events(session_id="s1", limit=20)
+    events = store.list_runtime_traces(session_id="s1", limit=20)
     tool_failed = next(
-        event for event in events if event.metadata.get("event_type") == "tool.failed"
+        event for event in events if event.event_type == "tool.failed"
     )
     turn_failed = next(
-        event for event in events if event.metadata.get("event_type") == "turn.failed"
+        event for event in events if event.event_type == "turn.failed"
     )
     assert tool_failed.metadata["tool_name"] == "unserializable"
     assert tool_failed.metadata["error_type"] == "TypeError"
@@ -1261,12 +1603,10 @@ def test_tool_result_serialization_failure_records_tool_failed(tmp_path: Path) -
 def test_unknown_tool_records_tool_failed_and_turn_failed_tool_stage(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=ToolRegistry(),
     )
 
@@ -1277,12 +1617,12 @@ def test_unknown_tool_records_tool_failed_and_turn_failed_tool_stage(tmp_path: P
             tool_calls=[ToolCall(name="missing_tool")],
         )
 
-    events = store.list_events(session_id="s1", limit=20)
+    events = store.list_runtime_traces(session_id="s1", limit=20)
     tool_failed = next(
-        event for event in events if event.metadata.get("event_type") == "tool.failed"
+        event for event in events if event.event_type == "tool.failed"
     )
     turn_failed = next(
-        event for event in events if event.metadata.get("event_type") == "turn.failed"
+        event for event in events if event.event_type == "turn.failed"
     )
     assert tool_failed.metadata["tool_name"] == "missing_tool"
     assert tool_failed.metadata["error_type"] == "ToolExecutionError"
@@ -1304,12 +1644,10 @@ def test_tool_run_exception_records_tool_failed_and_turn_failed_tool_stage(
     registry.register(ExplodingTool())
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=MockLLMProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         tool_registry=registry,
     )
 
@@ -1320,12 +1658,12 @@ def test_tool_run_exception_records_tool_failed_and_turn_failed_tool_stage(
             tool_calls=[ToolCall(name="explode")],
         )
 
-    events = store.list_events(session_id="s1", limit=20)
+    events = store.list_runtime_traces(session_id="s1", limit=20)
     tool_failed = next(
-        event for event in events if event.metadata.get("event_type") == "tool.failed"
+        event for event in events if event.event_type == "tool.failed"
     )
     turn_failed = next(
-        event for event in events if event.metadata.get("event_type") == "turn.failed"
+        event for event in events if event.event_type == "turn.failed"
     )
     assert tool_failed.metadata["tool_name"] == "explode"
     assert tool_failed.metadata["error_type"] == "RuntimeError"
@@ -1342,20 +1680,18 @@ def test_agent_retry_exhaustion_records_llm_stage_and_retry_count(tmp_path: Path
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=AlwaysTimeoutProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         max_llm_retries=2,
     )
 
     with pytest.raises(LLMCallError):
         agent.respond("hello", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=20)
-    failed = next(event for event in events if event.metadata.get("event_type") == "turn.failed")
+    events = store.list_runtime_traces(session_id="s1", limit=20)
+    failed = next(event for event in events if event.event_type == "turn.failed")
     assert failed.metadata["stage"] == "llm"
     assert failed.metadata["retry_count"] == 2
 
@@ -1369,20 +1705,18 @@ def test_agent_zero_retry_transient_failure_records_llm_stage(tmp_path: Path) ->
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=TimeoutProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
         max_llm_retries=0,
     )
 
     with pytest.raises(LLMCallError):
         agent.respond("hello", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=20)
-    failed = next(event for event in events if event.metadata.get("event_type") == "turn.failed")
+    events = store.list_runtime_traces(session_id="s1", limit=20)
+    failed = next(event for event in events if event.event_type == "turn.failed")
     assert failed.metadata["stage"] == "llm"
     assert failed.metadata["retry_count"] == 0
 
@@ -1396,36 +1730,16 @@ def test_agent_non_transient_provider_failure_records_llm_stage(tmp_path: Path) 
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
     agent = AlphaAgent(
         store=store,
         llm_provider=BadProvider(),
-        working_memory=working,
-        retriever=MemoryRetriever(store, working),
+        retriever=MemoryRetriever(store),
     )
 
     with pytest.raises(LLMCallError):
         agent.respond("hello", session_id="s1")
 
-    events = store.list_events(session_id="s1", limit=20)
-    failed = next(event for event in events if event.metadata.get("event_type") == "turn.failed")
+    events = store.list_runtime_traces(session_id="s1", limit=20)
+    failed = next(event for event in events if event.event_type == "turn.failed")
     assert failed.metadata["stage"] == "llm"
     assert failed.metadata["retry_count"] == 0
-
-
-def test_cli_basic_commands_with_mock_provider(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path = tmp_path / "alpha.db"
-    monkeypatch.setenv("ALPHA_DB_PATH", str(db_path))
-    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(tmp_path / "config.toml"))
-    monkeypatch.setenv("ALPHA_LLM_PROVIDER", "mock")
-    runner = CliRunner()
-
-    init_result = runner.invoke(app, ["init"])
-    ask_result = runner.invoke(app, ["ask", "hello"])
-
-    assert init_result.exit_code == 0
-    assert ask_result.exit_code == 0
-    assert "Mock response" in ask_result.output

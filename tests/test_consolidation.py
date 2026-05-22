@@ -5,7 +5,6 @@ from pathlib import Path
 from alpha_agent.memory.consolidation import ConsolidationService
 from alpha_agent.memory.episodic import EpisodicMemoryManager
 from alpha_agent.memory.store import MemoryStore
-from alpha_agent.memory.working import WorkingMemoryManager
 
 
 def test_consolidation_promotes_explicit_durable_facts(tmp_path: Path) -> None:
@@ -28,15 +27,10 @@ def test_consolidation_promotes_explicit_durable_facts(tmp_path: Path) -> None:
     assert semantic[0].object == "blue"
 
 
-def test_consolidation_prunes_low_priority_working_memory(tmp_path: Path) -> None:
+def test_consolidation_report_omits_working_memory_pruning(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
-    working = WorkingMemoryManager(store)
-    working.add_active_context("s1", "low", priority=0.1)
-    working.add_active_context("s1", "high", priority=0.8)
 
     report = ConsolidationService(store).consolidate()
 
-    active = store.list_working_memory("s1")
-    assert report.pruned_working_memory == 1
-    assert [item.content for item in active] == ["high"]
+    assert "working memory" not in report.render()

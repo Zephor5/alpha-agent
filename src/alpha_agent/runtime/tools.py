@@ -7,12 +7,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from alpha_agent.llm.base import LLMToolCall
-from alpha_agent.memory.models import Event
+from alpha_agent.memory.models import RuntimeTrace
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.tools.base import ToolCall, ToolResult
 from alpha_agent.tools.registry import ToolRegistry
 
-ToolEventWriter = Callable[[str, str, dict[str, Any]], Event]
+ToolTraceWriter = Callable[[str, str, dict[str, Any]], RuntimeTrace]
 CancelCheck = Callable[[str], None]
 ToolCallInput = ToolCall | LLMToolCall | Mapping[str, Any]
 ToolCallInputs = ToolCallInput | Sequence[ToolCallInput] | None
@@ -28,11 +28,11 @@ class ToolExecutionError(RuntimeError):
 
 @dataclass(frozen=True)
 class ExecutedToolResult:
-    """Tool result plus the event that persisted it."""
+    """Tool result plus the trace that persisted its diagnostic record."""
 
     call: ToolCall
     result: ToolResult
-    event: Event
+    trace: RuntimeTrace
 
 
 class ToolExecutor:
@@ -66,16 +66,16 @@ class ToolExecutor:
         self,
         *,
         calls: Sequence[ToolCall],
-        write_event: ToolEventWriter,
+        write_trace: ToolTraceWriter,
         check_canceled: CancelCheck,
         recover_errors: bool = False,
     ) -> list[ExecutedToolResult]:
-        """Execute a finite list of tool calls and persist started/completed/failed events."""
+        """Execute a finite list of tool calls and persist diagnostic traces."""
 
         executed: list[ExecutedToolResult] = []
         for index, call in enumerate(calls):
             check_canceled("before_tool")
-            started_event = write_event(
+            started_trace = write_trace(
                 "tool.started",
                 deterministic_json(self._call_payload(call)),
                 {
@@ -99,14 +99,14 @@ class ToolExecutor:
                 check_canceled("after_tool")
                 result_payload = self._result_payload(result)
                 result_content = deterministic_json(result_payload)
-                completed_event = write_event(
+                completed_trace = write_trace(
                     "tool.completed",
                     result_content,
                     {
                         "tool_name": call.name,
                         "tool_call_id": call.id,
                         "tool_index": index,
-                        "started_event_id": started_event.id,
+                        "started_trace_id": started_trace.id,
                         "result": result_payload,
                     },
                 )
@@ -115,15 +115,15 @@ class ToolExecutor:
                     "tool_name": call.name,
                     "tool_call_id": call.id,
                     "tool_index": index,
-                    "started_event_id": started_event.id,
+                    "started_trace_id": started_trace.id,
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 }
                 if type(exc).__name__ == "AgentCanceledError":
-                    write_event("tool.failed", str(exc), failed_metadata)
+                    write_trace("tool.failed", str(exc), failed_metadata)
                     raise
                 if not recover_errors:
-                    write_event("tool.failed", str(exc), failed_metadata)
+                    write_trace("tool.failed", str(exc), failed_metadata)
                     if isinstance(exc, ToolExecutionError):
                         raise
                     raise ToolExecutionError(call, str(exc)) from exc
@@ -131,12 +131,12 @@ class ToolExecutor:
                 result = self._error_result(call, exc)
                 result_payload = self._result_payload(result)
                 result_content = deterministic_json(result_payload)
-                completed_event = write_event(
+                completed_trace = write_trace(
                     "tool.failed",
                     result_content,
                     {**failed_metadata, "result": result_payload},
                 )
-            executed.append(ExecutedToolResult(call=call, result=result, event=completed_event))
+            executed.append(ExecutedToolResult(call=call, result=result, trace=completed_trace))
         return executed
 
     def _normalize_call(self, raw_call: ToolCall | LLMToolCall | Mapping[str, Any]) -> ToolCall:

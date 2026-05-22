@@ -1,21 +1,40 @@
-CREATE TABLE IF NOT EXISTS events (
+CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+    raw_content TEXT NOT NULL,
+    model_content TEXT,
+    tool_call_id TEXT,
+    tool_calls TEXT NOT NULL DEFAULT '[]',
+    tool_result_id TEXT,
+    provider_metadata TEXT NOT NULL DEFAULT '{}',
+    source_metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
-    metadata TEXT NOT NULL DEFAULT '{}'
+    metadata TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(session_id, ordinal),
+    CHECK (ordinal >= 1)
 );
 
-CREATE TABLE IF NOT EXISTS working_memory (
+CREATE TABLE IF NOT EXISTS session_context_states (
+    session_id TEXT PRIMARY KEY,
+    compressed_until_ordinal INTEGER NOT NULL DEFAULT 0,
+    summary TEXT NOT NULL DEFAULT '',
+    summary_source_message_ids TEXT NOT NULL DEFAULT '[]',
+    compression_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    CHECK (compressed_until_ordinal >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS runtime_traces (
     id TEXT PRIMARY KEY,
+    event_type TEXT NOT NULL,
     session_id TEXT NOT NULL,
     content TEXT NOT NULL,
-    source_event_id TEXT,
-    priority REAL NOT NULL DEFAULT 0.5,
-    expires_at TEXT,
-    created_at TEXT NOT NULL,
-    metadata TEXT NOT NULL DEFAULT '{}'
+    metadata TEXT NOT NULL DEFAULT '{}',
+    timestamp TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS episodic_memories (
@@ -120,10 +139,18 @@ CREATE TABLE IF NOT EXISTS gateway_dedup (
     metadata TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
-CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
-CREATE INDEX IF NOT EXISTS idx_working_memory_session_id ON working_memory(session_id);
-CREATE INDEX IF NOT EXISTS idx_working_memory_created_at ON working_memory(created_at);
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_ordinal
+    ON conversation_messages(session_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_created_at
+    ON conversation_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_tool_call_id
+    ON conversation_messages(tool_call_id);
+CREATE INDEX IF NOT EXISTS idx_session_context_states_updated_at
+    ON session_context_states(updated_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_timestamp
+    ON runtime_traces(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_runtime_traces_event_type_timestamp
+    ON runtime_traces(event_type, timestamp);
 CREATE INDEX IF NOT EXISTS idx_episodic_created_at ON episodic_memories(created_at);
 CREATE INDEX IF NOT EXISTS idx_episodic_salience ON episodic_memories(salience);
 CREATE INDEX IF NOT EXISTS idx_semantic_subject ON semantic_memories(subject);

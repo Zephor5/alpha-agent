@@ -8,7 +8,6 @@ from alpha_agent.memory.extractor import MemoryExtractor
 from alpha_agent.memory.models import ExtractedMemoryCandidate
 from alpha_agent.memory.persistence import PersistedMemory, persist_candidates
 from alpha_agent.memory.store import MemoryStore
-from alpha_agent.runtime.events import create_event
 
 
 class MemoryReviewService:
@@ -34,22 +33,20 @@ class MemoryReviewService:
         session_id: str,
         candidates: list[ExtractedMemoryCandidate],
     ) -> list[PersistedMemory]:
-        """Store approved candidates after writing a review source event."""
+        """Store approved candidates after writing a review source message."""
 
         if not candidates:
             return []
-        source_event = self.store.insert_event(
-            create_event(
-                session_id=session_id,
-                role="user",
-                content=message,
-                metadata={"review_mode": True},
-            )
+        source_message = self.store.append_conversation_message(
+            session_id=session_id,
+            role="user",
+            raw_content=message,
+            metadata={"review_mode": True},
         )
         approved = [
             candidate
             if candidate.source_event_ids
-            else replace(candidate, source_event_ids=[source_event.id])
+            else replace(candidate, source_event_ids=[source_message.id])
             for candidate in candidates
         ]
         return persist_candidates(self.store, approved)

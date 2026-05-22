@@ -7,31 +7,51 @@ from typing import Any, Literal
 
 MemoryType = Literal["episodic", "semantic", "procedural"]
 CandidateType = Literal["episodic", "semantic", "procedural_candidate"]
+ConversationRole = Literal["user", "assistant", "tool"]
 
 
 @dataclass(frozen=True)
-class Event:
-    """Raw chronological experience."""
+class ConversationMessage:
+    """Append-only source message in a session transcript."""
 
     id: str
     session_id: str
-    role: Literal["user", "assistant", "system", "tool"]
-    content: str
+    ordinal: int
+    role: ConversationRole
+    raw_content: str
+    model_content: str | None
+    tool_call_id: str | None
+    tool_calls: list[dict[str, Any]]
+    tool_result_id: str | None
+    provider_metadata: dict[str, Any]
+    source_metadata: dict[str, Any]
     created_at: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class WorkingMemoryItem:
-    """Short-lived active context."""
+class SessionContextState:
+    """Active compressed context projection for a session."""
+
+    session_id: str
+    compressed_until_ordinal: int
+    summary: str
+    summary_source_message_ids: list[str]
+    compression_version: str
+    created_at: str
+    updated_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RuntimeTrace:
+    """Narrow diagnostic record for runtime behavior."""
 
     id: str
     session_id: str
+    event_type: str
     content: str
-    source_event_id: str | None
-    priority: float
-    expires_at: str | None
-    created_at: str
+    timestamp: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -92,7 +112,6 @@ class ProceduralMemory:
 class RetrievedContext:
     """Memory context selected for a turn."""
 
-    working_memory: list[WorkingMemoryItem]
     episodic_memories: list[EpisodicMemory]
     semantic_memories: list[SemanticMemory]
     procedural_memories: list[ProceduralMemory]

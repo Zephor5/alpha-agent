@@ -46,10 +46,10 @@ from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.review import MemoryReviewService, edit_candidate
 from alpha_agent.memory.store import MemoryStore
-from alpha_agent.memory.working import WorkingMemoryManager
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.runtime.prompt_builder import PromptBuilder
 from alpha_agent.runtime.session import new_session_id
+from alpha_agent.runtime.session_context import SessionContextManager
 
 console = Console()
 app = typer.Typer(help="Alpha Agent personal memory runtime.")
@@ -97,18 +97,21 @@ def _store(config: AlphaConfig) -> MemoryStore:
 
 def _build_agent(config: AlphaConfig) -> AlphaAgent:
     store = _store(config)
-    working = WorkingMemoryManager(store, limit=config.working_memory_limit)
     procedural = ProceduralMemoryManager(store)
     procedural.load_builtin_skills()
-    retriever = MemoryRetriever(store, working)
+    retriever = MemoryRetriever(store)
     return AlphaAgent(
         store=store,
         llm_provider=_provider(config),
-        working_memory=working,
         retriever=retriever,
         retrieval_limit=config.retrieval_limit,
         llm_debug_logging=config.llm_debug_logging,
         llm_trace_log_path=config.log_dir / "llm.jsonl",
+        context_max_prompt_tokens=config.context_max_prompt_tokens,
+        context_compression_threshold_ratio=config.context_compression_threshold_ratio,
+        context_recent_tail_messages=config.context_recent_tail_messages,
+        context_min_summary_tokens=config.context_min_summary_tokens,
+        context_max_summary_tokens=config.context_max_summary_tokens,
     )
 
 
@@ -354,8 +357,15 @@ def config_show() -> None:
         table.add_row("compatible_base_url", config.compatible_base_url or "")
     table.add_row("llm_model", _display_model(config))
     table.add_row("llm_debug_logging", str(config.llm_debug_logging).lower())
-    table.add_row("working_memory_limit", str(config.working_memory_limit))
     table.add_row("retrieval_limit", str(config.retrieval_limit))
+    table.add_row("context_max_prompt_tokens", str(config.context_max_prompt_tokens))
+    table.add_row(
+        "context_compression_threshold_ratio",
+        str(config.context_compression_threshold_ratio),
+    )
+    table.add_row("context_recent_tail_messages", str(config.context_recent_tail_messages))
+    table.add_row("context_min_summary_tokens", str(config.context_min_summary_tokens))
+    table.add_row("context_max_summary_tokens", str(config.context_max_summary_tokens))
     console.print(table)
     typer.echo(f"Config path: {default_config_path()}")
 
@@ -584,8 +594,7 @@ def search(
 
     config = load_config()
     store = _store(config)
-    working = WorkingMemoryManager(store, limit=config.working_memory_limit)
-    context = MemoryRetriever(store, working).retrieve_context(
+    context = MemoryRetriever(store).retrieve_context(
         query=query,
         session_id="memory-search",
         limit=config.retrieval_limit,
@@ -757,7 +766,7 @@ def prompt(
     message: Annotated[str, typer.Argument(help="Message to build a prompt for.")],
     session: Annotated[
         str,
-        typer.Option("--session", "-s", help="Session id whose working memory should be used."),
+        typer.Option("--session", "-s", help="Session id whose session context should be used."),
     ] = "debug",
     platform: Annotated[
         str | None,
@@ -793,8 +802,7 @@ def prompt(
     config = load_config()
     store = _store(config)
     ProceduralMemoryManager(store).load_builtin_skills()
-    working = WorkingMemoryManager(store, limit=config.working_memory_limit)
-    retriever = MemoryRetriever(store, working)
+    retriever = MemoryRetriever(store)
     source = _merge_source_context(
         _source_from_gateway_session(store, session),
         session_id=session,
@@ -808,15 +816,39 @@ def prompt(
     )
     context = retriever.retrieve_context(message, session_id=session, limit=config.retrieval_limit)
     retrieved_ids = {
-        "working": [item.id for item in context.working_memory],
         "episodic": [memory.id for memory in context.episodic_memories],
         "semantic": [memory.id for memory in context.semantic_memories],
         "procedural": [memory.id for memory in context.procedural_memories],
     }
     access_rows = _memory_access_rows(store, query=message, retrieved_ids=retrieved_ids)
-    messages = PromptBuilder().build(message, context)
+    latest_ordinal = store.latest_conversation_ordinal(session)
+    session_context = SessionContextManager(store).load(
+        session,
+        before_ordinal=latest_ordinal + 1 if latest_ordinal else None,
+    )
+    messages = PromptBuilder().build(
+        message,
+        context,
+        session_context=session_context,
+    )
     console.print(f"Session: {session}")
     _render_source_context(source)
+    context_table = Table(title="Session Context")
+    context_table.add_column("Field")
+    context_table.add_column("Value")
+    context_table.add_row(
+        "compressed_until_ordinal",
+        str(session_context.compressed_until_ordinal),
+    )
+    context_table.add_row(
+        "summary",
+        "present" if session_context.summary else "",
+    )
+    context_table.add_row(
+        "uncompressed_messages",
+        str(len(session_context.uncompressed_messages)),
+    )
+    console.print(context_table)
     retrieved_table = Table(title="Retrieved Memory Trace")
     retrieved_table.add_column("Type")
     retrieved_table.add_column("ID")

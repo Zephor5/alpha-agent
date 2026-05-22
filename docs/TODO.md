@@ -88,7 +88,7 @@ These are prerequisites for making Alpha Agent usable outside `alpha chat`.
 - [x] Decide how external platform identities map to Alpha memory scope:
   - global user memory.
   - platform-specific user memory.
-  - chat/thread-local working memory.
+  - chat/thread-local session context.
 - [x] Add inbound message deduplication:
   - platform update/message id.
   - fallback text fingerprint with short TTL.
@@ -127,28 +127,27 @@ Current `AlphaAgent.respond()` is a clean MVP. The next step is to keep it
 explicit while making it useful for real channels and longer tasks.
 
 - [x] Split the turn pipeline into named services without hiding flow:
-  - event write.
-  - working memory update.
+  - append conversation message.
+  - session context projection/compression.
   - retrieval.
   - prompt build.
   - model call.
-  - assistant event write.
+  - assistant message write.
   - extraction.
   - consolidation trigger decision.
-  - delivery event emission.
-- [x] Add structured turn events:
-  - `turn.started`
-  - `memory.retrieved`
+  - runtime diagnostic traces.
+- [x] Add structured runtime traces:
   - `llm.started`
   - `llm.completed`
   - `memory.extracted`
-  - `turn.completed`
   - `turn.failed`
+  - `context.compression.*`
 - [x] Add tool execution as an explicit subsystem:
   - keep tool registry small.
   - no hidden agent framework.
   - include `tool.started`, `tool.completed`, `tool.failed`.
-  - require deterministic result serialization into events.
+  - require deterministic result serialization into traces and transcript tool
+    messages.
 - [x] Add interrupt/cancel support:
   - cancellation flag by session_id.
   - gateway `/stop` command.
@@ -170,8 +169,9 @@ P1 Agent Loop implementation notes:
 
 - The turn pipeline is split into explicit runtime methods while keeping
   `AlphaAgent.respond()` as the visible orchestration path.
-- Structured turn, memory, LLM, tool, completion, and failure events are stored
-  in the normal event log metadata.
+- User, assistant, and tool transcript content is stored in
+  `conversation_messages`; operational diagnostics are stored as
+  `runtime_traces`.
 - Tool execution remains bounded and explicit. Caller-supplied tool calls are
   local one-shot executions. Provider-returned OpenAI-compatible tool calls now
   run through a bounded multi-step loop controlled by `max_tool_iterations` and
@@ -183,21 +183,23 @@ P1 Agent Loop implementation notes:
   `tools`, `tool_choice`, assistant `tool_calls`, and `role=tool` messages with
   `tool_call_id`. Missing provider tool ids and `finish_reason=tool_calls`
   without normalized calls fail before execution. Recoverable provider tool
-  execution failures are recorded as `tool.failed` events and returned to the
+  execution failures are recorded as `tool.failed` traces and returned to the
   model as deterministic JSON tool results so the next LLM round can correct.
 - Cancellation is synchronous and cooperative. The runtime checks session
-  cancellation flags at safe boundaries before/after user event, retrieval, LLM,
-  and tool stages. It cannot preempt a blocking provider or tool call that does
-  not return control.
+  cancellation flags at safe boundaries before/after user message persistence,
+  retrieval, LLM, and tool stages. It cannot preempt a blocking provider or tool
+  call that does not return control.
 - Retry is bounded around transient provider HTTP failures only; retry counts
-  are recorded in turn debug metadata and runtime events.
+  are recorded in turn debug metadata and runtime traces.
 - `alpha debug prompt MESSAGE` remains supported. `alpha debug prompt
   --session ...` can include gateway source fields and prints the built prompt,
   retrieved memory ids, and retrieval scores from `memory_access_log`.
-- Prompt construction separates stable system identity, optional reference-only
-  retrieved context, and the current user message as a real chat message. The
-  current turn is not written into working memory before retrieval, and
-  procedural memories require explicit textual relevance before their procedure
+- Prompt construction keeps only the stable identity as a `system` message.
+  Optional reference-only retrieved memory and runtime reminders are sent as a
+  `user` message wrapped in `<system-reminder>...</system-reminder>`, followed
+  by optional compressed session summary, prior uncompressed transcript
+  messages, and the current user message as the final real chat message.
+  Procedural memories require explicit textual relevance before their procedure
   bodies can enter the prompt.
 - `alpha memory review MESSAGE --session ...` previews extracted candidates
   without writing semantic/episodic/procedural memory. CLI flags support
@@ -375,7 +377,7 @@ These items make Alpha Agent feel different from a generic chat bot.
 Keep channel commands small and operational.
 
 - [ ] `/status`: current session id, provider, memory counts, active turn state.
-- [ ] `/reset`: reset working memory/session context for this channel.
+- [ ] `/reset`: reset session context for this channel.
 - [ ] `/stop`: cancel active turn.
 - [ ] `/remember <text>`: explicit memory write candidate.
 - [ ] `/forget <id>`: mark memory inactive/superseded.
@@ -391,7 +393,7 @@ memory review.
 1. Add gateway models, session key logic, adapter interface, and tests.
 2. Add gateway runner for local in-process adapter tests.
 3. Add the minimum reliable turn lifecycle:
-   - structured turn events.
+   - structured runtime traces.
    - active-turn guard.
    - `/stop` cancellation path.
    - bounded provider retry.

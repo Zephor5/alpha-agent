@@ -14,7 +14,6 @@ from alpha_agent.memory.models import (
     SemanticMemory,
 )
 from alpha_agent.memory.store import MemoryStore
-from alpha_agent.memory.working import WorkingMemoryManager
 from alpha_agent.utils.text import extract_lightweight_entities, keyword_score
 from alpha_agent.utils.time import utc_now
 
@@ -29,16 +28,14 @@ class RankedMemory:
 
 
 class MemoryRetriever:
-    """Retrieve context with explicit non-vector ranking."""
+    """Retrieve long-term memory with explicit non-vector ranking."""
 
-    def __init__(self, store: MemoryStore, working_memory: WorkingMemoryManager):
+    def __init__(self, store: MemoryStore):
         self.store = store
-        self.working_memory = working_memory
 
     def retrieve_context(self, query: str, session_id: str, limit: int = 8) -> RetrievedContext:
-        """Retrieve working, episodic, semantic, and procedural context for a turn."""
+        """Retrieve episodic, semantic, and procedural context for a turn."""
 
-        working = self.working_memory.get_active_context(session_id)
         episodic = self._rank_episodic(query, limit)
         semantic = self._rank_semantic(query, limit)
         procedural = self._rank_procedural(query, max(3, limit // 2))
@@ -48,7 +45,6 @@ class MemoryRetriever:
 
         entity_hints = extract_lightweight_entities(query)
         return RetrievedContext(
-            working_memory=working,
             episodic_memories=cast(list[EpisodicMemory], [item.memory for item in episodic]),
             semantic_memories=cast(list[SemanticMemory], [item.memory for item in semantic]),
             procedural_memories=cast(

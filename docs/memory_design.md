@@ -13,6 +13,13 @@
 
 我会把它设计成一个工程系统，而不是抽象概念。
 
+> Implementation note: Alpha's current runtime no longer uses a separate
+> priority-pruned `working_memory` table for recent conversation context.
+> Short-term session context is now derived from append-only
+> `conversation_messages` plus an optional compressed `session_context_states`
+> summary. Long-term retrieval remains semantic/episodic/procedural and
+> query-dependent.
+
 ---
 
 # 1. 先定义目标：LLM 记忆到底要解决什么
@@ -1142,7 +1149,7 @@ User Context 前缀:
 
 ```text
 稳定内容放 system，利于 prompt cache。
-动态召回内容放 user context 前缀，避免破坏 system prompt cache。
+动态召回内容放 user context 前缀，并用 `<system-reminder>...</system-reminder>` 包裹，避免破坏 system prompt cache。
 ```
 
 ---

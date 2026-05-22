@@ -16,7 +16,6 @@ class ConsolidationReport:
     scanned_episodes: int
     promoted_facts: int
     ignored_low_salience: int
-    pruned_working_memory: int
     notes: list[str] = field(default_factory=list)
 
     def render(self) -> str:
@@ -27,7 +26,6 @@ class ConsolidationReport:
             f"- scanned episodes: {self.scanned_episodes}",
             f"- promoted facts: {self.promoted_facts}",
             f"- ignored low-salience episodes: {self.ignored_low_salience}",
-            f"- pruned low-priority working memory: {self.pruned_working_memory}",
         ]
         lines.extend(f"- {note}" for note in self.notes)
         return "\n".join(lines)
@@ -52,7 +50,6 @@ class ConsolidationService:
         episodes = self.store.list_episodic_memories(limit=limit)
         promoted = 0
         ignored = 0
-        pruned_working_memory = self.store.prune_low_priority_working_memory()
         notes: list[str] = []
         for episode in episodes:
             if episode.salience < 0.65:
@@ -84,6 +81,5 @@ class ConsolidationService:
             scanned_episodes=len(episodes),
             promoted_facts=promoted,
             ignored_low_salience=ignored,
-            pruned_working_memory=pruned_working_memory,
             notes=notes,
         )

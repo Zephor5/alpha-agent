@@ -28,8 +28,14 @@ base_url = "https://compatible.example/v1"
 api_key = "compatible-key"
 
 [memory]
-working_memory_limit = 4
 retrieval_limit = 3
+
+[context]
+max_prompt_tokens = 4096
+compression_threshold_ratio = 0.75
+recent_tail_messages = 6
+min_summary_tokens = 128
+max_summary_tokens = 512
 
 [deepseek]
 api_key = "deepseek-key"
@@ -45,8 +51,12 @@ reasoning_effort = "high"
     assert config.log_dir == Path("~/custom-alpha/logs").expanduser()
     assert config.gateway_status_path == Path("~/custom-alpha/status.json").expanduser()
     assert config.llm_provider == "deepseek"
-    assert config.working_memory_limit == 4
     assert config.retrieval_limit == 3
+    assert config.context_max_prompt_tokens == 4096
+    assert config.context_compression_threshold_ratio == 0.75
+    assert config.context_recent_tail_messages == 6
+    assert config.context_min_summary_tokens == 128
+    assert config.context_max_summary_tokens == 512
     assert config.deepseek_api_key == "deepseek-key"
     assert config.llm_model == "deepseek-v4-pro"
     assert config.compatible_base_url == "https://compatible.example/v1"
@@ -117,6 +127,8 @@ def test_config_cli_init_and_show(
     assert config_path.exists()
     assert str(config_path) in show_result.output
     assert "llm_provider" in show_result.output
+    assert "context_max_prompt_tokens" in show_result.output
+    assert "working_memory_limit" not in show_result.output
     assert "compatible_base_url" not in show_result.output
 
 
@@ -146,17 +158,20 @@ def test_config_cli_set_and_get(
     set_provider = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
     set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
     set_limit = runner.invoke(app, ["config", "set", "memory.retrieval_limit", "5"])
+    set_context = runner.invoke(app, ["config", "set", "context.max_prompt_tokens", "4096"])
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
 
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
     assert set_limit.exit_code == 0
+    assert set_context.exit_code == 0
     assert get_provider.exit_code == 0
     assert "codex" in get_provider.output
     config = load_config(env_file=None, config_file=config_path)
     assert config.llm_provider == "codex"
     assert config.llm_debug_logging is True
     assert config.retrieval_limit == 5
+    assert config.context_max_prompt_tokens == 4096
 
 
 def test_config_set_rejects_unknown_key(
@@ -239,6 +254,20 @@ def test_config_set_rejects_non_positive_limits(
 
     assert result.exit_code != 0
     assert "must be greater than 0" in result.output
+
+
+def test_config_set_rejects_invalid_context_ratio(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["config", "set", "context.compression_threshold_ratio", "1.5"])
+
+    assert result.exit_code != 0
+    assert "less than or equal to 1" in result.output
 
 
 def test_read_config_value_masks_secret(tmp_path: Path) -> None:

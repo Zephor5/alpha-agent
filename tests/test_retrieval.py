@@ -7,7 +7,6 @@ from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
-from alpha_agent.memory.working import WorkingMemoryManager
 
 
 def test_insert_and_search_episodic_memories(tmp_path: Path) -> None:
@@ -40,7 +39,7 @@ def test_retrieval_ranking_without_vectors(tmp_path: Path) -> None:
         "User prefers SQLite memory retrieval for the MVP",
         salience=0.85,
     )
-    retriever = MemoryRetriever(store, WorkingMemoryManager(store))
+    retriever = MemoryRetriever(store)
 
     context = retriever.retrieve_context("sqlite memory retrieval", "session-1", limit=3)
 
@@ -52,7 +51,7 @@ def test_procedural_retrieval_requires_textual_relevance(tmp_path: Path) -> None
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
     ProceduralMemoryManager(store).load_builtin_skills()
-    retriever = MemoryRetriever(store, WorkingMemoryManager(store))
+    retriever = MemoryRetriever(store)
 
     unrelated = retriever.retrieve_context("What tools do you have?", "session-1", limit=3)
     matched = retriever.retrieve_context("debug this failing command", "session-1", limit=3)

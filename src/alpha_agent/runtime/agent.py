@@ -21,15 +21,30 @@ from alpha_agent.llm.base import (
 )
 from alpha_agent.memory.episodic import EpisodicMemoryManager
 from alpha_agent.memory.extractor import MemoryExtractor
-from alpha_agent.memory.models import Event, ExtractedMemoryCandidate, RetrievedContext
+from alpha_agent.memory.models import (
+    ConversationMessage,
+    ExtractedMemoryCandidate,
+    RetrievedContext,
+    RuntimeTrace,
+    SessionContextState,
+)
 from alpha_agent.memory.persistence import persist_candidates
 from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
-from alpha_agent.memory.working import WorkingMemoryManager
-from alpha_agent.runtime.events import create_event, create_runtime_event, deterministic_json
-from alpha_agent.runtime.prompt_builder import PromptBuilder
+from alpha_agent.runtime.context_compression import (
+    CompressionBudget,
+    CompressionContext,
+    CompressionFocus,
+    CompressionResult,
+    ContextCompressor,
+    DeterministicContextCompressor,
+    select_compression_window,
+)
+from alpha_agent.runtime.events import deterministic_json
+from alpha_agent.runtime.prompt_builder import PromptBuilder, wrap_system_reminder
+from alpha_agent.runtime.session_context import SessionContextManager, SessionContextProjection
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
 from alpha_agent.tools.base import ToolCall
 from alpha_agent.tools.registry import ToolRegistry
@@ -145,7 +160,6 @@ class AlphaAgent:
         self,
         store: MemoryStore,
         llm_provider: LLMProvider,
-        working_memory: WorkingMemoryManager,
         retriever: MemoryRetriever,
         retrieval_limit: int = 8,
         prompt_builder: PromptBuilder | None = None,
@@ -157,13 +171,27 @@ class AlphaAgent:
         max_llm_rounds: int | None = None,
         llm_debug_logging: bool = False,
         llm_trace_log_path: str | Path | None = None,
+        context_compressor: ContextCompressor | None = None,
+        context_max_prompt_tokens: int = 6000,
+        context_compression_threshold_ratio: float = 0.85,
+        context_recent_tail_messages: int = 8,
+        context_min_summary_tokens: int = 128,
+        context_max_summary_tokens: int = 512,
     ):
         self.store = store
         self.llm_provider = llm_provider
-        self.working_memory = working_memory
         self.retriever = retriever
         self.retrieval_limit = retrieval_limit
         self.prompt_builder = prompt_builder or PromptBuilder()
+        self.session_context = SessionContextManager(store)
+        self.context_compressor = context_compressor or DeterministicContextCompressor()
+        self.context_compression_budget = CompressionBudget(
+            max_prompt_tokens=context_max_prompt_tokens,
+            threshold_ratio=context_compression_threshold_ratio,
+            recent_tail_messages=context_recent_tail_messages,
+            min_summary_tokens=context_min_summary_tokens,
+            max_summary_tokens=context_max_summary_tokens,
+        )
         self.extractor = extractor or MemoryExtractor()
         self.episodic = EpisodicMemoryManager(store)
         self.semantic = SemanticMemoryManager(store)
@@ -221,23 +249,39 @@ class AlphaAgent:
             "provider_tool_call_count": 0,
         }
         try:
-            turn_started_event = self._emit_turn_started(
-                session_id=session_id,
-                turn_id=turn_id,
-                user_message=user_message,
-            )
-            debug["turn_started_event_id"] = turn_started_event.id
-
             self._check_canceled(session_id, "before_user_event")
-            user_event = self._write_user_event(session_id, user_message)
+            user_record = self._write_user_message(session_id, user_message)
+            debug["user_message_id"] = user_record.id
+            debug["user_message_ordinal"] = user_record.ordinal
 
-            requested_tool_calls = self.tool_executor.normalize_calls(tool_calls)
+            requested_tool_calls = self._ensure_caller_tool_call_ids(
+                self.tool_executor.normalize_calls(tool_calls)
+            )
+            requested_tool_messages: list[ConversationMessage] = []
+            runtime_reminders: list[str] = []
             requested_tool_results = self._execute_tool_calls(
                 session_id=session_id,
                 calls=requested_tool_calls,
                 source="caller",
             )
-            self._add_tool_results_to_working_memory(session_id, requested_tool_results)
+            if requested_tool_results:
+                requested_tool_messages.append(
+                    self._write_assistant_tool_call_message(
+                        session_id=session_id,
+                        calls=requested_tool_calls,
+                        source="caller",
+                    )
+                )
+                requested_tool_messages.extend(
+                    self._write_tool_result_messages(
+                        session_id=session_id,
+                        results=requested_tool_results,
+                        source="caller",
+                    )
+                )
+            runtime_reminders.extend(
+                self._runtime_reminders_from_tool_results(requested_tool_results)
+            )
             debug["tool_call_count"] = len(requested_tool_results)
 
             self._check_canceled(session_id, "before_retrieval")
@@ -245,11 +289,45 @@ class AlphaAgent:
             retrieved_ids = self._retrieved_ids(context)
             debug["retrieved_memory_ids"] = retrieved_ids
 
-            messages = self._build_prompt(user_message, context)
-            prompt_token_estimate = self.prompt_builder.rough_token_estimate(messages)
-            debug["prompt_token_estimate"] = prompt_token_estimate
+            session_context = self.session_context.load(
+                session_id,
+                before_ordinal=user_record.ordinal,
+            )
+            debug["session_context_compressed_until_ordinal"] = (
+                session_context.compressed_until_ordinal
+            )
+            debug["session_context_message_count"] = len(
+                session_context.uncompressed_messages
+            )
+            debug["session_context_has_summary"] = bool(session_context.summary)
+
+            messages = self._build_prompt(
+                user_message,
+                context,
+                session_context=session_context,
+                runtime_reminders=runtime_reminders,
+            )
             model_tools = self.tool_registry.to_llm_tool_definitions()
             model_tool_choice: LLMToolChoice | None = "auto" if model_tools else None
+            prompt_token_estimate = self.prompt_builder.estimate_prompt_tokens(
+                messages,
+                tools=model_tools or None,
+            )
+            session_context, messages, prompt_token_estimate = (
+                self._maybe_compress_initial_context(
+                    session_id=session_id,
+                    user_message=user_message,
+                    user_ordinal=user_record.ordinal,
+                    retrieved_context=context,
+                    session_context=session_context,
+                    runtime_reminders=runtime_reminders,
+                    messages=messages,
+                    model_tools=model_tools or None,
+                    prompt_token_estimate=prompt_token_estimate,
+                    debug=debug,
+                )
+            )
+            debug["prompt_token_estimate"] = prompt_token_estimate
 
             llm_completion = self._call_model(
                 session_id=session_id,
@@ -265,7 +343,7 @@ class AlphaAgent:
             debug["llm_round_count"] = llm_round_count
             debug["initial_provider"] = llm_response.provider
 
-            provider_tool_results: list[ExecutedToolResult] = []
+            provider_tool_messages: list[ConversationMessage] = []
             tool_iteration_count = 0
             conversation_messages = list(messages)
             while self._response_requests_tools(llm_response):
@@ -293,29 +371,44 @@ class AlphaAgent:
                     break
 
                 debug["provider_tool_call_count"] += len(provider_tool_calls)
+                provider_tool_call_message = self._write_assistant_tool_call_message(
+                    session_id=session_id,
+                    calls=provider_tool_calls,
+                    source="provider",
+                    llm_response=llm_response,
+                )
+                provider_tool_messages.append(provider_tool_call_message)
+                conversation_messages.append(
+                    self.prompt_builder.conversation_message_to_chat(
+                        provider_tool_call_message
+                    )
+                )
                 provider_results = self._execute_tool_calls(
                     session_id=session_id,
                     calls=provider_tool_calls,
                     source="provider",
                     recover_errors=True,
                 )
-                provider_tool_results.extend(provider_results)
-                self._add_tool_results_to_working_memory(session_id, provider_results)
+                provider_result_messages = self._write_tool_result_messages(
+                    session_id=session_id,
+                    results=provider_results,
+                    source="provider",
+                )
+                provider_tool_messages.extend(provider_result_messages)
                 debug["tool_call_count"] += len(provider_results)
                 tool_iteration_count += 1
                 debug["tool_iteration_count"] = tool_iteration_count
 
                 conversation_messages.extend(
-                    self._tool_result_messages(
-                        calls=provider_tool_calls,
-                        results=provider_results,
-                    )
+                    self.prompt_builder.conversation_message_to_chat(message)
+                    for message in provider_result_messages
                 )
                 tool_result_completion = self._call_model(
                     session_id=session_id,
                     messages=conversation_messages,
-                    prompt_token_estimate=self.prompt_builder.rough_token_estimate(
-                        conversation_messages
+                    prompt_token_estimate=self.prompt_builder.estimate_prompt_tokens(
+                        conversation_messages,
+                        tools=model_tools or None,
                     ),
                     round_name=f"tool_result_{tool_iteration_count}",
                     tools=model_tools or None,
@@ -331,41 +424,25 @@ class AlphaAgent:
             debug["llm_round_count"] = llm_round_count
             debug["final_finish_reason"] = llm_response.finish_reason
 
-            assistant_event = self._write_assistant_event(session_id, llm_response)
-            self._update_working_memory(
-                session_id=session_id,
-                content=(
-                    "Recent turn:\n"
-                    f"User: {user_message}\n"
-                    f"Assistant: {llm_response.content}"
-                ),
-                source_event_id=assistant_event.id,
-                priority=0.6,
-            )
+            assistant_record = self._write_assistant_message(session_id, llm_response)
+            debug["assistant_message_id"] = assistant_record.id
+            debug["assistant_message_ordinal"] = assistant_record.ordinal
 
-            extraction_source_event_ids = [
-                user_event.id,
-                assistant_event.id,
-                *[item.event.id for item in requested_tool_results],
-                *[item.event.id for item in provider_tool_results],
+            extraction_source_message_ids = [
+                user_record.id,
+                assistant_record.id,
+                *[message.id for message in requested_tool_messages],
+                *[message.id for message in provider_tool_messages],
             ]
             candidates = self._extract_memory(
                 session_id=session_id,
                 user_message=user_message,
                 assistant_response=llm_response.content,
-                source_event_ids=extraction_source_event_ids,
+                source_message_ids=extraction_source_message_ids,
             )
             self._persist_extracted_memories(candidates)
             debug["extracted_memory_count"] = len(candidates)
             debug["consolidation"] = self._decide_consolidation_trigger(candidates)
-
-            delivery_event = self._emit_delivery_event(
-                session_id=session_id,
-                turn_id=turn_id,
-                assistant_event=assistant_event,
-                debug=debug,
-            )
-            debug["delivery_event_id"] = delivery_event.id
 
             return AgentTurnResult(
                 response=llm_response.content,
@@ -410,60 +487,378 @@ class AlphaAgent:
             if session_id not in self._canceled_sessions:
                 self.clear_cancel(session_id)
 
-    def _emit_turn_started(self, session_id: str, turn_id: str, user_message: str) -> Event:
-        return self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type="turn.started",
-                content="Agent turn started.",
-                metadata={
-                    "turn_id": turn_id,
-                    "user_message_length": len(user_message),
-                },
-            )
-        )
-
-    def _write_user_event(self, session_id: str, user_message: str) -> Event:
-        return self.store.insert_event(create_event(session_id, "user", user_message))
-
-    def _update_working_memory(
+    def _write_user_message(
         self,
-        *,
         session_id: str,
-        content: str,
-        source_event_id: str | None,
-        priority: float,
-    ) -> None:
-        self.working_memory.add_active_context(
+        user_message: str,
+    ) -> ConversationMessage:
+        return self.store.append_conversation_message(
             session_id=session_id,
-            content=content,
-            source_event_id=source_event_id,
-            priority=priority,
+            role="user",
+            raw_content=user_message,
         )
 
     def _retrieve_memory(self, user_message: str, session_id: str) -> RetrievedContext:
-        context = self.retriever.retrieve_context(
+        return self.retriever.retrieve_context(
             user_message,
             session_id,
             limit=self.retrieval_limit,
         )
-        retrieved_ids = self._retrieved_ids(context)
-        self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type="memory.retrieved",
-                content=deterministic_json(retrieved_ids),
-                metadata={
-                    "retrieval_limit": self.retrieval_limit,
-                    "retrieved_memory_ids": retrieved_ids,
-                    "counts": {key: len(value) for key, value in retrieved_ids.items()},
-                },
-            )
-        )
-        return context
 
-    def _build_prompt(self, user_message: str, context: RetrievedContext) -> list[ChatMessage]:
-        return self.prompt_builder.build(user_message, context)
+    def _build_prompt(
+        self,
+        user_message: str,
+        context: RetrievedContext,
+        *,
+        session_context: SessionContextProjection,
+        runtime_reminders: Sequence[str],
+    ) -> list[ChatMessage]:
+        return self.prompt_builder.build(
+            user_message,
+            context,
+            session_context=session_context,
+            runtime_reminders=runtime_reminders,
+        )
+
+    def _maybe_compress_initial_context(
+        self,
+        *,
+        session_id: str,
+        user_message: str,
+        user_ordinal: int,
+        retrieved_context: RetrievedContext,
+        session_context: SessionContextProjection,
+        runtime_reminders: Sequence[str],
+        messages: list[ChatMessage],
+        model_tools: Sequence[LLMToolDefinitionInput] | None,
+        prompt_token_estimate: int,
+        debug: dict[str, Any],
+    ) -> tuple[SessionContextProjection, list[ChatMessage], int]:
+        budget = self.context_compression_budget
+        compression_context = CompressionContext(
+            session_id=session_id,
+            prompt_token_estimate=prompt_token_estimate,
+            uncompressed_message_count=len(session_context.uncompressed_messages),
+            has_previous_summary=bool(session_context.summary),
+        )
+        common_metadata = {
+            "prompt_token_estimate_before": prompt_token_estimate,
+            "threshold_tokens": budget.threshold_tokens,
+            "max_prompt_tokens": budget.max_prompt_tokens,
+            "threshold_ratio": budget.threshold_ratio,
+            "recent_tail_messages": budget.effective_recent_tail_messages,
+            "session_context_message_count": len(session_context.uncompressed_messages),
+            "previous_compressed_until_ordinal": session_context.compressed_until_ordinal,
+            "has_previous_summary": bool(session_context.summary),
+        }
+        try:
+            should_compress = self.context_compressor.should_compress(
+                compression_context,
+                budget,
+            )
+        except Exception as exc:
+            failed_metadata = {
+                **common_metadata,
+                "status": "failed",
+                "stage": "decision",
+                "error_type": type(exc).__name__,
+            }
+            self._emit_context_compression_trace(
+                session_id=session_id,
+                event_type="context_compression.failed",
+                content=str(exc),
+                metadata=failed_metadata,
+            )
+            self._record_context_compression_debug(
+                debug,
+                status="failed",
+                metadata=failed_metadata,
+            )
+            raise
+
+        if not should_compress:
+            skipped_metadata = {
+                **common_metadata,
+                "status": "skipped",
+                "reason": "below_threshold",
+                "prompt_token_estimate_after": prompt_token_estimate,
+            }
+            self._emit_context_compression_trace(
+                session_id=session_id,
+                event_type="context_compression.skipped",
+                content="Context compression skipped.",
+                metadata=skipped_metadata,
+            )
+            self._record_context_compression_debug(
+                debug,
+                status="skipped",
+                metadata=skipped_metadata,
+            )
+            return session_context, messages, prompt_token_estimate
+
+        selection = select_compression_window(
+            session_context.uncompressed_messages,
+            recent_tail_messages=budget.recent_tail_messages,
+        )
+        if not selection.messages_to_compress:
+            skipped_metadata = {
+                **common_metadata,
+                "status": "skipped",
+                "reason": "no_compressible_messages",
+                "prompt_token_estimate_after": prompt_token_estimate,
+                "preserved_message_count": len(selection.preserved_messages),
+            }
+            self._emit_context_compression_trace(
+                session_id=session_id,
+                event_type="context_compression.skipped",
+                content="Context compression skipped.",
+                metadata=skipped_metadata,
+            )
+            self._record_context_compression_debug(
+                debug,
+                status="skipped",
+                metadata=skipped_metadata,
+            )
+            return session_context, messages, prompt_token_estimate
+
+        started_metadata = {
+            **common_metadata,
+            "status": "started",
+            "compress_message_count": len(selection.messages_to_compress),
+            "preserved_message_count": len(selection.preserved_messages),
+            "candidate_compressed_until_ordinal": (
+                selection.messages_to_compress[-1].ordinal
+            ),
+            "compressor": self.context_compressor.compression_version,
+        }
+        started_trace = self._emit_context_compression_trace(
+            session_id=session_id,
+            event_type="context_compression.started",
+            content="Context compression started.",
+            metadata=started_metadata,
+        )
+        previous_summary_source_message_ids = (
+            session_context.state.summary_source_message_ids
+            if session_context.state is not None
+            else []
+        )
+        failure_stage = "compress"
+        try:
+            compression_result = self.context_compressor.compress(
+                selection.messages_to_compress,
+                previous_summary=session_context.summary,
+                focus=CompressionFocus(
+                    session_id=session_id,
+                    current_user_message=user_message,
+                    prompt_token_estimate=prompt_token_estimate,
+                    budget=budget,
+                    compressed_until_ordinal=session_context.compressed_until_ordinal,
+                    previous_summary_source_message_ids=previous_summary_source_message_ids,
+                ),
+            )
+            failure_stage = "validation"
+            self._validate_context_compression_result(
+                result=compression_result,
+                selected_messages=selection.messages_to_compress,
+                previous_summary_source_message_ids=previous_summary_source_message_ids,
+                current_user_ordinal=user_ordinal,
+            )
+            failure_stage = "rebuild"
+            now = utc_now_iso()
+            provisional_state = SessionContextState(
+                session_id=session_id,
+                compressed_until_ordinal=compression_result.compressed_until_ordinal,
+                summary=compression_result.summary,
+                summary_source_message_ids=compression_result.summary_source_message_ids,
+                compression_version=compression_result.compression_version,
+                created_at=session_context.state.created_at
+                if session_context.state is not None
+                else now,
+                updated_at=now,
+                metadata=dict(compression_result.metadata),
+            )
+            provisional_projection = SessionContextProjection(
+                state=provisional_state,
+                uncompressed_messages=selection.preserved_messages,
+                before_ordinal=user_ordinal,
+            )
+            rebuilt_messages = self._build_prompt(
+                user_message,
+                retrieved_context,
+                session_context=provisional_projection,
+                runtime_reminders=runtime_reminders,
+            )
+            rebuilt_prompt_token_estimate = self.prompt_builder.estimate_prompt_tokens(
+                rebuilt_messages,
+                tools=model_tools,
+            )
+            state_metadata = {
+                **compression_result.metadata,
+                "status": "completed",
+                "reason": "prompt_budget_exceeded",
+                "started_trace_id": started_trace.id,
+                "prompt_token_estimate_before": prompt_token_estimate,
+                "prompt_token_estimate_after": rebuilt_prompt_token_estimate,
+                "threshold_tokens": budget.threshold_tokens,
+                "max_prompt_tokens": budget.max_prompt_tokens,
+                "threshold_ratio": budget.threshold_ratio,
+                "recent_tail_messages": budget.effective_recent_tail_messages,
+                "input_token_estimate": compression_result.input_token_estimate,
+                "output_token_estimate": compression_result.output_token_estimate,
+                "summary_source_message_count": len(
+                    compression_result.summary_source_message_ids
+                ),
+                "preserved_message_count": len(selection.preserved_messages),
+            }
+            failure_stage = "persist"
+            stored_state = self.store.upsert_session_context_state(
+                SessionContextState(
+                    session_id=session_id,
+                    compressed_until_ordinal=compression_result.compressed_until_ordinal,
+                    summary=compression_result.summary,
+                    summary_source_message_ids=(
+                        compression_result.summary_source_message_ids
+                    ),
+                    compression_version=compression_result.compression_version,
+                    created_at=provisional_state.created_at,
+                    updated_at=now,
+                    metadata=state_metadata,
+                )
+            )
+            failure_stage = "reload"
+            rebuilt_context = self.session_context.load(
+                session_id,
+                before_ordinal=user_ordinal,
+            )
+            rebuilt_messages = self._build_prompt(
+                user_message,
+                retrieved_context,
+                session_context=rebuilt_context,
+                runtime_reminders=runtime_reminders,
+            )
+            rebuilt_prompt_token_estimate = self.prompt_builder.estimate_prompt_tokens(
+                rebuilt_messages,
+                tools=model_tools,
+            )
+            completed_metadata = {
+                **state_metadata,
+                "prompt_token_estimate_after": rebuilt_prompt_token_estimate,
+                "compressed_until_ordinal": stored_state.compressed_until_ordinal,
+                "compression_version": stored_state.compression_version,
+            }
+            self._emit_context_compression_trace(
+                session_id=session_id,
+                event_type="context_compression.completed",
+                content="Context compression completed.",
+                metadata=completed_metadata,
+            )
+            self._record_context_compression_debug(
+                debug,
+                status="completed",
+                metadata=completed_metadata,
+            )
+            debug["session_context_compressed_until_ordinal"] = (
+                rebuilt_context.compressed_until_ordinal
+            )
+            debug["session_context_message_count"] = len(
+                rebuilt_context.uncompressed_messages
+            )
+            debug["session_context_has_summary"] = bool(rebuilt_context.summary)
+            return rebuilt_context, rebuilt_messages, rebuilt_prompt_token_estimate
+        except Exception as exc:
+            failed_metadata = {
+                **started_metadata,
+                "status": "failed",
+                "stage": failure_stage,
+                "started_trace_id": started_trace.id,
+                "error_type": type(exc).__name__,
+            }
+            self._emit_context_compression_trace(
+                session_id=session_id,
+                event_type="context_compression.failed",
+                content=str(exc),
+                metadata=failed_metadata,
+            )
+            self._record_context_compression_debug(
+                debug,
+                status="failed",
+                metadata=failed_metadata,
+            )
+            raise
+
+    def _validate_context_compression_result(
+        self,
+        *,
+        result: CompressionResult,
+        selected_messages: Sequence[ConversationMessage],
+        previous_summary_source_message_ids: Sequence[str],
+        current_user_ordinal: int,
+    ) -> None:
+        if not selected_messages:
+            raise ValueError("context compression validation requires selected messages")
+
+        selected_message_list = list(selected_messages)
+        expected_compressed_until = selected_message_list[-1].ordinal
+        if result.compressed_until_ordinal != expected_compressed_until:
+            raise ValueError(
+                "context compression compressed_until_ordinal must equal selected "
+                "compressed prefix last ordinal: "
+                f"expected {expected_compressed_until}, got "
+                f"{result.compressed_until_ordinal}"
+            )
+        if result.compressed_until_ordinal >= current_user_ordinal:
+            raise ValueError(
+                "context compression compressed_until_ordinal must be lower than "
+                f"current user ordinal {current_user_ordinal}, got "
+                f"{result.compressed_until_ordinal}"
+            )
+
+        expected_source_message_ids = [
+            *previous_summary_source_message_ids,
+            *[message.id for message in selected_message_list],
+        ]
+        if result.summary_source_message_ids != expected_source_message_ids:
+            raise ValueError(
+                "context compression summary_source_message_ids must equal previous "
+                "summary ids plus selected compressed message ids"
+            )
+        if not result.compression_version.strip():
+            raise ValueError("context compression result must include compression_version")
+        if not result.summary.strip():
+            raise ValueError("context compression result summary must not be empty")
+
+    def _emit_context_compression_trace(
+        self,
+        *,
+        session_id: str,
+        event_type: str,
+        content: str,
+        metadata: dict[str, Any],
+    ) -> RuntimeTrace:
+        return self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type=event_type,
+            content=content,
+            metadata=metadata,
+        )
+
+    def _record_context_compression_debug(
+        self,
+        debug: dict[str, Any],
+        *,
+        status: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        prompt_token_estimate_after = metadata.get(
+            "prompt_token_estimate_after",
+            metadata.get("prompt_token_estimate_before"),
+        )
+        debug["context_compression_status"] = status
+        debug["context_compression"] = dict(metadata)
+        debug["prompt_token_estimate_before_compression"] = metadata.get(
+            "prompt_token_estimate_before"
+        )
+        debug["prompt_token_estimate_after_rebuild"] = prompt_token_estimate_after
 
     def _call_model(
         self,
@@ -493,13 +888,11 @@ class AlphaAgent:
         }
         if request_log is not None:
             started_metadata["request"] = request_log
-        started_event = self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type="llm.started",
-                content="LLM call started.",
-                metadata=started_metadata,
-            )
+        started_trace = self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type="llm.started",
+            content="LLM call started.",
+            metadata=started_metadata,
         )
         if request_log is not None:
             self._append_llm_trace(
@@ -520,6 +913,19 @@ class AlphaAgent:
                 tool_choice=tool_choice,
             )
         except LLMCallError as exc:
+            self.store.append_runtime_trace(
+                session_id=session_id,
+                event_type="llm.failed",
+                content=str(exc),
+                metadata={
+                    "llm_call_id": llm_call_id,
+                    "provider": self.llm_provider.name,
+                    "round": round_name,
+                    "retry_count": exc.retry_count,
+                    "error_type": type(exc).__name__,
+                    "request": request_log,
+                },
+            )
             if request_log is not None:
                 self._append_llm_trace(
                     event="llm.error",
@@ -549,20 +955,18 @@ class AlphaAgent:
             "model": completion.response.model,
             "round": round_name,
             "retry_count": completion.retry_count,
-            "started_event_id": started_event.id,
+            "started_trace_id": started_trace.id,
             "finish_reason": completion.response.finish_reason,
             "tool_call_count": len(completion.response.tool_calls),
             "response_metadata": response_metadata,
         }
         if response_log is not None:
             completed_metadata["response"] = response_log
-        self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type="llm.completed",
-                content="LLM call completed.",
-                metadata=completed_metadata,
-            )
+        self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type="llm.completed",
+            content="LLM call completed.",
+            metadata=completed_metadata,
         )
         if response_log is not None:
             self._append_llm_trace(
@@ -589,22 +993,97 @@ class AlphaAgent:
             handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True))
             handle.write("\n")
 
-    def _write_assistant_event(self, session_id: str, llm_response: LLMResponse) -> Event:
-        return self.store.insert_event(
-            create_event(
-                session_id,
-                "assistant",
-                llm_response.content,
-                metadata={
+    def _write_assistant_message(
+        self,
+        session_id: str,
+        llm_response: LLMResponse,
+    ) -> ConversationMessage:
+        return self.store.append_conversation_message(
+            session_id=session_id,
+            role="assistant",
+            raw_content=llm_response.content,
+            provider_metadata={
+                "provider": llm_response.provider,
+                "model": llm_response.model,
+                "finish_reason": llm_response.finish_reason,
+                "metadata": _llm_metadata_for_event(
+                    llm_response.metadata,
+                    include_raw_payloads=self.llm_debug_logging,
+                ),
+            },
+        )
+
+    def _write_assistant_tool_call_message(
+        self,
+        *,
+        session_id: str,
+        calls: list[ToolCall],
+        source: str,
+        llm_response: LLMResponse | None = None,
+    ) -> ConversationMessage:
+        provider_metadata: dict[str, Any] = {"source": source}
+        if llm_response is not None:
+            provider_metadata.update(
+                {
                     "provider": llm_response.provider,
                     "model": llm_response.model,
-                    "provider_metadata": _llm_metadata_for_event(
+                    "finish_reason": llm_response.finish_reason,
+                    "metadata": _llm_metadata_for_event(
                         llm_response.metadata,
                         include_raw_payloads=self.llm_debug_logging,
                     ),
-                },
+                }
             )
+        tool_calls = [dict(self._wire_tool_call(call)) for call in calls]
+        return self.store.append_conversation_message(
+            session_id=session_id,
+            role="assistant",
+            raw_content=llm_response.content if llm_response is not None else "",
+            tool_calls=tool_calls,
+            provider_metadata=provider_metadata,
+            metadata={
+                "source": source,
+                "tool_call_ids": [self._required_tool_call_id(call) for call in calls],
+            },
         )
+
+    def _write_tool_result_messages(
+        self,
+        *,
+        session_id: str,
+        results: list[ExecutedToolResult],
+        source: str,
+    ) -> list[ConversationMessage]:
+        messages: list[ConversationMessage] = []
+        for item in results:
+            messages.append(
+                self.store.append_conversation_message(
+                    session_id=session_id,
+                    role="tool",
+                    raw_content=item.trace.content,
+                    tool_call_id=self._required_tool_call_id(item.call),
+                    tool_result_id=item.trace.id,
+                    provider_metadata={
+                        "source": source,
+                        "tool_name": item.result.name,
+                    },
+                    metadata={
+                        "trace_id": item.trace.id,
+                        "result_metadata": dict(item.result.metadata),
+                    },
+                )
+            )
+        return messages
+
+    def _runtime_reminders_from_tool_results(
+        self,
+        results: list[ExecutedToolResult],
+    ) -> list[str]:
+        return [
+            f"Tool {item.result.name}: {item.result.content}"
+            for item in results
+            if item.result.content.strip()
+        ]
 
     def _extract_memory(
         self,
@@ -612,27 +1091,25 @@ class AlphaAgent:
         session_id: str,
         user_message: str,
         assistant_response: str,
-        source_event_ids: list[str],
+        source_message_ids: list[str],
     ) -> list[ExtractedMemoryCandidate]:
         candidates = self.extractor.extract(
             user_message=user_message,
             assistant_response=assistant_response,
-            source_event_ids=source_event_ids,
+            source_event_ids=source_message_ids,
         )
         type_counts: dict[str, int] = {}
         for candidate in candidates:
             type_counts[candidate.type] = type_counts.get(candidate.type, 0) + 1
-        self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type="memory.extracted",
-                content=deterministic_json(type_counts),
-                metadata={
-                    "extracted_memory_count": len(candidates),
-                    "candidate_type_counts": type_counts,
-                    "source_event_ids": source_event_ids,
-                },
-            )
+        self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type="memory.extracted",
+            content=deterministic_json(type_counts),
+            metadata={
+                "extracted_memory_count": len(candidates),
+                "candidate_type_counts": type_counts,
+                "source_message_ids": source_message_ids,
+            },
         )
         return candidates
 
@@ -651,33 +1128,6 @@ class AlphaAgent:
             "high_salience_count": high_salience_count,
         }
 
-    def _emit_delivery_event(
-        self,
-        *,
-        session_id: str,
-        turn_id: str,
-        assistant_event: Event,
-        debug: dict[str, Any],
-    ) -> Event:
-        return self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type="turn.completed",
-                content="Agent turn completed.",
-                metadata={
-                    "turn_id": turn_id,
-                    "assistant_response_event_id": assistant_event.id,
-                    "retry_count": debug.get("llm_retry_count", 0),
-                    "llm_round_count": debug.get("llm_round_count", 0),
-                    "tool_iteration_count": debug.get("tool_iteration_count", 0),
-                    "final_finish_reason": debug.get("final_finish_reason"),
-                    "tool_call_count": debug.get("tool_call_count", 0),
-                    "extracted_memory_count": debug.get("extracted_memory_count", 0),
-                    "consolidation": debug.get("consolidation", {}),
-                },
-            )
-        )
-
     def _emit_turn_failed(
         self,
         *,
@@ -687,26 +1137,24 @@ class AlphaAgent:
         stage: str,
         error: Exception,
         debug: dict[str, Any],
-    ) -> Event:
-        return self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type="turn.failed",
-                content=str(error),
-                metadata={
-                    "turn_id": turn_id,
-                    "status": status,
-                    "stage": stage,
-                    "error_type": type(error).__name__,
-                    "error_code": self._error_code(error),
-                    "retry_count": debug.get("llm_retry_count", 0),
-                    "llm_round_count": debug.get("llm_round_count", 0),
-                    "tool_iteration_count": debug.get("tool_iteration_count", 0),
-                    "final_finish_reason": debug.get("final_finish_reason"),
-                    "tool_call_count": debug.get("tool_call_count", 0),
-                    "provider_tool_call_count": debug.get("provider_tool_call_count", 0),
-                },
-            )
+    ) -> RuntimeTrace:
+        return self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type="turn.failed",
+            content=str(error),
+            metadata={
+                "turn_id": turn_id,
+                "status": status,
+                "stage": stage,
+                "error_type": type(error).__name__,
+                "error_code": self._error_code(error),
+                "retry_count": debug.get("llm_retry_count", 0),
+                "llm_round_count": debug.get("llm_round_count", 0),
+                "tool_iteration_count": debug.get("tool_iteration_count", 0),
+                "final_finish_reason": debug.get("final_finish_reason"),
+                "tool_call_count": debug.get("tool_call_count", 0),
+                "provider_tool_call_count": debug.get("provider_tool_call_count", 0),
+            },
         )
 
     def _finalize_tool_loop(
@@ -738,7 +1186,7 @@ class AlphaAgent:
         final_completion = self._call_model(
             session_id=session_id,
             messages=final_messages,
-            prompt_token_estimate=self.prompt_builder.rough_token_estimate(final_messages),
+            prompt_token_estimate=self.prompt_builder.estimate_prompt_tokens(final_messages),
             round_name="finalize",
             tools=None,
             tool_choice=None,
@@ -770,7 +1218,7 @@ class AlphaAgent:
     def _tool_loop_finalization_message(self, *, reason: str) -> ChatMessage:
         return {
             "role": "user",
-            "content": (
+            "content": wrap_system_reminder(
                 f"Tool loop stopped because {reason}. Summarize the current progress "
                 "and provide the best final answer from available information. "
                 "Do not call tools."
@@ -784,14 +1232,12 @@ class AlphaAgent:
         event_type: str,
         content: str,
         metadata: dict[str, Any],
-    ) -> Event:
-        return self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type=event_type,
-                content=content,
-                metadata=metadata,
-            )
+    ) -> RuntimeTrace:
+        return self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type=event_type,
+            content=content,
+            metadata=metadata,
         )
 
     def _response_requests_tools(self, response: LLMResponse) -> bool:
@@ -811,29 +1257,21 @@ class AlphaAgent:
             if not call.id:
                 raise ToolProtocolError(f"Provider tool call for {call.name} is missing an id")
 
-    def _tool_result_messages(
-        self,
-        *,
-        calls: list[ToolCall],
-        results: list[ExecutedToolResult],
-    ) -> list[ChatMessage]:
-        messages = [self._assistant_tool_call_message(calls)]
-        for item in results:
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": self._required_tool_call_id(item.call),
-                    "content": item.event.content,
-                }
+    def _ensure_caller_tool_call_ids(self, calls: list[ToolCall]) -> list[ToolCall]:
+        normalized: list[ToolCall] = []
+        for call in calls:
+            if call.id:
+                normalized.append(call)
+                continue
+            normalized.append(
+                ToolCall(
+                    name=call.name,
+                    arguments=dict(call.arguments),
+                    id=new_id("call"),
+                    metadata=dict(call.metadata),
+                )
             )
-        return messages
-
-    def _assistant_tool_call_message(self, calls: list[ToolCall]) -> ChatMessage:
-        return {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [self._wire_tool_call(call) for call in calls],
-        }
+        return normalized
 
     def _wire_tool_call(self, call: ToolCall) -> ChatCompletionToolCall:
         raw_arguments = call.metadata.get("raw_arguments")
@@ -864,7 +1302,7 @@ class AlphaAgent:
     ) -> list[ExecutedToolResult]:
         return self.tool_executor.execute(
             calls=calls,
-            write_event=lambda event_type, content, metadata: self._write_tool_event(
+            write_trace=lambda event_type, content, metadata: self._write_tool_trace(
                 session_id=session_id,
                 event_type=event_type,
                 content=content,
@@ -875,7 +1313,7 @@ class AlphaAgent:
             recover_errors=recover_errors,
         )
 
-    def _write_tool_event(
+    def _write_tool_trace(
         self,
         *,
         session_id: str,
@@ -883,31 +1321,15 @@ class AlphaAgent:
         content: str,
         source: str,
         metadata: dict[str, Any],
-    ) -> Event:
-        event_metadata = {"source": source}
-        event_metadata.update(metadata)
-        return self.store.insert_event(
-            create_runtime_event(
-                session_id=session_id,
-                event_type=event_type,
-                content=content,
-                role="tool",
-                metadata=event_metadata,
-            )
+    ) -> RuntimeTrace:
+        trace_metadata = {"source": source}
+        trace_metadata.update(metadata)
+        return self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type=event_type,
+            content=content,
+            metadata=trace_metadata,
         )
-
-    def _add_tool_results_to_working_memory(
-        self,
-        session_id: str,
-        results: list[ExecutedToolResult],
-    ) -> None:
-        for item in results:
-            self._update_working_memory(
-                session_id=session_id,
-                content=f"Tool {item.result.name}: {item.result.content}",
-                source_event_id=item.event.id,
-                priority=0.5,
-            )
 
     def _check_canceled(self, session_id: str, stage: str) -> None:
         if self.is_canceled(session_id):
@@ -931,7 +1353,6 @@ class AlphaAgent:
 
     def _retrieved_ids(self, context: RetrievedContext) -> dict[str, list[str]]:
         return {
-            "working": [item.id for item in context.working_memory],
             "episodic": [item.id for item in context.episodic_memories],
             "semantic": [item.id for item in context.semantic_memories],
             "procedural": [item.id for item in context.procedural_memories],

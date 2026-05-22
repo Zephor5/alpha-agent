@@ -28,8 +28,14 @@ base_url = "https://api.openai.com/v1"
 api_key = ""
 
 [memory]
-working_memory_limit = 12
 retrieval_limit = 8
+
+[context]
+max_prompt_tokens = 6000
+compression_threshold_ratio = 0.85
+recent_tail_messages = 8
+min_summary_tokens = 256
+max_summary_tokens = 1024
 
 [deepseek]
 api_key = ""
@@ -49,8 +55,12 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "llm.debug_logging": bool,
     "compatible.base_url": str,
     "compatible.api_key": str,
-    "memory.working_memory_limit": int,
     "memory.retrieval_limit": int,
+    "context.max_prompt_tokens": int,
+    "context.compression_threshold_ratio": float,
+    "context.recent_tail_messages": int,
+    "context.min_summary_tokens": int,
+    "context.max_summary_tokens": int,
     "deepseek.api_key": str,
     "deepseek.reasoning_enabled": bool,
     "deepseek.reasoning_effort": str,
@@ -72,8 +82,15 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
 }
 
 POSITIVE_INT_CONFIG_KEYS = {
-    "memory.working_memory_limit",
     "memory.retrieval_limit",
+    "context.max_prompt_tokens",
+    "context.recent_tail_messages",
+    "context.min_summary_tokens",
+    "context.max_summary_tokens",
+}
+
+RATIO_CONFIG_KEYS = {
+    "context.compression_threshold_ratio",
 }
 
 SECRET_CONFIG_KEYS = {
@@ -95,8 +112,12 @@ class AlphaConfig:
     llm_debug_logging: bool = False
     compatible_base_url: str | None = None
     compatible_api_key: str | None = None
-    working_memory_limit: int = 12
     retrieval_limit: int = 8
+    context_max_prompt_tokens: int = 6000
+    context_compression_threshold_ratio: float = 0.85
+    context_recent_tail_messages: int = 8
+    context_min_summary_tokens: int = 256
+    context_max_summary_tokens: int = 1024
     deepseek_api_key: str | None = None
     deepseek_reasoning_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
@@ -188,6 +209,11 @@ def _parse_config_value(raw_value: str, expected_type: type) -> Any:
             return int(raw_value)
         except ValueError as exc:
             raise ValueError(f"Expected integer value, got: {raw_value}") from exc
+    if expected_type is float:
+        try:
+            return float(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"Expected decimal value, got: {raw_value}") from exc
     return raw_value
 
 
@@ -201,11 +227,13 @@ def _validate_config_value(key: str, value: Any) -> Any:
         return normalized
     if key in POSITIVE_INT_CONFIG_KEYS and isinstance(value, int) and value <= 0:
         raise ValueError(f"{key} must be greater than 0")
+    if key in RATIO_CONFIG_KEYS and isinstance(value, float) and not 0 < value <= 1:
+        raise ValueError(f"{key} must be greater than 0 and less than or equal to 1")
     return value
 
 
 def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
-    sections = ("runtime", "llm", "compatible", "memory", "deepseek", "codex")
+    sections = ("runtime", "llm", "compatible", "memory", "context", "deepseek", "codex")
     lines = [
         "# Alpha Agent local configuration.",
         "# Environment variables still override these values for one-off runs or deploys.",
@@ -228,6 +256,8 @@ def _toml_literal(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, float):
+        return str(value)
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -247,6 +277,27 @@ def _int_value(value: Any, default: int) -> int:
     if isinstance(value, str) and value.strip():
         try:
             return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _float_value(value: Any, default: float) -> float:
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value)
         except ValueError:
             return default
     return default
@@ -318,6 +369,7 @@ def load_config(
 
     config_data = _load_toml_config(config_file)
     memory = _section(config_data, "memory")
+    context = _section(config_data, "context")
     deepseek = _section(config_data, "deepseek")
 
     db_path = Path(
@@ -368,13 +420,29 @@ def load_config(
             "compatible",
             "api_key",
         ),
-        working_memory_limit=_int_env(
-            "ALPHA_WORKING_MEMORY_LIMIT",
-            _int_value(memory.get("working_memory_limit"), 12),
-        ),
         retrieval_limit=_int_env(
             "ALPHA_RETRIEVAL_LIMIT",
             _int_value(memory.get("retrieval_limit"), 8),
+        ),
+        context_max_prompt_tokens=_int_env(
+            "ALPHA_CONTEXT_MAX_PROMPT_TOKENS",
+            _int_value(context.get("max_prompt_tokens"), 6000),
+        ),
+        context_compression_threshold_ratio=_float_env(
+            "ALPHA_CONTEXT_COMPRESSION_THRESHOLD_RATIO",
+            _float_value(context.get("compression_threshold_ratio"), 0.85),
+        ),
+        context_recent_tail_messages=_int_env(
+            "ALPHA_CONTEXT_RECENT_TAIL_MESSAGES",
+            _int_value(context.get("recent_tail_messages"), 8),
+        ),
+        context_min_summary_tokens=_int_env(
+            "ALPHA_CONTEXT_MIN_SUMMARY_TOKENS",
+            _int_value(context.get("min_summary_tokens"), 256),
+        ),
+        context_max_summary_tokens=_int_env(
+            "ALPHA_CONTEXT_MAX_SUMMARY_TOKENS",
+            _int_value(context.get("max_summary_tokens"), 1024),
         ),
         deepseek_api_key=_env_or_config(
             "ALPHA_DEEPSEEK_API_KEY",
