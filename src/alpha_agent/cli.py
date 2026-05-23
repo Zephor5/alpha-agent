@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import time
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -21,6 +25,7 @@ from alpha_agent.daemon.client import DaemonClient
 from alpha_agent.daemon.manager import initialize_store
 from alpha_agent.daemon.runtime import AlphaDaemon, DaemonAlreadyRunningError
 from alpha_agent.daemon.status import (
+    DaemonRuntimeConfig,
     DaemonStatus,
     daemon_runtime_config,
     read_daemon_status,
@@ -66,6 +71,9 @@ app.add_typer(gateway_app, name="gateway")
 app.add_typer(config_app, name="config")
 app.add_typer(daemon_app, name="daemon")
 
+DAEMON_START_TIMEOUT_SECONDS = 5.0
+DAEMON_START_POLL_INTERVAL_SECONDS = 0.1
+
 
 def _display_model(config: AlphaConfig) -> str:
     if config.llm_model:
@@ -109,6 +117,63 @@ def _render_daemon_status(status: DaemonStatus) -> None:
     typer.echo(f"Log dir: {status.log_dir}")
 
 
+def _daemon_not_running_message() -> str:
+    return "Daemon is not running. Run alpha daemon start."
+
+
+def _daemon_status_is_running(response: dict[str, Any]) -> bool:
+    status = response.get("status")
+    if not isinstance(status, dict):
+        return False
+    return bool(status.get("running")) and str(status.get("state", "")) == "running"
+
+
+def _daemon_log_path(runtime: DaemonRuntimeConfig) -> Path:
+    return runtime.log_dir / "daemon.log"
+
+
+def _spawn_daemon_background(runtime: DaemonRuntimeConfig) -> tuple[subprocess.Popen[bytes], Path]:
+    log_path = _daemon_log_path(runtime)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, "-m", "alpha_agent.cli", "daemon", "run"]
+    log_file = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_file.close()
+    return process, log_path
+
+
+def _wait_for_daemon_running(
+    client: DaemonClient,
+    process: subprocess.Popen[bytes],
+    *,
+    timeout_seconds: float = DAEMON_START_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        response = client.status()
+        if _daemon_status_is_running(response):
+            status = response.get("status")
+            return dict(status) if isinstance(status, dict) else {}
+
+        return_code = process.poll()
+        if return_code is not None:
+            raise RuntimeError(
+                f"Daemon exited before startup completed with exit code {return_code}."
+            )
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Timed out waiting for daemon startup.")
+        time.sleep(DAEMON_START_POLL_INTERVAL_SECONDS)
+
+
 def _client_response_or_exit(response: dict[str, Any]) -> dict[str, Any]:
     if response.get("ok") is True:
         return response
@@ -116,7 +181,7 @@ def _client_response_or_exit(response: dict[str, Any]) -> dict[str, Any]:
     if isinstance(error, dict):
         message = str(error.get("message") or error.get("code") or "Daemon request failed.")
         if error.get("code") == "DAEMON_NOT_RUNNING":
-            message = "Daemon is not running. Run alpha daemon run."
+            message = _daemon_not_running_message()
         console.print(message)
     else:
         console.print("Daemon request failed.")
@@ -390,13 +455,37 @@ def config_set(
 
 @daemon_app.command("run")
 def daemon_run() -> None:
-    """Run the daemon runtime owner process."""
+    """Run the daemon runtime owner in the foreground."""
 
     try:
         AlphaDaemon(load_config()).run()
     except DaemonAlreadyRunningError as exc:
         console.print(str(exc))
         raise typer.Exit(1) from exc
+
+
+@daemon_app.command("start")
+def daemon_start() -> None:
+    """Start the daemon runtime owner in the background."""
+
+    config = load_config()
+    runtime = daemon_runtime_config(config)
+    client = DaemonClient(runtime.socket_path)
+    if _daemon_status_is_running(client.status()):
+        console.print("Daemon is already running.")
+        return
+
+    process, log_path = _spawn_daemon_background(runtime)
+    try:
+        status = _wait_for_daemon_running(client, process)
+    except (RuntimeError, TimeoutError) as exc:
+        console.print(str(exc))
+        console.print(f"Daemon log: {log_path}")
+        raise typer.Exit(1) from exc
+
+    pid = status.get("pid") or process.pid
+    console.print(f"Daemon started with PID {pid}.")
+    console.print(f"Daemon log: {log_path}")
 
 
 @daemon_app.command("status")
@@ -440,12 +529,18 @@ def daemon_status() -> None:
 
 
 @daemon_app.command("stop")
-def daemon_stop() -> None:
-    """Request graceful daemon shutdown."""
+def daemon_stop(
+    immediate: Annotated[
+        bool,
+        typer.Option("--immediate", help="Stop accepting daemon requests immediately."),
+    ] = False,
+) -> None:
+    """Request daemon shutdown."""
 
     config = load_config()
     runtime = daemon_runtime_config(config)
-    response = _client_response_or_exit(DaemonClient(runtime.socket_path).stop())
+    policy = "immediate" if immediate else "graceful"
+    response = _client_response_or_exit(DaemonClient(runtime.socket_path).stop(policy=policy))
     raw_status = response.get("status")
     if isinstance(raw_status, dict):
         console.print(str(raw_status.get("message") or "Daemon stopping."))

@@ -27,7 +27,7 @@ runtime turn.
 
 ## Target Architecture
 ```text
-alpha daemon run
+alpha daemon start
   ├─ IPC server
   ├─ AgentManager
   │    └─ session_id/session_key -> AlphaAgent
@@ -103,7 +103,7 @@ Minimum response types:
 ```json
 {"ok": true, "session_id": "s1", "response": "..."}
 {"ok": true, "status": {"state": "running"}}
-{"ok": false, "error": {"code": "DAEMON_NOT_RUNNING", "message": "Daemon is not running. Run alpha daemon run."}}
+{"ok": false, "error": {"code": "DAEMON_NOT_RUNNING", "message": "Daemon is not running. Run alpha daemon start."}}
 ```
 
 Protocol rules:
@@ -180,6 +180,7 @@ the daemon client migration.
 Target commands:
 
 ```text
+alpha daemon start
 alpha daemon run
 alpha daemon status
 alpha daemon stop
@@ -193,13 +194,15 @@ alpha gateway status
 
 Command behavior:
 
-- `alpha daemon run`: starts the single runtime owner process, IPC server, and
-  configured gateway adapters.
+- `alpha daemon start`: starts the single runtime owner process in the
+  background, including the IPC server and configured gateway adapters.
+- `alpha daemon run`: runs the same daemon owner in the foreground for debugging
+  and process supervisors.
 - `alpha daemon status`: reads daemon status over IPC when available, with file
   status as fallback diagnostics.
 - `alpha daemon stop`: requests graceful daemon shutdown over IPC.
 - `alpha ask`: sends one request to daemon. If daemon is unavailable, fail with
-  `Daemon is not running. Run alpha daemon run.`
+  `Daemon is not running. Run alpha daemon start.`
 - `alpha chat`: keeps the local interactive prompt, but each turn is an IPC
   `chat_turn` request.
 - `alpha gateway doctor`: remains a local diagnostic command for database,
@@ -269,13 +272,14 @@ The daemon owns adapter lifecycle:
 ### Slice 1: Daemon IPC and Status
 Acceptance criteria:
 
-- `alpha daemon run` starts a Unix socket JSON-lines server.
+- `alpha daemon start` starts a background daemon with a Unix socket JSON-lines server.
+- `alpha daemon run` runs the same Unix socket JSON-lines server in the foreground.
 - `alpha daemon status` reports running state through IPC.
 - `alpha daemon stop` requests shutdown.
 - Status file includes pid, socket path, state, updated timestamp, and adapter names.
 - No `AlphaAgent` is created yet.
 - `alpha gateway run` does not start another runtime after daemon commands exist;
-  it should point users to `alpha daemon run` or be removed in the same refactor.
+  it should point users to `alpha daemon start` or be removed in the same refactor.
 
 Likely files:
 
@@ -381,7 +385,7 @@ Likely files:
 ## Open Questions
 - Should `alpha ask` create a new session every call, or should it optionally
   accept `--session` for continuity?
-- Should daemon auto-start ever be allowed, or should explicit `alpha daemon run`
+- Should `ask` and `chat` auto-start the daemon, or should explicit `alpha daemon start`
   remain mandatory?
 - Should session cache eviction be time-based only, or also persist recent usage
   metadata for diagnostics?

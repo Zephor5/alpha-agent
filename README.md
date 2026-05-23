@@ -64,9 +64,16 @@ uv run alpha config get llm.provider
 Start the daemon runtime owner before local turns or gateway adapters:
 
 ```bash
-uv run alpha daemon run
+uv run alpha daemon start
 uv run alpha daemon status
 uv run alpha daemon stop
+```
+
+For foreground debugging or process supervisors, run the daemon without
+backgrounding:
+
+```bash
+uv run alpha daemon run
 ```
 
 Start an interactive chat:
@@ -116,7 +123,7 @@ uv run alpha gateway doctor
 uv run alpha gateway status
 ```
 
-Gateway adapters are owned by `alpha daemon run`. `alpha gateway doctor` remains
+Gateway adapters are owned by `alpha daemon start`. `alpha gateway doctor` remains
 a local diagnostic command for SQLite gateway tables, log files, and adapter
 availability.
 

@@ -104,7 +104,8 @@ These are prerequisites for making Alpha Agent usable outside `alpha chat`.
   - `~/.alpha-agent/logs/errors.log`
   - include session_id, platform, chat_id hash, user_id hash.
 - [x] Add `alpha gateway` CLI group:
-  - `alpha daemon run` owns local and gateway runtime turns.
+  - `alpha daemon start` owns local and gateway runtime turns in the background.
+  - `alpha daemon run` runs the same owner in the foreground.
   - `alpha daemon status`
   - `alpha daemon stop`
   - `alpha gateway status`
@@ -118,7 +119,7 @@ P0 implementation notes:
 - Runtime logging uses JSONL helpers that include `session_id`, `platform`, and
   hashed external chat/user identifiers when message context is available.
 - `alpha gateway run` no longer starts an independent runtime; it points users
-  to `alpha daemon run`.
+  to `alpha daemon start`.
 
 ## P1: Agent Loop Improvements
 
@@ -400,7 +401,7 @@ memory review.
    - `/stop` cancellation path.
    - bounded provider retry.
    - prompt/retrieval debug metadata for channel turns.
-4. Wire CLI `alpha gateway run/status/doctor`.
+4. Wire CLI `alpha daemon start/status/stop` and `alpha gateway status/doctor`.
 5. Add Feishu text MVP with allowlist, mention gating, and tests.
 6. Add channel commands `/status`, `/reset`, `/stop`, `/remember`.
 7. Add memory candidate review flow.
