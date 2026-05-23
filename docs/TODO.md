@@ -104,22 +104,21 @@ These are prerequisites for making Alpha Agent usable outside `alpha chat`.
   - `~/.alpha-agent/logs/errors.log`
   - include session_id, platform, chat_id hash, user_id hash.
 - [x] Add `alpha gateway` CLI group:
-  - `alpha gateway run`
+  - `alpha daemon run` owns local and gateway runtime turns.
+  - `alpha daemon status`
+  - `alpha daemon stop`
   - `alpha gateway status`
   - `alpha gateway doctor`
-  - `alpha gateway stop` remains intentionally deferred until a real
-    long-running adapter runner and PID/lock stop path exist.
 
 P0 implementation notes:
 
 - Gateway session mappings and dedup state are persisted in SQLite.
-- Active-turn guarding is thread-safe inside one process; multi-process
-  distributed locking is not part of P0.
+- Active-turn guarding is daemon-owned and shared by local CLI turns and gateway
+  turns for the same session id.
 - Runtime logging uses JSONL helpers that include `session_id`, `platform`, and
   hashed external chat/user identifiers when message context is available.
-- `alpha gateway run` is currently an honest operational smoke stub. It
-  initializes the database, status file, and log files, then exits cleanly when
-  no platform adapters are configured.
+- `alpha gateway run` no longer starts an independent runtime; it points users
+  to `alpha daemon run`.
 
 ## P1: Agent Loop Improvements
 

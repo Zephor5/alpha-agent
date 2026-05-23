@@ -19,6 +19,11 @@ def _set_gateway_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[P
     monkeypatch.setenv("ALPHA_CONFIG_PATH", str(tmp_path / "runtime" / "config.toml"))
     monkeypatch.setenv("ALPHA_LOG_DIR", str(log_dir))
     monkeypatch.setenv("ALPHA_GATEWAY_STATUS_PATH", str(status_path))
+    monkeypatch.setenv("ALPHA_DAEMON_SOCKET_PATH", str(tmp_path / "runtime" / "daemon.sock"))
+    monkeypatch.setenv(
+        "ALPHA_DAEMON_STATUS_PATH",
+        str(tmp_path / "runtime" / "daemon-status.json"),
+    )
     monkeypatch.setenv("ALPHA_LLM_PROVIDER", "mock")
     return db_path, log_dir, status_path
 
@@ -62,128 +67,18 @@ def test_gateway_doctor_initializes_db_and_runtime_files(
     assert "gateway.doctor" in (log_dir / "gateway.log").read_text(encoding="utf-8")
 
 
-def test_gateway_run_once_smoke_exits_cleanly_and_records_status(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_path, log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
-    runner = CliRunner()
-
-    result = runner.invoke(app, ["gateway", "run", "--once"])
-
-    assert result.exit_code == 0
-    assert "No platform adapters configured" in result.output
-    assert db_path.exists()
-    assert (log_dir / "gateway.log").exists()
-    assert status_path.exists()
-
-    status = json.loads(status_path.read_text(encoding="utf-8"))
-    assert status["state"] == "idle"
-    assert status["running"] is False
-    assert status["pid"] is None
-    assert status["adapter_count"] == 0
-
-    status_result = runner.invoke(app, ["gateway", "status"])
-    assert status_result.exit_code == 0
-    assert "idle" in status_result.output
-    assert "not running" in status_result.output
-    assert str(db_path) in status_result.output
-
-
-def test_gateway_run_once_uses_configured_adapters_when_present(
+def test_gateway_run_command_is_not_exposed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _db_path, _log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
-    source = ConversationSource(
-        platform="fake",
-        chat_id="chat-1",
-        chat_type="group",
-        user_id="user-1",
-        message_id="msg-1",
-    )
-    adapter = _CliFakeAdapter(
-        [InboundMessage(source=source, text="hello", platform_message_id="msg-1")]
-    )
-    monkeypatch.setattr("alpha_agent.cli.configured_adapters", lambda: (adapter,))
-    runner = CliRunner()
-
-    result = runner.invoke(app, ["gateway", "run", "--once"])
-
-    assert result.exit_code == 0
-    assert "Gateway smoke cycle completed." in result.output
-    assert adapter.connected is True
-    assert adapter.disconnected is True
-    assert adapter.sent
-    status = json.loads(status_path.read_text(encoding="utf-8"))
-    assert status["state"] == "idle"
-    assert status["running"] is False
-    assert status["adapter_count"] == 1
-    assert status["adapters"] == ["cli-fake"]
-
-
-def test_gateway_run_non_once_sets_idle_when_adapter_connect_returns(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _db_path, _log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
-    adapter = _CliFakeAdapter([])
-    monkeypatch.setattr("alpha_agent.cli.configured_adapters", lambda: (adapter,))
-    runner = CliRunner()
-
-    result = runner.invoke(app, ["gateway", "run"])
-
-    assert result.exit_code == 0
-    assert adapter.connected is True
-    assert adapter.disconnected is True
-    status = json.loads(status_path.read_text(encoding="utf-8"))
-    assert status["state"] == "idle"
-    assert status["running"] is False
-    assert status["adapters"] == ["cli-fake"]
-
-
-def test_gateway_run_disconnects_and_sets_idle_when_connect_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _db_path, _log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
-    adapter = _CliFakeAdapter([], connect_error=RuntimeError("connect failed"))
-    monkeypatch.setattr("alpha_agent.cli.configured_adapters", lambda: (adapter,))
     runner = CliRunner()
 
     result = runner.invoke(app, ["gateway", "run", "--once"])
 
     assert result.exit_code != 0
-    assert adapter.connected is True
-    assert adapter.disconnected is True
-    status = json.loads(status_path.read_text(encoding="utf-8"))
-    assert status["state"] == "idle"
-    assert status["running"] is False
-    assert status["adapters"] == ["cli-fake"]
-
-
-def test_gateway_run_sets_idle_when_agent_build_fails_before_connect(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _db_path, _log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
-    adapter = _CliFakeAdapter([])
-    monkeypatch.setattr("alpha_agent.cli.configured_adapters", lambda: (adapter,))
-    monkeypatch.setattr(
-        "alpha_agent.cli._build_agent",
-        lambda config: (_ for _ in ()).throw(RuntimeError("agent build failed")),
-    )
-    runner = CliRunner()
-
-    result = runner.invoke(app, ["gateway", "run", "--once"])
-
-    assert result.exit_code != 0
-    assert adapter.connected is False
-    assert adapter.disconnected is False
-    status = json.loads(status_path.read_text(encoding="utf-8"))
-    assert status["state"] == "idle"
-    assert status["running"] is False
-    assert status["adapters"] == ["cli-fake"]
+    assert "No such command" in result.output
+    assert not status_path.exists()
 
 
 def test_gateway_log_context_hashes_external_ids(tmp_path: Path) -> None:

@@ -56,13 +56,29 @@ class _FakeAgent:
     def __init__(self, response: str = "runtime response", *, error: Exception | None = None):
         self.response = response
         self.error = error
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
 
-    def respond(self, text: str, *, session_id: str) -> _AgentResult:
-        self.calls.append((text, session_id))
+    def respond(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        source_metadata: dict[str, object] | None = None,
+    ) -> _AgentResult:
+        self.calls.append((text, session_id, source_metadata or {}))
         if self.error:
             raise self.error
         return _AgentResult(self.response)
+
+
+class _FakeAgentManager:
+    def __init__(self, agent: _FakeAgent):
+        self.agent = agent
+        self.session_ids: list[str] = []
+
+    def get_or_create(self, session_id: str) -> _FakeAgent:
+        self.session_ids.append(session_id)
+        return self.agent
 
 
 class _FakeAdapter:
@@ -305,7 +321,7 @@ def test_gateway_bridge_handles_inbound_turn_and_sends_runtime_response(tmp_path
     agent = _FakeAgent("hello from alpha")
     adapter = _FakeAdapter()
     bridge = GatewayRuntimeBridge(
-        agent=agent,
+        agent_manager=_FakeAgentManager(agent),
         session_store=GatewaySessionStore(store),
         deduplicator=GatewayDeduplicator(store),
         turn_guard=ActiveTurnGuard(),
@@ -324,7 +340,61 @@ def test_gateway_bridge_handles_inbound_turn_and_sends_runtime_response(tmp_path
     assert adapter.sent == [(message.source, "hello from alpha")]
     assert adapter.hooks == ["start", "complete"]
     mapping = bridge.session_store.get_or_create(message.source, SessionMode.GROUP_PER_USER)
-    assert agent.calls == [("hello", mapping.session_id)]
+    assert agent.calls == [
+        (
+            "hello",
+            mapping.session_id,
+            {
+                "channel": "gateway",
+                "platform": "telegram",
+                "chat_id": "chat-1",
+                "chat_type": "group",
+                "user_id": "user-1",
+                "user_name": "Ada",
+                "message_type": "text",
+                "message_id": "msg-1",
+                "source": {"tenant": "personal"},
+            },
+        )
+    ]
+
+
+def test_gateway_bridge_resolves_agent_per_mapped_session(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    agent = _FakeAgent("manager response")
+    manager = _FakeAgentManager(agent)
+    adapter = _FakeAdapter()
+    bridge = GatewayRuntimeBridge(
+        agent_manager=manager,
+        session_store=GatewaySessionStore(store),
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+    )
+    message = InboundMessage(
+        source=_source(message_id="msg-1"),
+        text="hello",
+        platform_message_id="msg-1",
+    )
+
+    outbound = bridge.handle_message(adapter, message)
+
+    mapping = bridge.session_store.get_or_create(message.source, SessionMode.GROUP_PER_USER)
+    assert outbound is not None
+    assert outbound.text == "manager response"
+    assert manager.session_ids == [mapping.session_id]
+
+
+def test_gateway_bridge_constructor_requires_agent_manager(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(TypeError, match="agent_manager"):
+        GatewayRuntimeBridge(
+            session_store=GatewaySessionStore(store),
+            deduplicator=GatewayDeduplicator(store),
+            turn_guard=ActiveTurnGuard(),
+            session_mode=SessionMode.GROUP_PER_USER,
+        )
 
 
 def test_gateway_bridge_suppresses_duplicate_inbound_without_runtime_or_send(
@@ -334,7 +404,7 @@ def test_gateway_bridge_suppresses_duplicate_inbound_without_runtime_or_send(
     agent = _FakeAgent()
     adapter = _FakeAdapter()
     bridge = GatewayRuntimeBridge(
-        agent=agent,
+        agent_manager=_FakeAgentManager(agent),
         session_store=GatewaySessionStore(store),
         deduplicator=GatewayDeduplicator(store),
         turn_guard=ActiveTurnGuard(),
@@ -365,7 +435,7 @@ def test_gateway_bridge_sends_busy_message_when_session_has_active_turn(tmp_path
     agent = _FakeAgent()
     adapter = _FakeAdapter()
     bridge = GatewayRuntimeBridge(
-        agent=agent,
+        agent_manager=_FakeAgentManager(agent),
         session_store=session_store,
         deduplicator=GatewayDeduplicator(store),
         turn_guard=guard,
@@ -391,7 +461,7 @@ def test_gateway_bridge_delivers_runtime_failure_and_releases_turn_guard(tmp_pat
     agent = _FakeAgent(error=RuntimeError("provider failed"))
     adapter = _FakeAdapter()
     bridge = GatewayRuntimeBridge(
-        agent=agent,
+        agent_manager=_FakeAgentManager(agent),
         session_store=session_store,
         deduplicator=GatewayDeduplicator(store),
         turn_guard=ActiveTurnGuard(),
@@ -415,7 +485,7 @@ def test_gateway_bridge_raises_explicit_delivery_error_on_send_failure(tmp_path:
     store = _store(tmp_path)
     adapter = _FakeAdapter(delivery_success=False)
     bridge = GatewayRuntimeBridge(
-        agent=_FakeAgent(),
+        agent_manager=_FakeAgentManager(_FakeAgent()),
         session_store=GatewaySessionStore(store),
         deduplicator=GatewayDeduplicator(store),
         turn_guard=ActiveTurnGuard(),
@@ -440,7 +510,7 @@ def test_gateway_bridge_retries_cached_outbound_without_rerunning_runtime_after_
     agent = _FakeAgent()
     adapter = _FakeAdapter(delivery_success=False)
     bridge = GatewayRuntimeBridge(
-        agent=agent,
+        agent_manager=_FakeAgentManager(agent),
         session_store=GatewaySessionStore(store),
         deduplicator=GatewayDeduplicator(store),
         turn_guard=ActiveTurnGuard(),
@@ -473,7 +543,7 @@ def test_gateway_bridge_ignores_start_hook_failure_and_still_sends(
     agent = _FakeAgent("runtime response")
     adapter = _FakeAdapter(fail_start_hook=True)
     bridge = GatewayRuntimeBridge(
-        agent=agent,
+        agent_manager=_FakeAgentManager(agent),
         session_store=GatewaySessionStore(store),
         deduplicator=GatewayDeduplicator(store),
         turn_guard=ActiveTurnGuard(),
@@ -504,7 +574,7 @@ def test_gateway_bridge_ignores_complete_hook_failure_and_releases_guard(
     agent = _FakeAgent("runtime response")
     adapter = _FakeAdapter(fail_complete_hook=True)
     bridge = GatewayRuntimeBridge(
-        agent=agent,
+        agent_manager=_FakeAgentManager(agent),
         session_store=session_store,
         deduplicator=GatewayDeduplicator(store),
         turn_guard=ActiveTurnGuard(),

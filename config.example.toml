@@ -5,6 +5,8 @@
 db_path = "~/.alpha-agent/alpha.db"
 log_dir = "~/.alpha-agent/logs"
 gateway_status_path = "~/.alpha-agent/gateway-status.json"
+daemon_socket_path = "~/.alpha-agent/daemon.sock"
+daemon_status_path = "~/.alpha-agent/daemon-status.json"
 
 [llm]
 provider = "mock"

@@ -17,6 +17,8 @@ def test_load_config_reads_toml_file(tmp_path: Path) -> None:
 db_path = "~/custom-alpha/alpha.db"
 log_dir = "~/custom-alpha/logs"
 gateway_status_path = "~/custom-alpha/status.json"
+daemon_socket_path = "~/custom-alpha/daemon.sock"
+daemon_status_path = "~/custom-alpha/daemon-status.json"
 
 [llm]
 provider = "deepseek"
@@ -50,6 +52,8 @@ reasoning_effort = "high"
     assert config.db_path == Path("~/custom-alpha/alpha.db").expanduser()
     assert config.log_dir == Path("~/custom-alpha/logs").expanduser()
     assert config.gateway_status_path == Path("~/custom-alpha/status.json").expanduser()
+    assert config.daemon_socket_path == Path("~/custom-alpha/daemon.sock").expanduser()
+    assert config.daemon_status_path == Path("~/custom-alpha/daemon-status.json").expanduser()
     assert config.llm_provider == "deepseek"
     assert config.retrieval_limit == 3
     assert config.context_max_prompt_tokens == 4096

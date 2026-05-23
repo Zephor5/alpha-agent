@@ -12,7 +12,6 @@ from alpha_agent.gateway.config import adapter_name
 from alpha_agent.gateway.logging import GatewayLogContext, append_gateway_log
 from alpha_agent.gateway.models import DeliveryResult, InboundMessage, OutboundMessage
 from alpha_agent.gateway.session import GatewayDeduplicator, GatewaySessionStore, SessionMode
-from alpha_agent.runtime.agent import AlphaAgent
 
 BUSY_SESSION_MESSAGE = (
     "This conversation already has an active Alpha turn. Please try again after it finishes."
@@ -86,7 +85,7 @@ class GatewayRuntimeBridge:
     def __init__(
         self,
         *,
-        agent: AlphaAgent,
+        agent_manager: Any,
         session_store: GatewaySessionStore,
         deduplicator: GatewayDeduplicator,
         turn_guard: ActiveTurnGuard,
@@ -96,7 +95,7 @@ class GatewayRuntimeBridge:
         busy_message: str = BUSY_SESSION_MESSAGE,
         runtime_error_message: str = RUNTIME_ERROR_MESSAGE,
     ):
-        self.agent = agent
+        self.agent_manager = agent_manager
         self.session_store = session_store
         self.deduplicator = deduplicator
         self.turn_guard = turn_guard
@@ -171,7 +170,12 @@ class GatewayRuntimeBridge:
 
         try:
             self._run_adapter_hook(adapter, "on_processing_start", message, context)
-            result = self.agent.respond(message.text, session_id=mapping.session_id)
+            agent = self._agent_for(mapping.session_id)
+            result = agent.respond(
+                message.text,
+                session_id=mapping.session_id,
+                source_metadata=gateway_source_metadata(message),
+            )
             outbound = self._outbound(message, result.response)
         except Exception as exc:
             self._log_error(
@@ -278,6 +282,9 @@ class GatewayRuntimeBridge:
             reply_to=message.platform_message_id or message.source.message_id,
         )
 
+    def _agent_for(self, session_id: str) -> Any:
+        return self.agent_manager.get_or_create(session_id)
+
     def _log_gateway(
         self,
         event: str,
@@ -314,3 +321,29 @@ class GatewayRuntimeBridge:
             context=context,
             metadata=metadata,
         )
+
+
+def gateway_source_metadata(message: InboundMessage) -> dict[str, Any]:
+    """Return transcript source metadata for one inbound gateway message."""
+
+    source = message.source
+    metadata: dict[str, Any] = {
+        "channel": "gateway",
+        "platform": source.platform,
+        "chat_id": source.chat_id,
+        "chat_type": source.chat_type,
+        "user_id": source.user_id,
+        "message_type": message.message_type,
+    }
+    if source.user_name is not None:
+        metadata["user_name"] = source.user_name
+    if source.thread_id is not None:
+        metadata["thread_id"] = source.thread_id
+    message_id = message.platform_message_id or source.message_id
+    if message_id is not None:
+        metadata["message_id"] = message_id
+    if source.metadata:
+        metadata["source"] = dict(source.metadata)
+    if message.attachments:
+        metadata["attachment_count"] = len(message.attachments)
+    return metadata

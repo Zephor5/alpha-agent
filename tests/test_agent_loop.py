@@ -69,6 +69,26 @@ def test_mock_agent_loop_stores_user_and_assistant_messages(tmp_path: Path) -> N
     assert result.debug["extracted_memory_count"] >= 1
 
 
+def test_agent_turn_persists_user_source_metadata(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+    )
+
+    agent.respond(
+        "hello",
+        session_id="s1",
+        source_metadata={"channel": "cli", "command": "ask"},
+    )
+
+    messages = store.list_conversation_messages("s1")
+    assert messages[0].source_metadata == {"channel": "cli", "command": "ask"}
+    assert messages[1].source_metadata == {}
+
+
 def test_agent_honors_configured_retrieval_limit(tmp_path: Path) -> None:
     class RecordingRetriever(MemoryRetriever):
         def __init__(self, store: MemoryStore):

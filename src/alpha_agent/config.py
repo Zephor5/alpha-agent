@@ -17,6 +17,8 @@ DEFAULT_CONFIG_TOML = """# Alpha Agent local configuration.
 db_path = "~/.alpha-agent/alpha.db"
 log_dir = "~/.alpha-agent/logs"
 gateway_status_path = "~/.alpha-agent/gateway-status.json"
+daemon_socket_path = "~/.alpha-agent/daemon.sock"
+daemon_status_path = "~/.alpha-agent/daemon-status.json"
 
 [llm]
 provider = "mock"
@@ -50,6 +52,8 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "runtime.db_path": str,
     "runtime.log_dir": str,
     "runtime.gateway_status_path": str,
+    "runtime.daemon_socket_path": str,
+    "runtime.daemon_status_path": str,
     "llm.provider": str,
     "llm.model": str,
     "llm.debug_logging": bool,
@@ -107,6 +111,8 @@ class AlphaConfig:
     db_path: Path
     log_dir: Path
     gateway_status_path: Path
+    daemon_socket_path: Path = Path("~/.alpha-agent/daemon.sock").expanduser()
+    daemon_status_path: Path = Path("~/.alpha-agent/daemon-status.json").expanduser()
     llm_provider: str = "mock"
     llm_model: str = ""
     llm_debug_logging: bool = False
@@ -396,10 +402,32 @@ def load_config(
         )
         or "~/.alpha-agent/gateway-status.json"
     ).expanduser()
+    daemon_socket_path = Path(
+        _env_or_config(
+            "ALPHA_DAEMON_SOCKET_PATH",
+            config_data,
+            "runtime",
+            "daemon_socket_path",
+            "~/.alpha-agent/daemon.sock",
+        )
+        or "~/.alpha-agent/daemon.sock"
+    ).expanduser()
+    daemon_status_path = Path(
+        _env_or_config(
+            "ALPHA_DAEMON_STATUS_PATH",
+            config_data,
+            "runtime",
+            "daemon_status_path",
+            "~/.alpha-agent/daemon-status.json",
+        )
+        or "~/.alpha-agent/daemon-status.json"
+    ).expanduser()
     return AlphaConfig(
         db_path=db_path,
         log_dir=log_dir,
         gateway_status_path=gateway_status_path,
+        daemon_socket_path=daemon_socket_path,
+        daemon_status_path=daemon_status_path,
         llm_provider=(
             _env_or_config("ALPHA_LLM_PROVIDER", config_data, "llm", "provider", "mock") or "mock"
         ).strip().lower(),

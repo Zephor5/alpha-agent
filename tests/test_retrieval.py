@@ -47,6 +47,30 @@ def test_retrieval_ranking_without_vectors(tmp_path: Path) -> None:
     assert context.episodic_memories[0].summary.startswith("Important decision")
 
 
+def test_retrieval_can_skip_access_recording(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    episode = EpisodicMemoryManager(store).create(
+        "Important decision about SQLite memory retrieval",
+        ["evt1"],
+        salience=0.9,
+    )
+    retriever = MemoryRetriever(store)
+
+    context = retriever.retrieve_context(
+        "sqlite memory retrieval",
+        "session-1",
+        limit=3,
+        record_access=False,
+    )
+
+    assert [memory.id for memory in context.episodic_memories] == [episode.id]
+    assert store.list_episodic_memories(limit=1)[0].access_count == 0
+    with store.connect() as conn:
+        access_logs = conn.execute("SELECT count(*) FROM memory_access_log").fetchone()[0]
+    assert access_logs == 0
+
+
 def test_procedural_retrieval_requires_textual_relevance(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()

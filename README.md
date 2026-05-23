@@ -61,6 +61,14 @@ uv run alpha config get llm.provider
 
 ## CLI Usage
 
+Start the daemon runtime owner before local turns or gateway adapters:
+
+```bash
+uv run alpha daemon run
+uv run alpha daemon status
+uv run alpha daemon stop
+```
+
 Start an interactive chat:
 
 ```bash
@@ -106,12 +114,11 @@ Inspect the gateway operational shell:
 ```bash
 uv run alpha gateway doctor
 uv run alpha gateway status
-uv run alpha gateway run --once
 ```
 
-The gateway commands initialize the SQLite gateway tables, log files, and status
-file needed by future Feishu/WeChat adapters. They do not connect to real
-platforms yet.
+Gateway adapters are owned by `alpha daemon run`. `alpha gateway doctor` remains
+a local diagnostic command for SQLite gateway tables, log files, and adapter
+availability.
 
 ## Configuration
 
@@ -135,6 +142,13 @@ defaults < config.toml < .env / environment variables
 Main config keys:
 
 ```toml
+[runtime]
+db_path = "~/.alpha-agent/alpha.db"
+log_dir = "~/.alpha-agent/logs"
+gateway_status_path = "~/.alpha-agent/gateway-status.json"
+daemon_socket_path = "~/.alpha-agent/daemon.sock"
+daemon_status_path = "~/.alpha-agent/daemon-status.json"
+
 [llm]
 provider = "mock"
 model = "" # empty means "use the selected provider's default"
@@ -169,6 +183,10 @@ Useful environment overrides:
 - `ALPHA_LOG_DIR`: Gateway log directory. Defaults to `~/.alpha-agent/logs`.
 - `ALPHA_GATEWAY_STATUS_PATH`: Gateway status JSON path. Defaults to
   `~/.alpha-agent/gateway-status.json`.
+- `ALPHA_DAEMON_SOCKET_PATH`: Daemon Unix socket path. Defaults to
+  `~/.alpha-agent/daemon.sock`.
+- `ALPHA_DAEMON_STATUS_PATH`: Daemon status JSON path. Defaults to
+  `~/.alpha-agent/daemon-status.json`.
 - `ALPHA_LLM_PROVIDER`: `mock`, `openai-compatible`, `deepseek`, or `codex`.
   Defaults to `mock`.
 - `ALPHA_LLM_MODEL`: Optional model override for the selected provider. Empty

@@ -247,6 +247,7 @@ class AlphaAgent:
         self,
         user_message: str,
         session_id: str,
+        source_metadata: Mapping[str, Any] | None = None,
     ) -> AgentTurnResult:
         """Run one explicit agent turn."""
 
@@ -261,7 +262,11 @@ class AlphaAgent:
         }
         try:
             self._check_canceled(session_id, "before_user_event")
-            user_record = self._write_user_message(session_id, user_message)
+            user_record = self._write_user_message(
+                session_id,
+                user_message,
+                source_metadata=source_metadata,
+            )
             debug["user_message_id"] = user_record.id
             debug["user_message_ordinal"] = user_record.ordinal
 
@@ -393,11 +398,14 @@ class AlphaAgent:
         self,
         session_id: str,
         user_message: str,
+        *,
+        source_metadata: Mapping[str, Any] | None = None,
     ) -> ConversationMessage:
         return self.store.append_conversation_message(
             session_id=session_id,
             role="user",
             raw_content=user_message,
+            source_metadata=dict(source_metadata or {}),
         )
 
     def _retrieve_memory(self, user_message: str, session_id: str) -> RetrievedContext:

@@ -65,7 +65,61 @@ def test_debug_prompt_loads_gateway_source_from_session_and_prints_retrieval_tra
     assert "thread-9" in result.output
     assert episode.id in result.output
     assert "retrieval_score=" in result.output
-    assert "access_count=1" in result.output
+    assert "access_count=" in result.output
+    assert "access_count=1" not in result.output
+    assert store.list_episodic_memories(limit=1)[0].access_count == 0
+    with store.connect() as conn:
+        access_logs = conn.execute("SELECT count(*) FROM memory_access_log").fetchone()[0]
+    assert access_logs == 0
+
+
+def test_memory_search_does_not_record_memory_access(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    EpisodicMemoryManager(store).create(
+        content="SQLite memory retrieval decision",
+        source_event_ids=[],
+        salience=0.9,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["memory", "search", "sqlite memory"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "episodic" in result.output
+    assert store.list_episodic_memories(limit=1)[0].access_count == 0
+    with store.connect() as conn:
+        access_logs = conn.execute("SELECT count(*) FROM memory_access_log").fetchone()[0]
+    assert access_logs == 0
+
+
+def test_skills_list_does_not_load_builtin_skills(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["skills", "list"], env=_env(tmp_path))
+
+    store = _store(tmp_path)
+    assert result.exit_code == 0
+    assert store.stats()["procedural"] == 0
+    assert "Debug Loop" not in result.output
+
+
+def test_debug_prompt_does_not_load_builtin_skills(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["debug", "prompt", "debug this failing command"],
+        env=_env(tmp_path),
+    )
+
+    store = _store(tmp_path)
+    assert result.exit_code == 0
+    assert store.stats()["procedural"] == 0
+    assert "Debug Loop" not in result.output
 
 
 def test_debug_prompt_manual_source_flags_override_gateway_mapping(tmp_path: Path) -> None:

@@ -17,40 +17,36 @@ from alpha_agent.config import (
     set_config_value,
     write_default_config,
 )
+from alpha_agent.daemon.client import DaemonClient
+from alpha_agent.daemon.manager import initialize_store
+from alpha_agent.daemon.runtime import AlphaDaemon, DaemonAlreadyRunningError
+from alpha_agent.daemon.status import (
+    DaemonStatus,
+    daemon_runtime_config,
+    read_daemon_status,
+)
+from alpha_agent.daemon.status import (
+    idle_status as daemon_idle_status,
+)
+from alpha_agent.daemon.status import (
+    is_pid_running as daemon_pid_running,
+)
 from alpha_agent.gateway.config import (
-    adapter_name,
     configured_adapter_names,
-    configured_adapters,
     ensure_gateway_runtime_files,
     gateway_runtime_config,
 )
 from alpha_agent.gateway.logging import append_gateway_log
 from alpha_agent.gateway.models import ConversationSource
-from alpha_agent.gateway.runner import ActiveTurnGuard, GatewayRuntimeBridge
-from alpha_agent.gateway.session import GatewayDeduplicator, GatewaySessionStore, SessionMode
-from alpha_agent.gateway.status import (
-    GatewayStatus,
-    gateway_tables_available,
-    idle_status,
-    is_pid_running,
-    read_gateway_status,
-    running_status,
-    write_gateway_status,
-)
-from alpha_agent.llm.base import LLMProvider
-from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL, CodexResponsesProvider
-from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL, DeepSeekProvider
-from alpha_agent.llm.mock import MockLLMProvider
-from alpha_agent.llm.openai_compatible import (
-    OPENAI_COMPATIBLE_DEFAULT_MODEL,
-    OpenAICompatibleProvider,
-)
+from alpha_agent.gateway.status import gateway_tables_available
+from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
+from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
+from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
 from alpha_agent.memory.consolidation import ConsolidationService
 from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.review import MemoryReviewService, edit_candidate
 from alpha_agent.memory.store import MemoryStore
-from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.runtime.prompt_builder import PromptBuilder
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.runtime.session_context import SessionContextManager
@@ -62,23 +58,13 @@ skills_app = typer.Typer(help="Procedural skill commands.")
 debug_app = typer.Typer(help="Debug commands.")
 gateway_app = typer.Typer(help="Gateway operational commands.")
 config_app = typer.Typer(help="Configuration commands.")
+daemon_app = typer.Typer(help="Daemon runtime commands.")
 app.add_typer(memory_app, name="memory")
 app.add_typer(skills_app, name="skills")
 app.add_typer(debug_app, name="debug")
 app.add_typer(gateway_app, name="gateway")
 app.add_typer(config_app, name="config")
-
-
-def _provider(config: AlphaConfig) -> LLMProvider:
-    if config.llm_provider in {"mock", ""}:
-        return MockLLMProvider()
-    if config.llm_provider in {"openai", "openai-compatible", "compatible"}:
-        return OpenAICompatibleProvider(config)
-    if config.llm_provider in {"deepseek"}:
-        return DeepSeekProvider(config)
-    if config.llm_provider in {"codex", "openai-codex", "openai_codex"}:
-        return CodexResponsesProvider(config)
-    raise typer.BadParameter(f"Unknown ALPHA_LLM_PROVIDER: {config.llm_provider}")
+app.add_typer(daemon_app, name="daemon")
 
 
 def _display_model(config: AlphaConfig) -> str:
@@ -94,29 +80,7 @@ def _display_model(config: AlphaConfig) -> str:
 
 
 def _store(config: AlphaConfig) -> MemoryStore:
-    store = MemoryStore(config.db_path)
-    store.initialize()
-    return store
-
-
-def _build_agent(config: AlphaConfig) -> AlphaAgent:
-    store = _store(config)
-    procedural = ProceduralMemoryManager(store)
-    procedural.load_builtin_skills()
-    retriever = MemoryRetriever(store)
-    return AlphaAgent(
-        store=store,
-        llm_provider=_provider(config),
-        retriever=retriever,
-        retrieval_limit=config.retrieval_limit,
-        llm_debug_logging=config.llm_debug_logging,
-        llm_trace_log_path=config.log_dir / "llm.jsonl",
-        context_max_prompt_tokens=config.context_max_prompt_tokens,
-        context_compression_threshold_ratio=config.context_compression_threshold_ratio,
-        context_recent_tail_messages=config.context_recent_tail_messages,
-        context_min_summary_tokens=config.context_min_summary_tokens,
-        context_max_summary_tokens=config.context_max_summary_tokens,
-    )
+    return initialize_store(config)
 
 
 def _initialize_gateway(config: AlphaConfig) -> int:
@@ -124,23 +88,39 @@ def _initialize_gateway(config: AlphaConfig) -> int:
     return len(ProceduralMemoryManager(store).load_builtin_skills())
 
 
-def _render_gateway_status(status: GatewayStatus, *, status_path: str) -> None:
+def _render_daemon_status(status: DaemonStatus) -> None:
     process = "running" if status.running else "not running"
-    table = Table(title="Gateway Status")
+    table = Table(title="Daemon Status")
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("State", status.state)
     table.add_row("Process", process)
     table.add_row("PID", str(status.pid) if status.pid is not None else "-")
+    table.add_row("Socket path", status.socket_path)
+    table.add_row("Status path", status.status_path)
     table.add_row("DB path", status.db_path)
     table.add_row("Log dir", status.log_dir)
-    table.add_row("Status path", status_path)
     table.add_row("Adapters", ", ".join(status.adapters) if status.adapters else "none")
     table.add_row("Message", status.message)
     console.print(table)
+    typer.echo(f"Socket path: {status.socket_path}")
+    typer.echo(f"Status path: {status.status_path}")
     typer.echo(f"DB path: {status.db_path}")
     typer.echo(f"Log dir: {status.log_dir}")
-    typer.echo(f"Status path: {status_path}")
+
+
+def _client_response_or_exit(response: dict[str, Any]) -> dict[str, Any]:
+    if response.get("ok") is True:
+        return response
+    error = response.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("code") or "Daemon request failed.")
+        if error.get("code") == "DAEMON_NOT_RUNNING":
+            message = "Daemon is not running. Run alpha daemon run."
+        console.print(message)
+    else:
+        console.print("Daemon request failed.")
+    raise typer.Exit(1)
 
 
 def _render_candidates(candidates: list[Any]) -> None:
@@ -356,6 +336,8 @@ def config_show() -> None:
     table.add_row("db_path", str(config.db_path))
     table.add_row("log_dir", str(config.log_dir))
     table.add_row("gateway_status_path", str(config.gateway_status_path))
+    table.add_row("daemon_socket_path", str(config.daemon_socket_path))
+    table.add_row("daemon_status_path", str(config.daemon_status_path))
     table.add_row("llm_provider", config.llm_provider)
     if config.llm_provider in {"openai-compatible", "openai", "compatible"}:
         table.add_row("compatible_base_url", config.compatible_base_url or "")
@@ -406,22 +388,90 @@ def config_set(
     console.print(f"Set [bold]{key}[/bold] = {printable}")
 
 
-@gateway_app.command("status")
-def gateway_status() -> None:
-    """Show gateway runtime status."""
+@daemon_app.command("run")
+def daemon_run() -> None:
+    """Run the daemon runtime owner process."""
+
+    try:
+        AlphaDaemon(load_config()).run()
+    except DaemonAlreadyRunningError as exc:
+        console.print(str(exc))
+        raise typer.Exit(1) from exc
+
+
+@daemon_app.command("status")
+def daemon_status() -> None:
+    """Show daemon runtime status."""
 
     config = load_config()
-    runtime = gateway_runtime_config(config)
-    status = read_gateway_status(runtime.status_path)
-    if status is None:
-        status = idle_status(db_path=config.db_path, log_dir=runtime.log_dir)
-    elif status.running and not is_pid_running(status.pid):
-        status = idle_status(
-            db_path=config.db_path,
-            log_dir=runtime.log_dir,
-            message="Gateway status file exists, but the recorded process is not running.",
+    runtime = daemon_runtime_config(config)
+    response = DaemonClient(runtime.socket_path).status()
+    if response.get("ok") is True and isinstance(response.get("status"), dict):
+        raw = response["status"]
+        status = DaemonStatus(
+            state=str(raw.get("state", "unknown")),
+            running=bool(raw.get("running", False)),
+            pid=int(raw["pid"]) if raw.get("pid") is not None else None,
+            socket_path=str(raw.get("socket_path", runtime.socket_path)),
+            status_path=str(raw.get("status_path", runtime.status_path)),
+            updated_at=str(raw.get("updated_at", "")),
+            adapters=[str(adapter) for adapter in raw.get("adapters", [])],
+            db_path=str(raw.get("db_path", config.db_path)),
+            log_dir=str(raw.get("log_dir", config.log_dir)),
+            message=str(raw.get("message", "")),
+            started_at=str(raw["started_at"]) if raw.get("started_at") is not None else None,
         )
-    _render_gateway_status(status, status_path=str(runtime.status_path))
+        _render_daemon_status(status)
+        return
+
+    maybe_status = read_daemon_status(runtime.status_path)
+    if maybe_status is None:
+        status = daemon_idle_status(config=config, runtime=runtime)
+    elif maybe_status.running and not daemon_pid_running(maybe_status.pid):
+        status = daemon_idle_status(
+            config=config,
+            runtime=runtime,
+            adapter_names=tuple(maybe_status.adapters),
+            message="Daemon status file exists, but the recorded process is not running.",
+        )
+    else:
+        status = maybe_status
+    _render_daemon_status(status)
+
+
+@daemon_app.command("stop")
+def daemon_stop() -> None:
+    """Request graceful daemon shutdown."""
+
+    config = load_config()
+    runtime = daemon_runtime_config(config)
+    response = _client_response_or_exit(DaemonClient(runtime.socket_path).stop())
+    raw_status = response.get("status")
+    if isinstance(raw_status, dict):
+        console.print(str(raw_status.get("message") or "Daemon stopping."))
+    else:
+        console.print("Daemon stopping.")
+
+
+@gateway_app.command("status")
+def gateway_status() -> None:
+    """Show gateway adapter status from the daemon runtime."""
+
+    config = load_config()
+    runtime = daemon_runtime_config(config)
+    maybe_status = read_daemon_status(runtime.status_path)
+    if maybe_status is None:
+        status = daemon_idle_status(config=config, runtime=runtime)
+    elif maybe_status.running and not daemon_pid_running(maybe_status.pid):
+        status = daemon_idle_status(
+            config=config,
+            runtime=runtime,
+            adapter_names=tuple(maybe_status.adapters),
+            message="Daemon status file exists, but the recorded process is not running.",
+        )
+    else:
+        status = maybe_status
+    _render_daemon_status(status)
 
 
 @gateway_app.command("doctor")
@@ -472,117 +522,23 @@ def gateway_doctor() -> None:
         typer.echo(f"{name}: {path}")
 
 
-@gateway_app.command("run")
-def gateway_run(
-    once: Annotated[
-        bool,
-        typer.Option("--once", help="Run one startup smoke cycle and exit."),
-    ] = False,
-) -> None:
-    """Run the gateway development stub."""
-
-    config = load_config()
-    runtime = gateway_runtime_config(config)
-    ensure_gateway_runtime_files(runtime)
-    _initialize_gateway(config)
-
-    adapters = configured_adapters()
-    adapter_names = tuple(adapter_name(adapter) for adapter in adapters)
-    append_gateway_log(
-        runtime.log_paths["gateway.log"],
-        event="gateway.run.start",
-        message="Gateway run invoked.",
-        metadata={"adapter_count": len(adapter_names), "once": once},
-    )
-    write_gateway_status(
-        runtime.status_path,
-        running_status(
-            db_path=config.db_path,
-            log_dir=runtime.log_dir,
-            adapter_names=adapter_names,
-            message="Gateway process starting.",
-        ),
-    )
-
-    if not adapters:
-        message = "No platform adapters configured; gateway run exited cleanly."
-        append_gateway_log(
-            runtime.log_paths["gateway.log"],
-            event="gateway.run.no_adapters",
-            message=message,
-        )
-        write_gateway_status(
-            runtime.status_path,
-            idle_status(db_path=config.db_path, log_dir=runtime.log_dir, message=message),
-        )
-        console.print(
-            "No platform adapters configured; initialized DB and runtime files, "
-            "then exited cleanly."
-        )
-        return
-
-    stop_message = "Gateway smoke cycle completed." if once else "Gateway stopped."
-    connected_adapters = []
-    try:
-        agent = _build_agent(config)
-        bridge = GatewayRuntimeBridge(
-            agent=agent,
-            session_store=GatewaySessionStore(agent.store),
-            deduplicator=GatewayDeduplicator(agent.store),
-            turn_guard=ActiveTurnGuard(),
-            session_mode=SessionMode.GROUP_PER_USER,
-            gateway_log_path=runtime.log_paths["gateway.log"],
-            error_log_path=runtime.log_paths["errors.log"],
-        )
-        for adapter in adapters:
-            connected_adapters.append(adapter)
-            bridge.connect(adapter)
-    except Exception as exc:
-        stop_message = "Gateway stopped after adapter error."
-        append_gateway_log(
-            runtime.log_paths["errors.log"],
-            event="gateway.run.error",
-            message=stop_message,
-            level="error",
-            metadata={"error_type": type(exc).__name__},
-        )
-        raise
-    finally:
-        for adapter in connected_adapters:
-            try:
-                adapter.disconnect()
-            except Exception as exc:
-                append_gateway_log(
-                    runtime.log_paths["errors.log"],
-                    event="gateway.adapter.disconnect_error",
-                    message="Adapter disconnect failed.",
-                    level="error",
-                    metadata={
-                        "adapter": adapter_name(adapter),
-                        "error_type": type(exc).__name__,
-                    },
-                )
-        write_gateway_status(
-            runtime.status_path,
-            idle_status(
-                db_path=config.db_path,
-                log_dir=runtime.log_dir,
-                message=stop_message,
-                adapter_names=adapter_names,
-            ),
-        )
-
-    console.print(stop_message)
-
-
 @app.command()
 def ask(message: Annotated[str, typer.Argument(help="Message to send to the agent.")]) -> None:
-    """Run a single-turn ask with the configured provider."""
+    """Send a single-turn ask to the daemon."""
 
     config = load_config()
-    agent = _build_agent(config)
-    result = agent.respond(message, session_id=new_session_id())
-    console.print(result.response)
+    runtime = daemon_runtime_config(config)
+    response = _client_response_or_exit(
+        DaemonClient(runtime.socket_path).request(
+            {
+                "type": "ask",
+                "message": message,
+                "session_id": None,
+                "source_metadata": {"channel": "cli", "command": "ask"},
+            }
+        )
+    )
+    console.print(str(response.get("response", "")))
 
 
 @app.command()
@@ -595,8 +551,8 @@ def chat(
     """Start an interactive chat session."""
 
     config = load_config()
-    agent = _build_agent(config)
     session_id = session or new_session_id()
+    client = DaemonClient(daemon_runtime_config(config).socket_path)
     console.print(f"[dim]Session: {session_id}[/dim]")
     console.print("[dim]Type /exit to quit, /consolidate to consolidate memory.[/dim]")
     while True:
@@ -610,11 +566,22 @@ def chat(
         if user_message in {"/exit", "/quit"}:
             break
         if user_message == "/consolidate":
-            report = ConsolidationService(agent.store).consolidate()
-            console.print(report.render())
+            response = _client_response_or_exit(client.request({"type": "consolidate_memory"}))
+            console.print(str(response.get("response", "")))
             continue
-        result = agent.respond(user_message, session_id=session_id)
-        console.print(f"[bold green]alpha>[/bold green] {result.response}")
+        response = _client_response_or_exit(
+            client.request(
+                {
+                    "type": "chat_turn",
+                    "message": user_message,
+                    "session_id": session_id,
+                    "source_metadata": {"channel": "cli", "command": "chat"},
+                }
+            )
+        )
+        if isinstance(response.get("session_id"), str):
+            session_id = str(response["session_id"])
+        console.print(f"[bold green]alpha>[/bold green] {response.get('response', '')}")
 
 
 @memory_app.command("list")
@@ -648,6 +615,7 @@ def search(
         query=query,
         session_id="memory-search",
         limit=config.retrieval_limit,
+        record_access=False,
     )
     table = Table(title=f"Memory search: {query}")
     table.add_column("Type")
@@ -797,11 +765,10 @@ def stats() -> None:
 
 @skills_app.command("list")
 def skills_list() -> None:
-    """List builtin and stored procedural memories."""
+    """List stored procedural memories."""
 
     config = load_config()
     store = _store(config)
-    ProceduralMemoryManager(store).load_builtin_skills()
     table = Table(title="Skills")
     table.add_column("Name")
     table.add_column("Trigger")
@@ -851,7 +818,6 @@ def prompt(
 
     config = load_config()
     store = _store(config)
-    ProceduralMemoryManager(store).load_builtin_skills()
     retriever = MemoryRetriever(store)
     source = _merge_source_context(
         _source_from_gateway_session(store, session),
@@ -864,7 +830,12 @@ def prompt(
         thread_id=thread_id,
         message_id=message_id,
     )
-    context = retriever.retrieve_context(message, session_id=session, limit=config.retrieval_limit)
+    context = retriever.retrieve_context(
+        message,
+        session_id=session,
+        limit=config.retrieval_limit,
+        record_access=False,
+    )
     retrieved_ids = {
         "episodic": [memory.id for memory in context.episodic_memories],
         "semantic": [memory.id for memory in context.semantic_memories],

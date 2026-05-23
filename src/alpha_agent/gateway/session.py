@@ -8,9 +8,14 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
-from alpha_agent.gateway.models import ConversationSource, InboundMessage, OutboundMessage
+from alpha_agent.gateway.models import (
+    ConversationSource,
+    InboundMessage,
+    OutboundMessage,
+    Visibility,
+)
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.utils.ids import new_id
@@ -343,6 +348,9 @@ def _outbound_from_metadata(value: dict[str, Any]) -> OutboundMessage | None:
         thread_metadata = {}
     if not isinstance(visibility, str):
         visibility = "default"
+    if visibility not in {"default", "public", "ephemeral"}:
+        visibility = "default"
+    typed_visibility = cast(Visibility, visibility)
     if reply_to is not None and not isinstance(reply_to, str):
         reply_to = None
     return OutboundMessage(
@@ -350,7 +358,7 @@ def _outbound_from_metadata(value: dict[str, Any]) -> OutboundMessage | None:
         attachments=attachments,
         reply_to=reply_to,
         thread_metadata=thread_metadata,
-        visibility=visibility,
+        visibility=typed_visibility,
     )
 
 

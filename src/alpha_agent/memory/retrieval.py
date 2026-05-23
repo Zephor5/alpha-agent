@@ -33,15 +33,28 @@ class MemoryRetriever:
     def __init__(self, store: MemoryStore):
         self.store = store
 
-    def retrieve_context(self, query: str, session_id: str, limit: int = 8) -> RetrievedContext:
+    def retrieve_context(
+        self,
+        query: str,
+        session_id: str,
+        limit: int = 8,
+        *,
+        record_access: bool = True,
+    ) -> RetrievedContext:
         """Retrieve episodic, semantic, and procedural context for a turn."""
 
         episodic = self._rank_episodic(query, limit)
         semantic = self._rank_semantic(query, limit)
         procedural = self._rank_procedural(query, max(3, limit // 2))
 
-        for ranked in [*episodic, *semantic, *procedural]:
-            self.store.log_memory_access(ranked.memory.id, ranked.memory_type, query, ranked.score)
+        if record_access:
+            for ranked in [*episodic, *semantic, *procedural]:
+                self.store.log_memory_access(
+                    ranked.memory.id,
+                    ranked.memory_type,
+                    query,
+                    ranked.score,
+                )
 
         entity_hints = extract_lightweight_entities(query)
         return RetrievedContext(
