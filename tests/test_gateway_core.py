@@ -6,8 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from alpha_agent.gateway.models import ConversationSource, InboundMessage
-from alpha_agent.gateway.runner import ActiveTurnGuard
+from alpha_agent.gateway.models import (
+    ConversationSource,
+    DeliveryResult,
+    InboundMessage,
+)
+from alpha_agent.gateway.runner import ActiveTurnGuard, GatewayDeliveryError, GatewayRuntimeBridge
 from alpha_agent.gateway.session import (
     GatewayDeduplicator,
     GatewaySessionStore,
@@ -41,6 +45,71 @@ def _store(tmp_path: Path) -> MemoryStore:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
     return store
+
+
+class _AgentResult:
+    def __init__(self, response: str):
+        self.response = response
+
+
+class _FakeAgent:
+    def __init__(self, response: str = "runtime response", *, error: Exception | None = None):
+        self.response = response
+        self.error = error
+        self.calls: list[tuple[str, str]] = []
+
+    def respond(self, text: str, *, session_id: str) -> _AgentResult:
+        self.calls.append((text, session_id))
+        if self.error:
+            raise self.error
+        return _AgentResult(self.response)
+
+
+class _FakeAdapter:
+    name = "fake"
+
+    def __init__(
+        self,
+        messages: list[InboundMessage] | None = None,
+        *,
+        delivery_success: bool = True,
+        fail_start_hook: bool = False,
+        fail_complete_hook: bool = False,
+    ):
+        self.messages = messages or []
+        self.delivery_success = delivery_success
+        self.fail_start_hook = fail_start_hook
+        self.fail_complete_hook = fail_complete_hook
+        self.connected = False
+        self.disconnected = False
+        self.sent: list[tuple[ConversationSource, str]] = []
+        self.hooks: list[str] = []
+
+    def connect(self, handler):
+        self.connected = True
+        for message in self.messages:
+            handler(message)
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+    def send(self, source: ConversationSource, outbound):
+        self.sent.append((source, outbound.text))
+        error = None if self.delivery_success else "denied"
+        return DeliveryResult(success=self.delivery_success, error=error)
+
+    def send_typing(self, source: ConversationSource) -> None:
+        return None
+
+    def on_processing_start(self, source: ConversationSource) -> None:
+        self.hooks.append("start")
+        if self.fail_start_hook:
+            raise RuntimeError("start hook failed")
+
+    def on_processing_complete(self, source: ConversationSource) -> None:
+        self.hooks.append("complete")
+        if self.fail_complete_hook:
+            raise RuntimeError("complete hook failed")
 
 
 def test_session_key_generation_modes_are_explicit_and_scoped() -> None:
@@ -170,6 +239,30 @@ def test_fallback_dedup_prunes_expired_row_before_reinsert(tmp_path: Path) -> No
     ]
 
 
+def test_dedup_cached_outbound_ignores_malicious_raw_metadata(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    dedup = GatewayDeduplicator(store)
+    message = InboundMessage(
+        source=_source(message_id="msg-1"),
+        text="hello",
+        platform_message_id="msg-1",
+        raw_metadata={
+            "cached_outbound": {
+                "text": "spoofed",
+                "delivered": False,
+            },
+            "gateway_cached_outbound": {
+                "text": "spoofed internal",
+                "delivered": False,
+            },
+        },
+    )
+
+    result = dedup.check_and_record(message)
+
+    assert dedup.cached_outbound(result.dedup_key) is None
+
+
 def test_active_turn_guard_allows_command_bypass() -> None:
     guard = ActiveTurnGuard()
 
@@ -205,3 +298,228 @@ def test_active_turn_guard_admits_only_one_threaded_begin() -> None:
     assert len(accepted) == 1
     assert all(result.reason == "active_turn" for result in blocked)
     assert guard.is_active("session-1") is True
+
+
+def test_gateway_bridge_handles_inbound_turn_and_sends_runtime_response(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    agent = _FakeAgent("hello from alpha")
+    adapter = _FakeAdapter()
+    bridge = GatewayRuntimeBridge(
+        agent=agent,
+        session_store=GatewaySessionStore(store),
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+    )
+    message = InboundMessage(
+        source=_source(message_id="msg-1"),
+        text="hello",
+        platform_message_id="msg-1",
+    )
+
+    outbound = bridge.handle_message(adapter, message)
+
+    assert outbound is not None
+    assert outbound.text == "hello from alpha"
+    assert adapter.sent == [(message.source, "hello from alpha")]
+    assert adapter.hooks == ["start", "complete"]
+    mapping = bridge.session_store.get_or_create(message.source, SessionMode.GROUP_PER_USER)
+    assert agent.calls == [("hello", mapping.session_id)]
+
+
+def test_gateway_bridge_suppresses_duplicate_inbound_without_runtime_or_send(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    agent = _FakeAgent()
+    adapter = _FakeAdapter()
+    bridge = GatewayRuntimeBridge(
+        agent=agent,
+        session_store=GatewaySessionStore(store),
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+    )
+    message = InboundMessage(
+        source=_source(message_id="msg-1"),
+        text="hello",
+        platform_message_id="msg-1",
+    )
+
+    first = bridge.handle_message(adapter, message)
+    duplicate = bridge.handle_message(adapter, message)
+
+    assert first is not None
+    assert duplicate is None
+    assert len(agent.calls) == 1
+    assert len(adapter.sent) == 1
+
+
+def test_gateway_bridge_sends_busy_message_when_session_has_active_turn(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    source = _source(message_id="msg-1")
+    session_store = GatewaySessionStore(store)
+    mapping = session_store.get_or_create(source, SessionMode.GROUP_PER_USER)
+    guard = ActiveTurnGuard()
+    guard.begin(mapping.session_id, "already running")
+    agent = _FakeAgent()
+    adapter = _FakeAdapter()
+    bridge = GatewayRuntimeBridge(
+        agent=agent,
+        session_store=session_store,
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=guard,
+        session_mode=SessionMode.GROUP_PER_USER,
+    )
+
+    outbound = bridge.handle_message(
+        adapter,
+        InboundMessage(source=source, text="second", platform_message_id="msg-1"),
+    )
+
+    assert outbound is not None
+    assert "active Alpha turn" in outbound.text
+    assert adapter.sent == [(source, outbound.text)]
+    assert agent.calls == []
+    assert guard.is_active(mapping.session_id) is True
+
+
+def test_gateway_bridge_delivers_runtime_failure_and_releases_turn_guard(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    source = _source(message_id="msg-1")
+    session_store = GatewaySessionStore(store)
+    agent = _FakeAgent(error=RuntimeError("provider failed"))
+    adapter = _FakeAdapter()
+    bridge = GatewayRuntimeBridge(
+        agent=agent,
+        session_store=session_store,
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+    )
+
+    outbound = bridge.handle_message(
+        adapter,
+        InboundMessage(source=source, text="hello", platform_message_id="msg-1"),
+    )
+    mapping = session_store.get_or_create(source, SessionMode.GROUP_PER_USER)
+
+    assert outbound is not None
+    assert "failed while processing" in outbound.text
+    assert adapter.sent == [(source, outbound.text)]
+    assert adapter.hooks == ["start", "complete"]
+    assert bridge.turn_guard.is_active(mapping.session_id) is False
+
+
+def test_gateway_bridge_raises_explicit_delivery_error_on_send_failure(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    adapter = _FakeAdapter(delivery_success=False)
+    bridge = GatewayRuntimeBridge(
+        agent=_FakeAgent(),
+        session_store=GatewaySessionStore(store),
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+    )
+
+    with pytest.raises(GatewayDeliveryError, match="Gateway outbound delivery failed"):
+        bridge.handle_message(
+            adapter,
+            InboundMessage(
+                source=_source(message_id="msg-1"),
+                text="hello",
+                platform_message_id="msg-1",
+            ),
+        )
+
+
+def test_gateway_bridge_retries_cached_outbound_without_rerunning_runtime_after_send_failure(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    agent = _FakeAgent()
+    adapter = _FakeAdapter(delivery_success=False)
+    bridge = GatewayRuntimeBridge(
+        agent=agent,
+        session_store=GatewaySessionStore(store),
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+    )
+    message = InboundMessage(
+        source=_source(message_id="msg-1"),
+        text="hello",
+        platform_message_id="msg-1",
+    )
+
+    with pytest.raises(GatewayDeliveryError):
+        bridge.handle_message(adapter, message)
+    adapter.delivery_success = True
+    retry = bridge.handle_message(adapter, message)
+
+    assert retry is not None
+    assert len(agent.calls) == 1
+    assert len(adapter.sent) == 2
+    assert adapter.sent == [
+        (message.source, "runtime response"),
+        (message.source, "runtime response"),
+    ]
+
+
+def test_gateway_bridge_ignores_start_hook_failure_and_still_sends(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    agent = _FakeAgent("runtime response")
+    adapter = _FakeAdapter(fail_start_hook=True)
+    bridge = GatewayRuntimeBridge(
+        agent=agent,
+        session_store=GatewaySessionStore(store),
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+        error_log_path=tmp_path / "errors.log",
+    )
+    message = InboundMessage(
+        source=_source(message_id="msg-1"),
+        text="hello",
+        platform_message_id="msg-1",
+    )
+
+    outbound = bridge.handle_message(adapter, message)
+
+    assert outbound is not None
+    assert outbound.text == "runtime response"
+    assert len(agent.calls) == 1
+    assert adapter.sent == [(message.source, "runtime response")]
+    assert "gateway.adapter_hook.error" in (tmp_path / "errors.log").read_text(encoding="utf-8")
+
+
+def test_gateway_bridge_ignores_complete_hook_failure_and_releases_guard(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    source = _source(message_id="msg-1")
+    session_store = GatewaySessionStore(store)
+    agent = _FakeAgent("runtime response")
+    adapter = _FakeAdapter(fail_complete_hook=True)
+    bridge = GatewayRuntimeBridge(
+        agent=agent,
+        session_store=session_store,
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+        error_log_path=tmp_path / "errors.log",
+    )
+
+    outbound = bridge.handle_message(
+        adapter,
+        InboundMessage(source=source, text="hello", platform_message_id="msg-1"),
+    )
+    mapping = session_store.get_or_create(source, SessionMode.GROUP_PER_USER)
+
+    assert outbound is not None
+    assert outbound.text == "runtime response"
+    assert adapter.sent == [(source, "runtime response")]
+    assert bridge.turn_guard.is_active(mapping.session_id) is False
+    assert "gateway.adapter_hook.error" in (tmp_path / "errors.log").read_text(encoding="utf-8")

@@ -6,7 +6,12 @@ from alpha_agent.gateway.models import (
     InboundMessage,
     OutboundMessage,
 )
-from alpha_agent.gateway.runner import ActiveTurnGuard, TurnStartResult
+from alpha_agent.gateway.runner import (
+    ActiveTurnGuard,
+    GatewayDeliveryError,
+    GatewayRuntimeBridge,
+    TurnStartResult,
+)
 from alpha_agent.gateway.session import (
     DedupResult,
     GatewayDeduplicator,
@@ -22,6 +27,8 @@ __all__ = [
     "DedupResult",
     "DeliveryResult",
     "GatewayDeduplicator",
+    "GatewayDeliveryError",
+    "GatewayRuntimeBridge",
     "GatewaySessionMapping",
     "GatewaySessionStore",
     "InboundMessage",

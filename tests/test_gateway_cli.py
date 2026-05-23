@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from alpha_agent.cli import app
 from alpha_agent.gateway.logging import GatewayLogContext, append_gateway_log, hash_identifier
+from alpha_agent.gateway.models import ConversationSource, DeliveryResult, InboundMessage
 
 
 def _set_gateway_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
@@ -89,6 +90,102 @@ def test_gateway_run_once_smoke_exits_cleanly_and_records_status(
     assert str(db_path) in status_result.output
 
 
+def test_gateway_run_once_uses_configured_adapters_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _db_path, _log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
+    source = ConversationSource(
+        platform="fake",
+        chat_id="chat-1",
+        chat_type="group",
+        user_id="user-1",
+        message_id="msg-1",
+    )
+    adapter = _CliFakeAdapter(
+        [InboundMessage(source=source, text="hello", platform_message_id="msg-1")]
+    )
+    monkeypatch.setattr("alpha_agent.cli.configured_adapters", lambda: (adapter,))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["gateway", "run", "--once"])
+
+    assert result.exit_code == 0
+    assert "Gateway smoke cycle completed." in result.output
+    assert adapter.connected is True
+    assert adapter.disconnected is True
+    assert adapter.sent
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "idle"
+    assert status["running"] is False
+    assert status["adapter_count"] == 1
+    assert status["adapters"] == ["cli-fake"]
+
+
+def test_gateway_run_non_once_sets_idle_when_adapter_connect_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _db_path, _log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
+    adapter = _CliFakeAdapter([])
+    monkeypatch.setattr("alpha_agent.cli.configured_adapters", lambda: (adapter,))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["gateway", "run"])
+
+    assert result.exit_code == 0
+    assert adapter.connected is True
+    assert adapter.disconnected is True
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "idle"
+    assert status["running"] is False
+    assert status["adapters"] == ["cli-fake"]
+
+
+def test_gateway_run_disconnects_and_sets_idle_when_connect_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _db_path, _log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
+    adapter = _CliFakeAdapter([], connect_error=RuntimeError("connect failed"))
+    monkeypatch.setattr("alpha_agent.cli.configured_adapters", lambda: (adapter,))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["gateway", "run", "--once"])
+
+    assert result.exit_code != 0
+    assert adapter.connected is True
+    assert adapter.disconnected is True
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "idle"
+    assert status["running"] is False
+    assert status["adapters"] == ["cli-fake"]
+
+
+def test_gateway_run_sets_idle_when_agent_build_fails_before_connect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _db_path, _log_dir, status_path = _set_gateway_env(tmp_path, monkeypatch)
+    adapter = _CliFakeAdapter([])
+    monkeypatch.setattr("alpha_agent.cli.configured_adapters", lambda: (adapter,))
+    monkeypatch.setattr(
+        "alpha_agent.cli._build_agent",
+        lambda config: (_ for _ in ()).throw(RuntimeError("agent build failed")),
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["gateway", "run", "--once"])
+
+    assert result.exit_code != 0
+    assert adapter.connected is False
+    assert adapter.disconnected is False
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["state"] == "idle"
+    assert status["running"] is False
+    assert status["adapters"] == ["cli-fake"]
+
+
 def test_gateway_log_context_hashes_external_ids(tmp_path: Path) -> None:
     log_path = tmp_path / "gateway.log"
 
@@ -119,3 +216,36 @@ def test_gateway_stop_command_is_not_exposed_without_pid_lock_support() -> None:
     result = runner.invoke(app, ["gateway", "stop"])
 
     assert result.exit_code != 0
+
+
+class _CliFakeAdapter:
+    name = "cli-fake"
+
+    def __init__(
+        self,
+        messages: list[InboundMessage],
+        *,
+        connect_error: Exception | None = None,
+    ):
+        self.messages = messages
+        self.connect_error = connect_error
+        self.connected = False
+        self.disconnected = False
+        self.sent: list[str] = []
+
+    def connect(self, handler):
+        self.connected = True
+        if self.connect_error:
+            raise self.connect_error
+        for message in self.messages:
+            handler(message)
+
+    def disconnect(self) -> None:
+        self.disconnected = True
+
+    def send(self, source: ConversationSource, outbound):
+        self.sent.append(outbound.text)
+        return DeliveryResult(success=True, message_id="sent-1")
+
+    def send_typing(self, source: ConversationSource) -> None:
+        return None

@@ -40,6 +40,7 @@ def idle_status(
     db_path: Path,
     log_dir: Path,
     message: str = "Gateway is idle; not running.",
+    adapter_names: tuple[str, ...] = (),
 ) -> GatewayStatus:
     """Build an idle gateway status for missing or stopped runtime state."""
 
@@ -50,8 +51,8 @@ def idle_status(
         updated_at=utc_now_iso(),
         db_path=str(db_path),
         log_dir=str(log_dir),
-        adapter_count=0,
-        adapters=[],
+        adapter_count=len(adapter_names),
+        adapters=list(adapter_names),
         message=message,
     )
 

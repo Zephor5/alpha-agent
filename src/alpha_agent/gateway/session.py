@@ -10,11 +10,14 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from alpha_agent.gateway.models import ConversationSource, InboundMessage
+from alpha_agent.gateway.models import ConversationSource, InboundMessage, OutboundMessage
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now
+
+GATEWAY_CACHED_OUTBOUND_KEY = "gateway_cached_outbound"
+RAW_METADATA_KEY = "raw_metadata"
 
 
 class SessionMode(StrEnum):
@@ -173,12 +176,68 @@ class GatewayDeduplicator:
                         fingerprint,
                         _iso(current),
                         expires_at,
-                        _dumps(message.raw_metadata),
+                        _dumps({RAW_METADATA_KEY: message.raw_metadata}),
                     ),
                 )
             except sqlite3.IntegrityError:
                 return DedupResult(duplicate=True, dedup_key=dedup_key, expires_at=expires_at)
         return DedupResult(duplicate=False, dedup_key=dedup_key, expires_at=expires_at)
+
+    def cache_outbound(self, dedup_key: str, outbound: OutboundMessage) -> None:
+        """Persist outbound data for retrying delivery without rerunning Alpha."""
+
+        with self.memory_store.transaction() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM gateway_dedup WHERE dedup_key = ?",
+                (dedup_key,),
+            ).fetchone()
+            if row is None:
+                return
+            metadata = _loads_dict(row["metadata"])
+            metadata[GATEWAY_CACHED_OUTBOUND_KEY] = _outbound_to_metadata(outbound)
+            conn.execute(
+                "UPDATE gateway_dedup SET metadata = ? WHERE dedup_key = ?",
+                (_dumps(metadata), dedup_key),
+            )
+
+    def mark_outbound_delivered(self, dedup_key: str) -> None:
+        """Mark cached outbound as delivered so later duplicates remain suppressed."""
+
+        with self.memory_store.transaction() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM gateway_dedup WHERE dedup_key = ?",
+                (dedup_key,),
+            ).fetchone()
+            if row is None:
+                return
+            metadata = _loads_dict(row["metadata"])
+            cached = metadata.get(GATEWAY_CACHED_OUTBOUND_KEY)
+            if not isinstance(cached, dict):
+                return
+            cached["delivered"] = True
+            metadata[GATEWAY_CACHED_OUTBOUND_KEY] = cached
+            conn.execute(
+                "UPDATE gateway_dedup SET metadata = ? WHERE dedup_key = ?",
+                (_dumps(metadata), dedup_key),
+            )
+
+    def cached_outbound(self, dedup_key: str) -> OutboundMessage | None:
+        """Return cached outbound that still needs delivery retry."""
+
+        with self.memory_store.connect() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM gateway_dedup WHERE dedup_key = ?",
+                (dedup_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        metadata = _loads_dict(row["metadata"])
+        cached = metadata.get(GATEWAY_CACHED_OUTBOUND_KEY)
+        if not isinstance(cached, dict):
+            return None
+        if cached.get("delivered") is True:
+            return None
+        return _outbound_from_metadata(cached)
 
     def _prune_expired_fallbacks(self, conn: sqlite3.Connection, now: datetime) -> None:
         conn.execute(
@@ -257,6 +316,42 @@ def _fallback_fingerprint(message: InboundMessage) -> str:
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _outbound_to_metadata(outbound: OutboundMessage) -> dict[str, Any]:
+    return {
+        "text": outbound.text,
+        "attachments": outbound.attachments,
+        "reply_to": outbound.reply_to,
+        "thread_metadata": outbound.thread_metadata,
+        "visibility": outbound.visibility,
+        "delivered": False,
+    }
+
+
+def _outbound_from_metadata(value: dict[str, Any]) -> OutboundMessage | None:
+    text = value.get("text")
+    if not isinstance(text, str):
+        return None
+    attachments = value.get("attachments", [])
+    thread_metadata = value.get("thread_metadata", {})
+    visibility = value.get("visibility", "default")
+    reply_to = value.get("reply_to")
+    if not isinstance(attachments, list):
+        attachments = []
+    if not isinstance(thread_metadata, dict):
+        thread_metadata = {}
+    if not isinstance(visibility, str):
+        visibility = "default"
+    if reply_to is not None and not isinstance(reply_to, str):
+        reply_to = None
+    return OutboundMessage(
+        text=text,
+        attachments=attachments,
+        reply_to=reply_to,
+        thread_metadata=thread_metadata,
+        visibility=visibility,
+    )
 
 
 def _norm_required(value: str | None, field_name: str) -> str:

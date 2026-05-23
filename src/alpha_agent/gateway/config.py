@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from alpha_agent.config import AlphaConfig
+from alpha_agent.gateway.adapters import PlatformAdapter
 
 GATEWAY_LOG_FILENAMES = ("agent.log", "gateway.log", "errors.log")
 
@@ -46,4 +47,23 @@ def configured_adapter_names() -> tuple[str, ...]:
     a concrete adapter configuration exists.
     """
 
+    return tuple(adapter_name(adapter) for adapter in configured_adapters())
+
+
+def configured_adapters() -> tuple[PlatformAdapter, ...]:
+    """Return configured platform adapter instances.
+
+    No real platform adapters ship in this package yet. Tests and downstream deployments can
+    supply concrete adapters by replacing this factory without changing the adapter contract.
+    """
+
     return ()
+
+
+def adapter_name(adapter: PlatformAdapter) -> str:
+    """Return a stable display name for an adapter instance."""
+
+    name = getattr(adapter, "name", None)
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return adapter.__class__.__name__

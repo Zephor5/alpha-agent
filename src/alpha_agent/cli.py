@@ -18,12 +18,16 @@ from alpha_agent.config import (
     write_default_config,
 )
 from alpha_agent.gateway.config import (
+    adapter_name,
     configured_adapter_names,
+    configured_adapters,
     ensure_gateway_runtime_files,
     gateway_runtime_config,
 )
 from alpha_agent.gateway.logging import append_gateway_log
 from alpha_agent.gateway.models import ConversationSource
+from alpha_agent.gateway.runner import ActiveTurnGuard, GatewayRuntimeBridge
+from alpha_agent.gateway.session import GatewayDeduplicator, GatewaySessionStore, SessionMode
 from alpha_agent.gateway.status import (
     GatewayStatus,
     gateway_tables_available,
@@ -429,13 +433,13 @@ def gateway_doctor() -> None:
     ensure_gateway_runtime_files(runtime)
     loaded_skills = _initialize_gateway(config)
     tables = gateway_tables_available(config.db_path)
-    adapters = configured_adapter_names()
+    adapter_names = configured_adapter_names()
     append_gateway_log(
         runtime.log_paths["gateway.log"],
         event="gateway.doctor",
         message="Gateway doctor completed.",
         metadata={
-            "adapter_count": len(adapters),
+            "adapter_count": len(adapter_names),
             "gateway_tables": tables,
             "provider": config.llm_provider,
         },
@@ -458,7 +462,7 @@ def gateway_doctor() -> None:
     table.add_row("Builtin skills", str(loaded_skills))
     table.add_row(
         "Adapters",
-        ", ".join(adapters) if adapters else "No real platform adapters configured",
+        ", ".join(adapter_names) if adapter_names else "No real platform adapters configured",
     )
     console.print(table)
     typer.echo(f"DB path: {config.db_path}")
@@ -482,19 +486,20 @@ def gateway_run(
     ensure_gateway_runtime_files(runtime)
     _initialize_gateway(config)
 
-    adapters = configured_adapter_names()
+    adapters = configured_adapters()
+    adapter_names = tuple(adapter_name(adapter) for adapter in adapters)
     append_gateway_log(
         runtime.log_paths["gateway.log"],
         event="gateway.run.start",
         message="Gateway run invoked.",
-        metadata={"adapter_count": len(adapters), "once": once},
+        metadata={"adapter_count": len(adapter_names), "once": once},
     )
     write_gateway_status(
         runtime.status_path,
         running_status(
             db_path=config.db_path,
             log_dir=runtime.log_dir,
-            adapter_names=adapters,
+            adapter_names=adapter_names,
             message="Gateway process starting.",
         ),
     )
@@ -516,13 +521,58 @@ def gateway_run(
         )
         return
 
-    if once:
-        message = "Gateway smoke cycle completed."
+    stop_message = "Gateway smoke cycle completed." if once else "Gateway stopped."
+    connected_adapters = []
+    try:
+        agent = _build_agent(config)
+        bridge = GatewayRuntimeBridge(
+            agent=agent,
+            session_store=GatewaySessionStore(agent.store),
+            deduplicator=GatewayDeduplicator(agent.store),
+            turn_guard=ActiveTurnGuard(),
+            session_mode=SessionMode.GROUP_PER_USER,
+            gateway_log_path=runtime.log_paths["gateway.log"],
+            error_log_path=runtime.log_paths["errors.log"],
+        )
+        for adapter in adapters:
+            connected_adapters.append(adapter)
+            bridge.connect(adapter)
+    except Exception as exc:
+        stop_message = "Gateway stopped after adapter error."
+        append_gateway_log(
+            runtime.log_paths["errors.log"],
+            event="gateway.run.error",
+            message=stop_message,
+            level="error",
+            metadata={"error_type": type(exc).__name__},
+        )
+        raise
+    finally:
+        for adapter in connected_adapters:
+            try:
+                adapter.disconnect()
+            except Exception as exc:
+                append_gateway_log(
+                    runtime.log_paths["errors.log"],
+                    event="gateway.adapter.disconnect_error",
+                    message="Adapter disconnect failed.",
+                    level="error",
+                    metadata={
+                        "adapter": adapter_name(adapter),
+                        "error_type": type(exc).__name__,
+                    },
+                )
         write_gateway_status(
             runtime.status_path,
-            idle_status(db_path=config.db_path, log_dir=runtime.log_dir, message=message),
+            idle_status(
+                db_path=config.db_path,
+                log_dir=runtime.log_dir,
+                message=stop_message,
+                adapter_names=adapter_names,
+            ),
         )
-        console.print(message)
+
+    console.print(stop_message)
 
 
 @app.command()
