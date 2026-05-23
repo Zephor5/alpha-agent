@@ -98,6 +98,19 @@ class RetriedLLMCompletion:
     retry_count: int
 
 
+@dataclass(frozen=True)
+class AgentLoopResult:
+    """Final model response plus accounting from the bounded agent loop."""
+
+    response: LLMResponse
+    provider_tool_messages: list[ConversationMessage]
+    llm_round_count: int
+    llm_retry_count: int
+    tool_iteration_count: int
+    tool_call_count: int
+    provider_tool_call_count: int
+
+
 class LLMCompletionService:
     """Bounded retry wrapper for a synchronous provider call."""
 
@@ -295,96 +308,23 @@ class AlphaAgent:
             )
             debug["prompt_token_estimate"] = prompt_token_estimate
 
-            llm_completion = self._call_model(
+            loop_result = self._run_agent_loop(
                 session_id=session_id,
                 messages=messages,
-                prompt_token_estimate=prompt_token_estimate,
-                round_name="initial",
-                tools=model_tools or None,
-                tool_choice=model_tool_choice,
+                model_tools=model_tools or None,
+                model_tool_choice=model_tool_choice,
+                initial_prompt_token_estimate=prompt_token_estimate,
+                debug=debug,
             )
-            llm_response = llm_completion.response
-            llm_round_count = 1
-            debug["llm_retry_count"] = llm_completion.retry_count
-            debug["llm_round_count"] = llm_round_count
-            debug["initial_provider"] = llm_response.provider
-
-            provider_tool_messages: list[ConversationMessage] = []
-            tool_iteration_count = 0
-            conversation_messages = list(messages)
-            while self._response_requests_tools(llm_response):
-                provider_tool_calls = self.tool_executor.normalize_calls(llm_response.tool_calls)
-                self._validate_provider_tool_calls(provider_tool_calls, llm_response)
-                if tool_iteration_count >= self.max_tool_iterations:
-                    llm_response, llm_round_count = self._finalize_tool_loop(
-                        session_id=session_id,
-                        messages=conversation_messages,
-                        reason="max_tool_iterations",
-                        llm_round_count=llm_round_count,
-                        tool_iteration_count=tool_iteration_count,
-                        debug=debug,
-                    )
-                    break
-                if llm_round_count >= self.max_llm_rounds:
-                    llm_response, llm_round_count = self._finalize_tool_loop(
-                        session_id=session_id,
-                        messages=conversation_messages,
-                        reason="max_llm_rounds",
-                        llm_round_count=llm_round_count,
-                        tool_iteration_count=tool_iteration_count,
-                        debug=debug,
-                    )
-                    break
-
-                debug["provider_tool_call_count"] += len(provider_tool_calls)
-                provider_tool_call_message = self._write_assistant_tool_call_message(
-                    session_id=session_id,
-                    calls=provider_tool_calls,
-                    llm_response=llm_response,
-                )
-                provider_tool_messages.append(provider_tool_call_message)
-                conversation_messages.append(
-                    self.prompt_builder.conversation_message_to_chat(
-                        provider_tool_call_message
-                    )
-                )
-                provider_results = self._execute_tool_calls(
-                    session_id=session_id,
-                    calls=provider_tool_calls,
-                    recover_errors=True,
-                )
-                provider_result_messages = self._write_tool_result_messages(
-                    session_id=session_id,
-                    results=provider_results,
-                )
-                provider_tool_messages.extend(provider_result_messages)
-                debug["tool_call_count"] += len(provider_results)
-                tool_iteration_count += 1
-                debug["tool_iteration_count"] = tool_iteration_count
-
-                conversation_messages.extend(
-                    self.prompt_builder.conversation_message_to_chat(message)
-                    for message in provider_result_messages
-                )
-                tool_result_completion = self._call_model(
-                    session_id=session_id,
-                    messages=conversation_messages,
-                    prompt_token_estimate=self.prompt_builder.estimate_prompt_tokens(
-                        conversation_messages,
-                        tools=model_tools or None,
-                    ),
-                    round_name=f"tool_result_{tool_iteration_count}",
-                    tools=model_tools or None,
-                    tool_choice=model_tool_choice,
-                )
-                llm_round_count += 1
-                debug["llm_retry_count"] += tool_result_completion.retry_count
-                debug["llm_round_count"] = llm_round_count
-                llm_response = tool_result_completion.response
-
+            llm_response = loop_result.response
+            provider_tool_messages = loop_result.provider_tool_messages
             debug["provider"] = llm_response.provider
             debug["final_provider"] = llm_response.provider
-            debug["llm_round_count"] = llm_round_count
+            debug["llm_round_count"] = loop_result.llm_round_count
+            debug["llm_retry_count"] = loop_result.llm_retry_count
+            debug["tool_iteration_count"] = loop_result.tool_iteration_count
+            debug["tool_call_count"] = loop_result.tool_call_count
+            debug["provider_tool_call_count"] = loop_result.provider_tool_call_count
             debug["final_finish_reason"] = llm_response.finish_reason
 
             assistant_record = self._write_assistant_message(session_id, llm_response)
@@ -817,6 +757,160 @@ class AlphaAgent:
         )
         debug["prompt_token_estimate_after_rebuild"] = prompt_token_estimate_after
 
+    def _run_agent_loop(
+        self,
+        *,
+        session_id: str,
+        messages: list[ChatMessage],
+        model_tools: Sequence[LLMToolDefinitionInput] | None,
+        model_tool_choice: LLMToolChoice | None,
+        initial_prompt_token_estimate: int,
+        debug: dict[str, Any],
+    ) -> AgentLoopResult:
+        conversation_messages = list(messages)
+        provider_tool_messages: list[ConversationMessage] = []
+        llm_round_count = 0
+        llm_retry_count = 0
+        tool_iteration_count = 0
+        tool_call_count = 0
+        provider_tool_call_count = 0
+        finalizing_reason: str | None = None
+
+        while True:
+            finalizing = finalizing_reason is not None
+            tools = model_tools
+            tool_choice = (
+                "none" if finalizing and model_tools is not None else model_tool_choice
+            )
+            round_name = self._agent_loop_round_name(
+                llm_round_count=llm_round_count,
+                tool_iteration_count=tool_iteration_count,
+                finalizing=finalizing,
+            )
+            prompt_token_estimate = (
+                initial_prompt_token_estimate
+                if llm_round_count == 0
+                else self.prompt_builder.estimate_prompt_tokens(
+                    conversation_messages,
+                    tools=tools,
+                )
+            )
+            completion = self._call_model(
+                session_id=session_id,
+                messages=conversation_messages,
+                prompt_token_estimate=prompt_token_estimate,
+                round_name=round_name,
+                tools=tools,
+                tool_choice=tool_choice,
+            )
+            llm_round_count += 1
+            llm_retry_count += completion.retry_count
+            response = completion.response
+            if llm_round_count == 1:
+                debug["initial_provider"] = response.provider
+            debug["llm_retry_count"] = llm_retry_count
+            debug["llm_round_count"] = llm_round_count
+            debug["final_provider"] = response.provider
+            debug["final_finish_reason"] = response.finish_reason
+
+            if not self._response_requests_tools(response):
+                return AgentLoopResult(
+                    response=response,
+                    provider_tool_messages=provider_tool_messages,
+                    llm_round_count=llm_round_count,
+                    llm_retry_count=llm_retry_count,
+                    tool_iteration_count=tool_iteration_count,
+                    tool_call_count=tool_call_count,
+                    provider_tool_call_count=provider_tool_call_count,
+                )
+
+            if finalizing_reason is not None:
+                self._emit_tool_loop_event(
+                    session_id=session_id,
+                    event_type="tool_loop.finalization_failed",
+                    content="No-tools finalization returned tool calls.",
+                    metadata={
+                        "reason": finalizing_reason,
+                        "finish_reason": response.finish_reason,
+                        "llm_round_count": llm_round_count,
+                        "tool_iteration_count": tool_iteration_count,
+                        "tool_call_count": len(response.tool_calls),
+                    },
+                )
+                raise ToolLoopLimitExceeded(
+                    "tool_loop_limit_exceeded: finalization returned tool calls"
+                )
+
+            provider_tool_calls = self.tool_executor.normalize_calls(response.tool_calls)
+            self._validate_provider_tool_calls(provider_tool_calls, response)
+            if tool_iteration_count >= self.max_tool_iterations:
+                finalizing_reason = "max_tool_iterations"
+                conversation_messages.append(
+                    self._begin_tool_loop_finalization(
+                        session_id=session_id,
+                        reason=finalizing_reason,
+                        llm_round_count=llm_round_count,
+                        tool_iteration_count=tool_iteration_count,
+                    )
+                )
+                continue
+            if llm_round_count >= self.max_llm_rounds:
+                finalizing_reason = "max_llm_rounds"
+                conversation_messages.append(
+                    self._begin_tool_loop_finalization(
+                        session_id=session_id,
+                        reason=finalizing_reason,
+                        llm_round_count=llm_round_count,
+                        tool_iteration_count=tool_iteration_count,
+                    )
+                )
+                continue
+
+            provider_tool_call_count += len(provider_tool_calls)
+            debug["provider_tool_call_count"] = provider_tool_call_count
+            provider_tool_call_message = self._write_assistant_tool_call_message(
+                session_id=session_id,
+                calls=provider_tool_calls,
+                llm_response=response,
+            )
+            provider_tool_messages.append(provider_tool_call_message)
+            conversation_messages.append(
+                self.prompt_builder.conversation_message_to_chat(provider_tool_call_message)
+            )
+
+            provider_results = self._execute_tool_calls(
+                session_id=session_id,
+                calls=provider_tool_calls,
+                recover_errors=True,
+            )
+            provider_result_messages = self._write_tool_result_messages(
+                session_id=session_id,
+                results=provider_results,
+            )
+            provider_tool_messages.extend(provider_result_messages)
+            tool_call_count += len(provider_results)
+            tool_iteration_count += 1
+            debug["tool_call_count"] = tool_call_count
+            debug["tool_iteration_count"] = tool_iteration_count
+
+            conversation_messages.extend(
+                self.prompt_builder.conversation_message_to_chat(message)
+                for message in provider_result_messages
+            )
+
+    def _agent_loop_round_name(
+        self,
+        *,
+        llm_round_count: int,
+        tool_iteration_count: int,
+        finalizing: bool,
+    ) -> str:
+        if finalizing:
+            return "finalize"
+        if llm_round_count == 0:
+            return "initial"
+        return f"tool_result_{tool_iteration_count}"
+
     def _call_model(
         self,
         *,
@@ -1100,20 +1194,18 @@ class AlphaAgent:
             },
         )
 
-    def _finalize_tool_loop(
+    def _begin_tool_loop_finalization(
         self,
         *,
         session_id: str,
-        messages: list[ChatMessage],
         reason: str,
         llm_round_count: int,
         tool_iteration_count: int,
-        debug: dict[str, Any],
-    ) -> tuple[LLMResponse, int]:
+    ) -> ChatMessage:
         self._emit_tool_loop_event(
             session_id=session_id,
             event_type="tool_loop.finalizing",
-            content="Tool loop limit reached; requesting no-tools final answer.",
+            content="Tool loop limit reached; requesting final answer with tools disabled.",
             metadata={
                 "reason": reason,
                 "llm_round_count": llm_round_count,
@@ -1122,41 +1214,7 @@ class AlphaAgent:
                 "max_tool_iterations": self.max_tool_iterations,
             },
         )
-        final_messages = [
-            *messages,
-            self._tool_loop_finalization_message(reason=reason),
-        ]
-        final_completion = self._call_model(
-            session_id=session_id,
-            messages=final_messages,
-            prompt_token_estimate=self.prompt_builder.estimate_prompt_tokens(final_messages),
-            round_name="finalize",
-            tools=None,
-            tool_choice=None,
-        )
-        llm_round_count += 1
-        response = final_completion.response
-        debug["llm_retry_count"] += final_completion.retry_count
-        debug["llm_round_count"] = llm_round_count
-        debug["final_provider"] = response.provider
-        debug["final_finish_reason"] = response.finish_reason
-        if self._response_requests_tools(response):
-            self._emit_tool_loop_event(
-                session_id=session_id,
-                event_type="tool_loop.finalization_failed",
-                content="No-tools finalization returned tool calls.",
-                metadata={
-                    "reason": reason,
-                    "finish_reason": response.finish_reason,
-                    "llm_round_count": llm_round_count,
-                    "tool_iteration_count": tool_iteration_count,
-                    "tool_call_count": len(response.tool_calls),
-                },
-            )
-            raise ToolLoopLimitExceeded(
-                "tool_loop_limit_exceeded: finalization returned tool calls"
-            )
-        return response, llm_round_count
+        return self._tool_loop_finalization_message(reason=reason)
 
     def _tool_loop_finalization_message(self, *, reason: str) -> ChatMessage:
         return {

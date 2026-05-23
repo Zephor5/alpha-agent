@@ -173,12 +173,15 @@ P1 Agent Loop implementation notes:
   `conversation_messages`; operational diagnostics are stored as
   `runtime_traces`.
 - Tool execution remains bounded and explicit. Caller-supplied tool calls are
-  local one-shot executions. Provider-returned OpenAI-compatible tool calls now
-  run through a bounded multi-step loop controlled by `max_tool_iterations` and
-  `max_llm_rounds`: each assistant `tool_calls` message is followed immediately
-  by matching `role=tool` results before the next model call. When the bound is
-  reached, the runtime makes one no-tools `finalize` request for a best-effort
-  answer; if that still requests tools, the turn fails observably.
+  local one-shot executions. Provider-returned OpenAI-compatible tool calls run
+  through one bounded agent loop controlled by `max_tool_iterations` and
+  `max_llm_rounds`: the initial model call, tool-result follow-up calls, and
+  finalization call share one loop state. Each assistant `tool_calls` message is
+  followed immediately by matching `role=tool` results before the next model
+  call. When the bound is reached, the runtime makes one `finalize` request for
+  a best-effort answer with the same tool schema and `tool_choice="none"` so
+  provider prefix caches are not invalidated by dropping tool definitions; if
+  that still requests tools, the turn fails observably.
 - DeepSeek and OpenAI-compatible providers share the same tool-call wire model:
   `tools`, `tool_choice`, assistant `tool_calls`, and `role=tool` messages with
   `tool_call_id`. Missing provider tool ids and `finish_reason=tool_calls`

@@ -936,7 +936,8 @@ def test_max_tool_iterations_triggers_no_tools_finalization(tmp_path: Path) -> N
     )
     assert result.response == "summary after limit"
     assert len(provider.calls) == 4
-    assert provider.calls[-1][1] == {}
+    assert provider.calls[-1][1]["tool_choice"] == "none"
+    assert [tool.name for tool in provider.calls[-1][1]["tools"]] == ["echo"]
     assert provider.calls[-1][0][-1]["role"] == "user"
     assert provider.calls[-1][0][-1]["content"].startswith("<system-reminder>\n")
     assert provider.calls[-1][0][-1]["content"].endswith("\n</system-reminder>")
@@ -1007,7 +1008,8 @@ def test_max_llm_rounds_triggers_no_tools_finalization(tmp_path: Path) -> None:
     )
     assert result.response == "final answer after round limit"
     assert len(provider.calls) == 3
-    assert provider.calls[-1][1] == {}
+    assert provider.calls[-1][1]["tool_choice"] == "none"
+    assert [tool.name for tool in provider.calls[-1][1]["tools"]] == ["echo"]
     assert provider.calls[-1][0][-1]["role"] == "user"
     assert provider.calls[-1][0][-1]["content"].startswith("<system-reminder>\n")
     assert provider.calls[-1][0][-1]["content"].endswith("\n</system-reminder>")
@@ -1075,7 +1077,8 @@ def test_finalization_returning_tool_calls_fails_observably(tmp_path: Path) -> N
         if event.event_type == "tool_loop.finalization_failed"
     )
     assert len(provider.calls) == 3
-    assert provider.calls[-1][1] == {}
+    assert provider.calls[-1][1]["tool_choice"] == "none"
+    assert [tool.name for tool in provider.calls[-1][1]["tools"]] == ["echo"]
     assert failed.metadata["stage"] == "tool_loop_limit_exceeded"
     assert failed.metadata["error_code"] == "tool_loop_limit_exceeded"
     assert failed.metadata["llm_round_count"] == 3

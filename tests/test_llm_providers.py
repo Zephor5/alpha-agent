@@ -345,6 +345,62 @@ def test_openai_compatible_provider_preserves_tool_messages_in_request(
     assert captured["json"]["messages"] == messages
 
 
+def test_openai_compatible_provider_sends_tools_with_none_tool_choice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs["json"]
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-compat",
+                "model": "gpt-compatible",
+                "choices": [{"message": {"content": "done"}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(
+        compatible_base_url="https://compatible.example",
+        compatible_api_key="compatible-key",
+        llm_model="gpt-compatible",
+    )
+
+    OpenAICompatibleProvider(config).complete(
+        [{"role": "user", "content": "finalize"}],
+        tools=[
+            LLMToolDefinition(
+                name="lookup_memory",
+                description="Look up relevant memory.",
+                parameters={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            )
+        ],
+        tool_choice="none",
+    )
+
+    assert captured["json"]["tool_choice"] == "none"
+    assert captured["json"]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_memory",
+                "description": "Look up relevant memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+        }
+    ]
+
+
 def test_codex_provider_uses_explicit_oauth_access_token() -> None:
     config = _config(codex_access_token="codex-token")
 
