@@ -21,6 +21,12 @@ api_key = ""
 
 [memory]
 retrieval_limit = 8
+capture_mode = "auto_approve_explicit"
+# Empty channel modes inherit memory.capture_mode.
+cli_capture_mode = ""
+gateway_capture_mode = "candidate_only"
+consolidation_mode = "manual"
+consolidation_after_turns = 20
 
 [context]
 max_prompt_tokens = 6000

@@ -32,6 +32,8 @@ api_key = ""
 [memory]
 retrieval_limit = 8
 capture_mode = "auto_approve_explicit"
+cli_capture_mode = ""
+gateway_capture_mode = ""
 consolidation_mode = "manual"
 consolidation_after_turns = 20
 
@@ -68,6 +70,8 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "compatible.api_key": str,
     "memory.retrieval_limit": int,
     "memory.capture_mode": str,
+    "memory.cli_capture_mode": str,
+    "memory.gateway_capture_mode": str,
     "memory.consolidation_mode": str,
     "memory.consolidation_after_turns": int,
     "context.max_prompt_tokens": int,
@@ -98,6 +102,18 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
     },
     "deepseek.reasoning_effort": {"", "low", "medium", "high", "max", "xhigh"},
     "memory.capture_mode": {"disabled", "candidate_only", "auto_approve_explicit"},
+    "memory.cli_capture_mode": {
+        "",
+        "disabled",
+        "candidate_only",
+        "auto_approve_explicit",
+    },
+    "memory.gateway_capture_mode": {
+        "",
+        "disabled",
+        "candidate_only",
+        "auto_approve_explicit",
+    },
     "memory.consolidation_mode": {"manual", "after_n_turns", "scheduled"},
 }
 
@@ -141,6 +157,7 @@ class AlphaConfig:
     compatible_api_key: str | None = None
     retrieval_limit: int = 8
     memory_capture_mode: str = "auto_approve_explicit"
+    memory_channel_capture_modes: dict[str, str] | None = None
     memory_consolidation_mode: str = "manual"
     memory_consolidation_after_turns: int = 20
     context_max_prompt_tokens: int = 6000
@@ -367,6 +384,15 @@ def _memory_capture_mode_value(value: str | None) -> str:
     return normalized
 
 
+def _optional_memory_capture_mode_value(value: str | None, *, key: str) -> str:
+    normalized = (value or "").strip().lower()
+    allowed = CONFIG_KEY_ALLOWED_VALUES[key]
+    if normalized not in allowed:
+        options = ", ".join(sorted(allowed))
+        raise ValueError(f"Invalid value for {key}: {value}. Allowed values: {options}")
+    return normalized
+
+
 def _memory_consolidation_mode_value(value: str | None) -> str:
     normalized = (value or "manual").strip().lower()
     allowed = CONFIG_KEY_ALLOWED_VALUES["memory.consolidation_mode"]
@@ -385,6 +411,12 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         "deepseek.reasoning_effort": config.deepseek_reasoning_effort or "",
         "memory.retrieval_limit": config.retrieval_limit,
         "memory.capture_mode": config.memory_capture_mode,
+        "memory.cli_capture_mode": (
+            config.memory_channel_capture_modes or {}
+        ).get("cli", ""),
+        "memory.gateway_capture_mode": (
+            config.memory_channel_capture_modes or {}
+        ).get("gateway", ""),
         "memory.consolidation_mode": config.memory_consolidation_mode,
         "memory.consolidation_after_turns": config.memory_consolidation_after_turns,
         "context.max_prompt_tokens": config.context_max_prompt_tokens,
@@ -440,6 +472,15 @@ def _env_or_config(
     if env_value is not None and env_value != "":
         return env_value
     return _string_setting(config_data, section, key, default)
+
+
+def _channel_capture_modes(*, cli_mode: str, gateway_mode: str) -> dict[str, str]:
+    modes: dict[str, str] = {}
+    if cli_mode:
+        modes["cli"] = cli_mode
+    if gateway_mode:
+        modes["gateway"] = gateway_mode
+    return modes
 
 
 def load_config(
@@ -538,6 +579,28 @@ def load_config(
                 "capture_mode",
                 "auto_approve_explicit",
             )
+        ),
+        memory_channel_capture_modes=_channel_capture_modes(
+            cli_mode=_optional_memory_capture_mode_value(
+                _env_or_config(
+                    "ALPHA_CLI_MEMORY_CAPTURE_MODE",
+                    config_data,
+                    "memory",
+                    "cli_capture_mode",
+                    "",
+                ),
+                key="memory.cli_capture_mode",
+            ),
+            gateway_mode=_optional_memory_capture_mode_value(
+                _env_or_config(
+                    "ALPHA_GATEWAY_MEMORY_CAPTURE_MODE",
+                    config_data,
+                    "memory",
+                    "gateway_capture_mode",
+                    "",
+                ),
+                key="memory.gateway_capture_mode",
+            ),
         ),
         memory_consolidation_mode=_memory_consolidation_mode_value(
             _env_or_config(

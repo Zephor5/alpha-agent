@@ -104,7 +104,12 @@ Inspect memory:
 
 ```bash
 uv run alpha memory list
+uv run alpha memory inspect
+uv run alpha memory inspect --scope-key user:default --include-inactive
 uv run alpha memory search "sqlite preferences"
+uv run alpha memory diagnostics "why did tea preferences matter?"
+uv run alpha memory maintenance --stale-days 14 --cleanup-inactive-index
+uv run alpha memory metrics
 uv run alpha memory stats
 uv run alpha memory consolidate
 uv run alpha memory audit <memory-id>
@@ -120,11 +125,14 @@ uv run alpha memory review --candidate-id <candidate-id> --approve-stored
 Semantic memories use an auditable lifecycle. Duplicate facts merge source ids,
 corrected facts supersede stale active facts, and forgotten facts are marked
 `deleted` instead of being physically removed. Retrieval and prompt context only
-use active semantic memories. `alpha memory audit <memory-id>` shows source ids
-and the supersession chain; `alpha memory forget <memory-id>` removes the memory
-from retrieval immediately while preserving evidence for audit. CLI forget uses
-the default local CLI memory scope visibility rules and refuses ids outside that
-scope.
+use active semantic memories. `alpha memory inspect` answers the operational
+version of "what do you remember about me?" and shows scope, status,
+confidence, and source ids for visible memories and reviewable candidates.
+`alpha memory audit <memory-id>` shows source ids, supersession chain,
+projection drill-down, and graph relation audit edges when present;
+`alpha memory forget <memory-id>` removes the memory from retrieval immediately
+while preserving evidence for audit. CLI forget uses the default local CLI
+memory scope visibility rules and refuses ids outside that scope.
 
 Inspect procedural skills:
 
@@ -209,6 +217,8 @@ access_token = ""
 [memory]
 retrieval_limit = 8
 capture_mode = "auto_approve_explicit"
+cli_capture_mode = ""
+gateway_capture_mode = "candidate_only"
 consolidation_mode = "manual"
 consolidation_after_turns = 20
 
@@ -250,6 +260,10 @@ Useful environment overrides:
 - `ALPHA_RETRIEVAL_LIMIT`: Retrieval limit per memory layer. Defaults to `8`.
 - `ALPHA_MEMORY_CAPTURE_MODE`: `disabled`, `candidate_only`, or
   `auto_approve_explicit`.
+- `ALPHA_CLI_MEMORY_CAPTURE_MODE`: Optional CLI-channel override for
+  `ALPHA_MEMORY_CAPTURE_MODE`; empty inherits the global mode.
+- `ALPHA_GATEWAY_MEMORY_CAPTURE_MODE`: Optional gateway-channel override for
+  `ALPHA_MEMORY_CAPTURE_MODE`; empty inherits the global mode.
 - `ALPHA_MEMORY_CONSOLIDATION_MODE`: `manual`, `after_n_turns`, or `scheduled`.
   Scheduled mode is a placeholder until a scheduler exists.
 - `ALPHA_MEMORY_CONSOLIDATION_AFTER_TURNS`: Turn interval for `after_n_turns`.
@@ -321,10 +335,25 @@ score =
   + source_confidence * 0.06
 ```
 
-`alpha memory search QUERY` and `alpha debug prompt QUERY` show retrieval scores
-and selection reasons. Prompt construction applies independent budgets for
-semantic, episodic, procedural, and session context so one layer cannot consume
-the full context message.
+`alpha memory search QUERY`, `alpha memory diagnostics QUERY`, and
+`alpha debug prompt QUERY` show retrieval scores and selection reasons.
+Diagnostics reports prompt budget impact from the same rendered memory sections
+used by `PromptBuilder`, including source/status/confidence/score prefixes,
+persona/scene/procedural formatting, section overhead, and truncation, without
+writing access-log rows. The diagnostics table distinguishes rendered sections
+from budget groups: persona and user-fact sections spend the semantic memory
+budget, scene and prior-episode sections spend the episodic budget, and
+procedure sections spend the procedural budget. Prompt construction applies
+independent budgets for semantic, episodic, procedural, and session context so
+one layer cannot consume the full context message.
+
+Memory operations commands are intentionally transcript-safe. `alpha memory
+maintenance` can list stale candidates, reject stale pending/edited candidates,
+remove visible-scope inactive semantic rows from the optional FTS index, run
+consolidation, and run retrieval diagnostics without editing append-only
+conversation history. `alpha memory metrics` reports candidate volume, approval
+rate, conflict rate, retrieval hit rate, and forgotten/deleted semantic memory
+count.
 
 Session compression now stores a structured session-state projection instead of
 message-clipping text. The projection tracks current goal, decisions, open

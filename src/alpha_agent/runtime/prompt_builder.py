@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from typing import Any, cast
 
 from alpha_agent.llm.base import ChatCompletionToolCall, ChatMessage, LLMToolDefinitionInput
@@ -18,6 +18,15 @@ SYSTEM_REMINDER_CLOSE = "</system-reminder>"
 
 def wrap_system_reminder(content: str) -> str:
     return f"{SYSTEM_REMINDER_OPEN}\n{content.strip()}\n{SYSTEM_REMINDER_CLOSE}"
+
+
+@dataclass(frozen=True)
+class MemoryPromptBudgetImpact:
+    """Rendered memory context cost after PromptBuilder section budgeting."""
+
+    section_tokens: dict[str, int]
+    section_budget_groups: dict[str, str]
+    memory_tokens: dict[str, int]
 
 
 class PromptBuilder:
@@ -89,6 +98,100 @@ background context; the original transcript remains the source of truth."""
         """Estimate prompt tokens with a simple character-based approximation."""
 
         return self.estimate_prompt_tokens(messages)
+
+    def memory_prompt_budget_impact(
+        self,
+        user_message: str,
+        context: RetrievedContext,
+    ) -> MemoryPromptBudgetImpact:
+        """Estimate memory prompt cost from the same rendered sections used in prompts."""
+
+        section_tokens: dict[str, int] = {}
+        section_budget_groups: dict[str, str] = {}
+        memory_tokens: dict[str, int] = {}
+
+        def add_section(
+            section_key: str,
+            budget_group: str,
+            title: str,
+            budget_chars: int,
+            entries: list[tuple[str, str]],
+        ) -> None:
+            section_budget_groups[section_key] = budget_group
+            if not entries:
+                section_tokens[section_key] = 0
+                return
+            budgeted_lines = _budget_lines([line for _, line in entries], budget_chars)
+            rendered = title + "\n" + "\n".join(budgeted_lines)
+            section_tokens[section_key] = _estimate_text_tokens(rendered)
+            for (memory_key, _line), budgeted_line in zip(
+                entries,
+                budgeted_lines,
+                strict=False,
+            ):
+                memory_tokens[memory_key] = _estimate_text_tokens(budgeted_line)
+
+        add_section(
+            "persona",
+            "semantic",
+            "### Persona / Profile Projection",
+            self.semantic_memory_chars,
+            [
+                (f"semantic:{memory.id}", self._persona_memory_line(context, memory))
+                for memory in context.semantic_memories
+                if memory.memory_type == "persona"
+            ],
+        )
+        add_section(
+            "scene",
+            "episodic",
+            "### Scene Summaries",
+            self.episodic_memory_chars,
+            [
+                (f"semantic:{memory.id}", self._scene_memory_line(context, memory))
+                for memory in context.semantic_memories
+                if memory.memory_type == "scene"
+            ],
+        )
+        add_section(
+            "semantic",
+            "semantic",
+            "### User Facts",
+            self.semantic_memory_chars,
+            [
+                (f"semantic:{memory.id}", self._semantic_memory_line(context, memory))
+                for memory in context.semantic_memories
+                if memory.memory_type not in {"scene", "persona"}
+            ],
+        )
+        add_section(
+            "episodic",
+            "episodic",
+            "### Prior Episodes",
+            self.episodic_memory_chars,
+            [
+                (f"episodic:{memory.id}", self._episodic_memory_line(context, memory))
+                for memory in context.episodic_memories
+            ],
+        )
+        add_section(
+            "procedural",
+            "procedural",
+            "### Relevant Procedures",
+            self.procedural_memory_chars,
+            [
+                (
+                    f"procedural:{memory.id}",
+                    self._procedural_memory_line(user_message, context, memory),
+                )
+                for memory in context.procedural_memories
+            ],
+        )
+        return MemoryPromptBudgetImpact(
+            section_tokens=section_tokens,
+            section_budget_groups=section_budget_groups,
+            memory_tokens=memory_tokens,
+        )
 
     def estimate_prompt_tokens(
         self,
@@ -170,15 +273,7 @@ background context; the original transcript remains the source of truth."""
         ]
         if not memories:
             return ""
-        lines = [
-            (
-                f"- ({memory.confidence:.2f}; status={memory.status}; "
-                f"scope={memory.scope.scope_key}; source={','.join(memory.source_memory_ids)}"
-                f"{self._explanation_suffix(context, 'semantic', memory.id)}) "
-                f"{memory.content}"
-            )
-            for memory in memories
-        ]
+        lines = [self._semantic_memory_line(context, memory) for memory in memories]
         return self._budget_section("### User Facts", lines, self.semantic_memory_chars)
 
     def _persona_section(self, context: RetrievedContext) -> str:
@@ -187,17 +282,7 @@ background context; the original transcript remains the source of truth."""
         ]
         if not memories:
             return ""
-        lines = [
-            (
-                f"- ({memory.confidence:.2f}; stability={memory.stability:.2f}; "
-                f"scope={memory.scope.scope_key}; "
-                f"source_memories={','.join(memory.source_memory_ids)}; "
-                f"source_messages={','.join(_metadata_list(memory.metadata, 'source_message_ids'))}"
-                f"{self._explanation_suffix(context, 'semantic', memory.id)}) "
-                f"{memory.content}"
-            )
-            for memory in memories
-        ]
+        lines = [self._persona_memory_line(context, memory) for memory in memories]
         return self._budget_section(
             "### Persona / Profile Projection",
             lines,
@@ -210,28 +295,14 @@ background context; the original transcript remains the source of truth."""
         ]
         if not memories:
             return ""
-        lines = [
-            (
-                f"- ({memory.confidence:.2f}; scope={memory.scope.scope_key}; "
-                f"source_memories={','.join(memory.source_memory_ids)}; "
-                f"source_messages={','.join(_metadata_list(memory.metadata, 'source_message_ids'))}"
-                f"{self._explanation_suffix(context, 'semantic', memory.id)}) "
-                f"{memory.content}"
-            )
-            for memory in memories
-        ]
+        lines = [self._scene_memory_line(context, memory) for memory in memories]
         return self._budget_section("### Scene Summaries", lines, self.episodic_memory_chars)
 
     def _episodic_section(self, context: RetrievedContext) -> str:
         if not context.episodic_memories:
             return ""
         lines = [
-            (
-                f"- ({memory.salience:.2f}; scope={memory.scope.scope_key}; "
-                f"source={','.join(memory.source_event_ids)}"
-                f"{self._explanation_suffix(context, 'episodic', memory.id)}) "
-                f"{memory.summary}"
-            )
+            self._episodic_memory_line(context, memory)
             for memory in context.episodic_memories
         ]
         return self._budget_section("### Prior Episodes", lines, self.episodic_memory_chars)
@@ -239,16 +310,10 @@ background context; the original transcript remains the source of truth."""
     def _procedural_section(self, user_message: str, context: RetrievedContext) -> str:
         if not context.procedural_memories:
             return ""
-        lines = []
-        for memory in context.procedural_memories:
-            line = (
-                f"- (confidence={memory.confidence:.2f}; scope={memory.scope.scope_key}"
-                f"{self._explanation_suffix(context, 'procedural', memory.id)}) "
-                f"{memory.name}: {memory.description}"
-            )
-            if self._procedure_matches_user_message(user_message, memory):
-                line += f"\n{memory.procedure_markdown}"
-            lines.append(line)
+        lines = [
+            self._procedural_memory_line(user_message, context, memory)
+            for memory in context.procedural_memories
+        ]
         return self._budget_section(
             "### Relevant Procedures",
             lines,
@@ -337,6 +402,56 @@ background context; the original transcript remains the source of truth."""
         if not lines:
             return ""
         return title + "\n" + "\n".join(_budget_lines(lines, budget_chars))
+
+    def _semantic_memory_line(self, context: RetrievedContext, memory: Any) -> str:
+        return (
+            f"- ({memory.confidence:.2f}; status={memory.status}; "
+            f"scope={memory.scope.scope_key}; source={','.join(memory.source_memory_ids)}"
+            f"{self._explanation_suffix(context, 'semantic', memory.id)}) "
+            f"{memory.content}"
+        )
+
+    def _persona_memory_line(self, context: RetrievedContext, memory: Any) -> str:
+        return (
+            f"- ({memory.confidence:.2f}; stability={memory.stability:.2f}; "
+            f"scope={memory.scope.scope_key}; "
+            f"source_memories={','.join(memory.source_memory_ids)}; "
+            f"source_messages={','.join(_metadata_list(memory.metadata, 'source_message_ids'))}"
+            f"{self._explanation_suffix(context, 'semantic', memory.id)}) "
+            f"{memory.content}"
+        )
+
+    def _scene_memory_line(self, context: RetrievedContext, memory: Any) -> str:
+        return (
+            f"- ({memory.confidence:.2f}; scope={memory.scope.scope_key}; "
+            f"source_memories={','.join(memory.source_memory_ids)}; "
+            f"source_messages={','.join(_metadata_list(memory.metadata, 'source_message_ids'))}"
+            f"{self._explanation_suffix(context, 'semantic', memory.id)}) "
+            f"{memory.content}"
+        )
+
+    def _episodic_memory_line(self, context: RetrievedContext, memory: Any) -> str:
+        return (
+            f"- ({memory.salience:.2f}; scope={memory.scope.scope_key}; "
+            f"source={','.join(memory.source_event_ids)}"
+            f"{self._explanation_suffix(context, 'episodic', memory.id)}) "
+            f"{memory.summary}"
+        )
+
+    def _procedural_memory_line(
+        self,
+        user_message: str,
+        context: RetrievedContext,
+        memory: ProceduralMemory,
+    ) -> str:
+        line = (
+            f"- (confidence={memory.confidence:.2f}; scope={memory.scope.scope_key}"
+            f"{self._explanation_suffix(context, 'procedural', memory.id)}) "
+            f"{memory.name}: {memory.description}"
+        )
+        if self._procedure_matches_user_message(user_message, memory):
+            line += f"\n{memory.procedure_markdown}"
+        return line
 
     def _explanation_suffix(
         self,
@@ -440,6 +555,10 @@ def _tool_payload(tool: LLMToolDefinitionInput) -> Any:
 
 def _token_budget_to_chars(tokens: int) -> int:
     return max(0, int(tokens)) * 4
+
+
+def _estimate_text_tokens(text: str) -> int:
+    return len(text) // 4
 
 
 def _budget_lines(lines: list[str], budget_chars: int) -> list[str]:

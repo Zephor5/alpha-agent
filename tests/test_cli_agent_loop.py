@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from alpha_agent.cli import app
 from alpha_agent.gateway.models import ConversationSource
 from alpha_agent.gateway.session import GatewaySessionStore, SessionMode
 from alpha_agent.memory.episodic import EpisodicMemoryManager
-from alpha_agent.memory.models import MemoryCandidate, MemoryScope
+from alpha_agent.memory.models import MemoryCandidate, MemoryScope, SemanticMemory
 from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.utils.time import utc_now_iso
@@ -838,3 +839,289 @@ def test_memory_review_stored_candidate_requires_pending_default_scope(tmp_path:
     assert store.get_memory_candidate("cand-approve").status == "approved"
     assert store.get_memory_candidate("cand-reject").status == "rejected"
     assert store.get_memory_candidate("cand-other").status == "pending"
+
+
+def test_memory_inspect_shows_scope_status_confidence_and_sources(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    semantic = SemanticMemoryManager(store)
+    active = semantic.upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+        source_memory_ids=["msg-active"],
+    )
+    semantic.upsert_fact(
+        "user",
+        "prefers",
+        "stale tea",
+        "Inactive default memory",
+        source_memory_ids=["msg-inactive"],
+        status="deleted",
+    )
+    other_scope = MemoryScope(
+        kind="platform_user",
+        scope_key="platform:telegram:user:other",
+        platform="telegram",
+        user_id="other",
+    )
+    semantic.upsert_fact(
+        "user",
+        "prefers",
+        "coffee",
+        "Other scoped memory",
+        source_memory_ids=["msg-other"],
+        scope=other_scope,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["memory", "inspect"], env=_env(tmp_path))
+
+    assert result.exit_code == 0
+    assert "MemoryInspection: query=what do you remember about me?" in result.output
+    assert "Scope: key=user:default" in result.output
+    assert active.id in result.output
+    assert "status=active" in result.output
+    assert "confidence=0.75" in result.output
+    assert "source_ids=msg-active" in result.output
+    assert "Inactive default memory" not in result.output
+    assert "Other scoped memory" not in result.output
+
+
+def test_memory_diagnostics_explains_score_and_prompt_budget(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+        source_memory_ids=["msg-tea"],
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["memory", "diagnostics", "tea preference"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "RetrievalDiagnostics: query=tea preference" in result.output
+    assert "PromptBudget: section=semantic budget_group=semantic" in result.output
+    assert "RetrievalDiagnostic: type=semantic" in result.output
+    assert memory.id in result.output
+    assert "source_ids=msg-tea" in result.output
+    assert "keyword=" in result.output
+    assert "prompt_section=semantic" in result.output
+    budget_match = re.search(
+        r"PromptBudget: section=semantic budget_group=semantic used_tokens=(\d+)",
+        result.output,
+    )
+    assert budget_match is not None
+    assert int(budget_match.group(1)) > len("User prefers tea") // 4
+
+
+def test_memory_diagnostics_maps_projection_sections_to_real_budget_groups(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    now = utc_now_iso()
+    store.upsert_semantic_memory(
+        SemanticMemory(
+            id="mem-persona-cli",
+            content="User profile says tea preferences matter.",
+            memory_type="persona",
+            subject="user",
+            predicate="profile",
+            object="tea",
+            entities=["tea"],
+            confidence=0.92,
+            salience=0.9,
+            stability=0.95,
+            source_memory_ids=["mem-atomic-1"],
+            created_at=now,
+            updated_at=now,
+            metadata={"source_message_ids": ["msg-profile"]},
+            scope=MemoryScope.default(),
+        )
+    )
+    store.upsert_semantic_memory(
+        SemanticMemory(
+            id="mem-scene-cli",
+            content="Project scene includes tea preference diagnostics.",
+            memory_type="scene",
+            subject="project",
+            predicate="summary",
+            object="tea diagnostics",
+            entities=["tea"],
+            confidence=0.88,
+            salience=0.85,
+            stability=0.8,
+            source_memory_ids=["mem-atomic-2"],
+            created_at=now,
+            updated_at=now,
+            metadata={"source_message_ids": ["msg-scene"]},
+            scope=MemoryScope.default(),
+        )
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["memory", "diagnostics", "tea diagnostics"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "PromptBudget: section=persona budget_group=semantic" in result.output
+    assert "PromptBudget: section=scene budget_group=episodic" in result.output
+    assert "PromptBudget: section=persona budget_group=semantic used_tokens=0" not in result.output
+    assert "budget_group=semantic used_tokens=" in result.output
+    assert "budget_tokens=512" in result.output
+    assert "prompt_section=persona" in result.output
+    assert "prompt_section=scene" in result.output
+
+
+def test_memory_maintenance_rejects_stale_candidates_and_cleans_inactive_index(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    old = "2000-01-01T00:00:00+00:00"
+    store.insert_memory_candidate(
+        MemoryCandidate(
+            id="cand-stale",
+            candidate_type="semantic",
+            proposed_layer="semantic",
+            content="User prefers tea",
+            weak_structure={"subject": "user", "predicate": "prefers", "object": "tea"},
+            salience=0.9,
+            confidence=0.8,
+            scope=MemoryScope.default(),
+            source_message_ids=["msg-1"],
+            status="pending",
+            created_at=old,
+            updated_at=old,
+        )
+    )
+    memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "old tea",
+        "Inactive default memory",
+        status="deleted",
+    )
+    other_scope = MemoryScope(
+        kind="platform_user",
+        scope_key="platform:telegram:user:other",
+        platform="telegram",
+        user_id="other",
+    )
+    other_memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "old coffee",
+        "Inactive other memory",
+        status="deleted",
+        scope=other_scope,
+    )
+    before_messages = store.stats()["conversation_messages"]
+    assert store.has_fts_index("semantic_fts")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "maintenance",
+            "--stale-days",
+            "1",
+            "--reject-stale",
+            "--cleanup-inactive-index",
+        ],
+        env=_env(tmp_path),
+    )
+    second_result = runner.invoke(
+        app,
+        [
+            "memory",
+            "maintenance",
+            "--stale-days",
+            "1",
+            "--cleanup-inactive-index",
+        ],
+        env=_env(tmp_path),
+    )
+
+    store = _store(tmp_path)
+    assert result.exit_code == 0
+    assert second_result.exit_code == 0
+    assert "Maintenance: stale_candidates=1" in result.output
+    assert "rejected_stale=1" in result.output
+    assert "cleaned_search_index=1" in result.output
+    assert "cleaned_search_index=0" in second_result.output
+    assert "CleanedInactiveIndex:" not in second_result.output
+    assert f"CleanedInactiveIndex: id={memory.id}" in result.output
+    assert other_memory.id not in result.output
+    assert store.get_memory_candidate("cand-stale").status == "rejected"
+    assert store.get_semantic_memory(memory.id).status == "deleted"
+    assert store.stats()["conversation_messages"] == before_messages
+    with store.connect() as conn:
+        default_fts_rows = conn.execute(
+            "SELECT count(*) FROM semantic_fts WHERE memory_id = ?",
+            (memory.id,),
+        ).fetchone()[0]
+        other_fts_rows = conn.execute(
+            "SELECT count(*) FROM semantic_fts WHERE memory_id = ?",
+            (other_memory.id,),
+        ).fetchone()[0]
+    assert default_fts_rows == 0
+    assert other_fts_rows == 1
+
+
+def test_memory_metrics_reports_operational_rates(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    now = utc_now_iso()
+    for candidate_id, status in [("cand-approved", "approved"), ("cand-rejected", "rejected")]:
+        store.insert_memory_candidate(
+            MemoryCandidate(
+                id=candidate_id,
+                candidate_type="semantic",
+                proposed_layer="semantic",
+                content=f"{candidate_id} content",
+                weak_structure={"subject": "user", "predicate": "prefers", "object": status},
+                salience=0.9,
+                confidence=0.8,
+                scope=MemoryScope.default(),
+                source_message_ids=["msg-1"],
+                status=status,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+        status="deleted",
+    )
+    store.log_memory_access(
+        memory.id,
+        "semantic",
+        "tea",
+        0.5,
+        scope=MemoryScope.default(),
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["memory", "metrics"], env=_env(tmp_path))
+
+    assert result.exit_code == 0
+    assert "MemoryMetric: candidate_volume=2" in result.output
+    assert "MemoryMetric: approval_rate=0.500" in result.output
+    assert "MemoryMetric: retrieval_hit_rate=1.000" in result.output
+    assert "MemoryMetric: forgotten_deleted_count=1" in result.output

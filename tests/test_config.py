@@ -32,6 +32,8 @@ api_key = "compatible-key"
 [memory]
 retrieval_limit = 3
 capture_mode = "candidate_only"
+cli_capture_mode = "disabled"
+gateway_capture_mode = "auto_approve_explicit"
 consolidation_mode = "after_n_turns"
 consolidation_after_turns = 4
 
@@ -64,6 +66,10 @@ reasoning_effort = "high"
     assert config.llm_provider == "deepseek"
     assert config.retrieval_limit == 3
     assert config.memory_capture_mode == "candidate_only"
+    assert config.memory_channel_capture_modes == {
+        "cli": "disabled",
+        "gateway": "auto_approve_explicit",
+    }
     assert config.memory_consolidation_mode == "after_n_turns"
     assert config.memory_consolidation_after_turns == 4
     assert config.context_max_prompt_tokens == 4096
@@ -177,6 +183,10 @@ def test_config_cli_set_and_get(
     set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
     set_limit = runner.invoke(app, ["config", "set", "memory.retrieval_limit", "5"])
     set_capture = runner.invoke(app, ["config", "set", "memory.capture_mode", "disabled"])
+    set_cli_capture = runner.invoke(
+        app,
+        ["config", "set", "memory.cli_capture_mode", "candidate_only"],
+    )
     set_consolidation = runner.invoke(
         app,
         ["config", "set", "memory.consolidation_mode", "after_n_turns"],
@@ -192,6 +202,7 @@ def test_config_cli_set_and_get(
     assert set_debug.exit_code == 0
     assert set_limit.exit_code == 0
     assert set_capture.exit_code == 0
+    assert set_cli_capture.exit_code == 0
     assert set_consolidation.exit_code == 0
     assert set_context.exit_code == 0
     assert set_semantic_budget.exit_code == 0
@@ -202,6 +213,7 @@ def test_config_cli_set_and_get(
     assert config.llm_debug_logging is True
     assert config.retrieval_limit == 5
     assert config.memory_capture_mode == "disabled"
+    assert config.memory_channel_capture_modes == {"cli": "candidate_only"}
     assert config.memory_consolidation_mode == "after_n_turns"
     assert config.context_max_prompt_tokens == 4096
     assert config.context_semantic_memory_tokens == 256

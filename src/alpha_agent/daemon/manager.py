@@ -72,6 +72,7 @@ class AgentFactory:
             retriever=MemoryRetriever(self.store),
             retrieval_limit=self.config.retrieval_limit,
             memory_capture_mode=self.config.memory_capture_mode,
+            memory_channel_capture_modes=self.config.memory_channel_capture_modes,
             memory_consolidation_mode=self.config.memory_consolidation_mode,
             memory_consolidation_after_turns=self.config.memory_consolidation_after_turns,
             llm_debug_logging=self.config.llm_debug_logging,

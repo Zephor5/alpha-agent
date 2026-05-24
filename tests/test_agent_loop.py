@@ -223,6 +223,60 @@ def test_agent_memory_capture_mode_candidate_only_does_not_promote(
     assert store.list_semantic_memories() == []
 
 
+def test_agent_channel_capture_mode_overrides_default(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+        memory_capture_mode="auto_approve_explicit",
+        memory_channel_capture_modes={"gateway": "candidate_only"},
+    )
+
+    result = agent.respond(
+        "remember that I prefer concise answers",
+        session_id="s1",
+        source_metadata={"channel": "gateway"},
+    )
+
+    assert result.debug["memory_capture_mode"] == "candidate_only"
+    assert store.list_memory_candidates(status="pending")
+    assert store.list_semantic_memories() == []
+    extracted_trace = next(
+        trace
+        for trace in store.list_runtime_traces(session_id="s1", event_type="memory.extracted")
+    )
+    assert extracted_trace.metadata["capture_mode"] == "candidate_only"
+
+
+def test_agent_cli_channel_capture_mode_override_is_traced(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+        memory_capture_mode="auto_approve_explicit",
+        memory_channel_capture_modes={"cli": "disabled"},
+    )
+
+    result = agent.respond(
+        "remember that I prefer concise answers",
+        session_id="s1",
+        source_metadata={"channel": "cli"},
+    )
+
+    extracted_trace = next(
+        trace
+        for trace in store.list_runtime_traces(session_id="s1", event_type="memory.extracted")
+    )
+    assert result.debug["memory_capture_mode"] == "disabled"
+    assert extracted_trace.metadata["capture_mode"] == "disabled"
+    assert extracted_trace.metadata["status"] == "disabled"
+    assert store.list_memory_candidates() == []
+
+
 def test_shared_gateway_scope_writes_candidates_to_channel_scope(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()

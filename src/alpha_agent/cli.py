@@ -367,6 +367,234 @@ def _render_memory_audit(audit: Any) -> None:
         )
     console.print(source_table)
 
+    if audit.projection_memories:
+        projection_table = Table(title="Projection Drill-Down Memories")
+        projection_table.add_column("ID")
+        projection_table.add_column("Status")
+        projection_table.add_column("Type")
+        projection_table.add_column("Sources")
+        projection_table.add_column("Content")
+        for item in audit.projection_memories:
+            projection_table.add_row(
+                item.id,
+                item.status,
+                item.memory_type,
+                ", ".join(item.source_memory_ids),
+                item.content,
+            )
+            console.print(
+                f"ProjectionSource: id={item.id} status={item.status} "
+                f"type={item.memory_type} source_ids={','.join(item.source_memory_ids)} "
+                f"content={item.content}"
+            )
+        console.print(projection_table)
+
+    if audit.relation_edges:
+        relation_table = Table(title="Relation Audit Edges")
+        relation_table.add_column("Edge")
+        relation_table.add_column("Relation")
+        relation_table.add_column("Source")
+        relation_table.add_column("Target")
+        relation_table.add_column("Evidence")
+        for item in audit.relation_edges:
+            evidence_ids = [memory.id for memory in item.evidence_memories]
+            relation_table.add_row(
+                item.edge.id,
+                item.edge.relation_type,
+                item.source_node.name,
+                item.target_node.name,
+                ", ".join(evidence_ids),
+            )
+            console.print(
+                f"RelationAudit: edge_id={item.edge.id} relation={item.edge.relation_type} "
+                f"source={item.source_node.name} target={item.target_node.name} "
+                f"evidence_memory_ids={','.join(evidence_ids)}"
+            )
+        console.print(relation_table)
+
+
+def _render_scope_inspection(inspection: Any) -> None:
+    console.print(f"MemoryInspection: query={inspection.query}")
+    console.print(f"Scope: key={inspection.scope.scope_key} kind={inspection.scope.kind}")
+    table = Table(title="Scoped Memory Inspection")
+    table.add_column("Type")
+    table.add_column("ID")
+    table.add_column("Status")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Scope")
+    table.add_column("Sources")
+    table.add_column("Content")
+    for memory in inspection.semantic_memories:
+        table.add_row(
+            f"semantic:{memory.memory_type}",
+            memory.id,
+            memory.status,
+            f"{memory.confidence:.2f}",
+            memory.scope.scope_key,
+            ", ".join(memory.source_memory_ids),
+            memory.content,
+        )
+        console.print(
+            f"MemoryInspect: type=semantic id={memory.id} status={memory.status} "
+            f"confidence={memory.confidence:.2f} scope={memory.scope.scope_key} "
+            f"source_ids={','.join(memory.source_memory_ids)} content={memory.content}"
+        )
+    for memory in inspection.episodic_memories:
+        table.add_row(
+            "episodic",
+            memory.id,
+            "active",
+            f"{memory.confidence:.2f}",
+            memory.scope.scope_key,
+            ", ".join(memory.source_event_ids),
+            memory.summary,
+        )
+    for memory in inspection.procedural_memories:
+        source_ids = memory.metadata.get("source_ids", [])
+        if isinstance(source_ids, str):
+            rendered_sources = source_ids
+        elif isinstance(source_ids, list):
+            rendered_sources = ", ".join(str(item) for item in source_ids)
+        else:
+            rendered_sources = ""
+        table.add_row(
+            "procedural",
+            memory.id,
+            str(memory.metadata.get("status") or "active"),
+            f"{memory.confidence:.2f}",
+            memory.scope.scope_key,
+            rendered_sources,
+            memory.name,
+        )
+    console.print(table)
+    if inspection.candidates:
+        _render_stored_candidates(inspection.candidates)
+
+
+def _render_retrieval_diagnostics(
+    diagnostics: Any,
+    *,
+    budgets: dict[str, int],
+) -> None:
+    console.print(f"RetrievalDiagnostics: query={diagnostics.query}")
+    console.print(f"Scope: key={diagnostics.scope.scope_key} kind={diagnostics.scope.kind}")
+    budget_table = Table(title="Prompt Budget Impact")
+    budget_table.add_column("Section")
+    budget_table.add_column("Budget Group")
+    budget_table.add_column("Used Tokens", justify="right")
+    budget_table.add_column("Budget Tokens", justify="right")
+    for section, used_tokens in diagnostics.prompt_section_tokens.items():
+        budget_group = diagnostics.prompt_section_budget_groups.get(section, section)
+        budget_table.add_row(
+            section,
+            budget_group,
+            str(used_tokens),
+            str(budgets.get(budget_group, 0)),
+        )
+        console.print(
+            f"PromptBudget: section={section} budget_group={budget_group} "
+            f"used_tokens={used_tokens} budget_tokens={budgets.get(budget_group, 0)}"
+        )
+    console.print(budget_table)
+
+    table = Table(title="Retrieval Score Breakdown")
+    table.add_column("Type")
+    table.add_column("ID")
+    table.add_column("Score", justify="right")
+    table.add_column("Keyword", justify="right")
+    table.add_column("FTS", justify="right")
+    table.add_column("Recency", justify="right")
+    table.add_column("Salience", justify="right")
+    table.add_column("Access", justify="right")
+    table.add_column("Scope", justify="right")
+    table.add_column("Status")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Prompt Section")
+    table.add_column("Sources")
+    table.add_column("Content")
+    for item in diagnostics.memories:
+        explanation = item.explanation
+        components = explanation.components if explanation is not None else {}
+        table.add_row(
+            item.memory_type,
+            item.memory_id,
+            f"{explanation.total:.3f}" if explanation else "",
+            f"{components.get('keyword', 0):.2f}",
+            f"{components.get('fts', 0):.2f}",
+            f"{components.get('recency', 0):.2f}",
+            f"{components.get('salience', 0):.2f}",
+            f"{components.get('access', 0):.2f}",
+            f"{components.get('scope_priority', 0):.2f}",
+            item.status,
+            f"{item.confidence:.2f}" if item.confidence is not None else "",
+            item.prompt_section,
+            ", ".join(item.source_ids),
+            item.content,
+        )
+        console.print(
+            f"RetrievalDiagnostic: type={item.memory_type} id={item.memory_id} "
+            f"score={explanation.total if explanation else 0.0:.4f} "
+            f"keyword={components.get('keyword', 0):.2f} "
+            f"fts={components.get('fts', 0):.2f} "
+            f"recency={components.get('recency', 0):.2f} "
+            f"salience={components.get('salience', 0):.2f} "
+            f"access={components.get('access', 0):.2f} "
+            f"scope_priority={components.get('scope_priority', 0):.2f} "
+            f"prompt_section={item.prompt_section} prompt_tokens={item.prompt_tokens} "
+            f"status={item.status} "
+            f"confidence={item.confidence if item.confidence is not None else ''} "
+            f"source_ids={','.join(item.source_ids)}"
+        )
+    console.print(table)
+
+
+def _render_maintenance_report(report: Any) -> None:
+    table = Table(title="Memory Maintenance")
+    table.add_column("Area")
+    table.add_column("Count", justify="right")
+    table.add_row("stale_candidates", str(len(report.stale_candidates)))
+    table.add_row("inactive_memories", str(len(report.inactive_memories)))
+    table.add_row("rejected_stale", str(report.rejected_stale_count))
+    table.add_row("cleaned_search_index", str(report.cleaned_search_index_count))
+    console.print(table)
+    console.print(
+        f"Maintenance: stale_candidates={len(report.stale_candidates)} "
+        f"inactive_memories={len(report.inactive_memories)} "
+        f"rejected_stale={report.rejected_stale_count} "
+        f"cleaned_search_index={report.cleaned_search_index_count}"
+    )
+    if report.stale_candidates:
+        _render_stored_candidates(report.stale_candidates)
+    if report.cleaned_search_index_memories:
+        cleaned_table = Table(title="Cleaned Inactive Search Index Rows")
+        cleaned_table.add_column("ID")
+        cleaned_table.add_column("Status")
+        cleaned_table.add_column("Scope")
+        cleaned_table.add_column("Content")
+        for memory in report.cleaned_search_index_memories:
+            cleaned_table.add_row(
+                memory.id,
+                memory.status,
+                memory.scope.scope_key,
+                memory.content,
+            )
+            console.print(
+                f"CleanedInactiveIndex: id={memory.id} status={memory.status} "
+                f"scope={memory.scope.scope_key} content={memory.content}"
+            )
+        console.print(cleaned_table)
+
+
+def _render_operational_metrics(metrics: dict[str, int | float]) -> None:
+    table = Table(title="Memory Operational Metrics")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    for key, value in metrics.items():
+        rendered = f"{value:.3f}" if isinstance(value, float) else str(value)
+        table.add_row(key, rendered)
+        console.print(f"MemoryMetric: {key}={rendered}")
+    console.print(table)
+
 
 def _retrieved_memory_metadata(memory_type: str, memory: Any) -> dict[str, str]:
     if memory_type == "semantic":
@@ -487,6 +715,47 @@ def _memory_scope_from_gateway_session(
     return MemoryScope.from_record(record)
 
 
+def _memory_scope_from_option(scope_key: str | None) -> MemoryScope:
+    if not scope_key:
+        return MemoryScope.default()
+    normalized = scope_key.strip()
+    if normalized.startswith("user:"):
+        return MemoryScope(
+            kind="global_user",
+            scope_key=normalized,
+            user_id=normalized.split(":", 1)[1] or None,
+        )
+    if normalized.startswith("project:"):
+        parts = normalized.split(":")
+        project_id = parts[1] if len(parts) > 1 else None
+        user_id = parts[3] if len(parts) > 3 and parts[2] == "user" else None
+        return MemoryScope(
+            kind="project",
+            scope_key=normalized,
+            project_id=project_id,
+            user_id=user_id,
+        )
+    if normalized.startswith("platform:") and ":chat:" in normalized:
+        parts = normalized.split(":")
+        return MemoryScope(
+            kind="chat_thread",
+            scope_key=normalized,
+            platform=parts[1] if len(parts) > 1 else None,
+            chat_id=parts[3] if len(parts) > 3 else None,
+            thread_id=parts[5] if len(parts) > 5 else None,
+            user_id=parts[7] if len(parts) > 7 else None,
+        )
+    if normalized.startswith("platform:"):
+        parts = normalized.split(":")
+        return MemoryScope(
+            kind="platform_user",
+            scope_key=normalized,
+            platform=parts[1] if len(parts) > 1 else None,
+            user_id=parts[3] if len(parts) > 3 else None,
+        )
+    return MemoryScope(kind="global_user", scope_key=normalized)
+
+
 def _merge_source_context(
     base: ConversationSource | None,
     *,
@@ -604,6 +873,14 @@ def config_show() -> None:
     table.add_row("llm_debug_logging", str(config.llm_debug_logging).lower())
     table.add_row("retrieval_limit", str(config.retrieval_limit))
     table.add_row("memory_capture_mode", config.memory_capture_mode)
+    table.add_row(
+        "memory_cli_capture_mode",
+        (config.memory_channel_capture_modes or {}).get("cli", ""),
+    )
+    table.add_row(
+        "memory_gateway_capture_mode",
+        (config.memory_channel_capture_modes or {}).get("gateway", ""),
+    )
     table.add_row("memory_consolidation_mode", config.memory_consolidation_mode)
     table.add_row(
         "memory_consolidation_after_turns",
@@ -919,6 +1196,37 @@ def memory_list(limit: Annotated[int, typer.Option("--limit", "-n")] = 20) -> No
     console.print(table)
 
 
+@memory_app.command("inspect")
+def memory_inspect(
+    query: Annotated[
+        str | None,
+        typer.Argument(
+            help="Inspection prompt. Defaults to 'what do you remember about me?'."
+        ),
+    ] = None,
+    scope_key: Annotated[
+        str | None,
+        typer.Option("--scope-key", help="Inspect a specific memory scope key."),
+    ] = None,
+    include_inactive: Annotated[
+        bool,
+        typer.Option("--include-inactive", help="Include superseded, deleted, and conflict rows."),
+    ] = False,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 20,
+) -> None:
+    """Answer what Alpha remembers in the selected scope."""
+
+    config = load_config()
+    service = MemoryReviewService(_store(config))
+    inspection = service.inspect_scope(
+        query=query or "what do you remember about me?",
+        scope=_memory_scope_from_option(scope_key),
+        include_inactive=include_inactive,
+        limit=limit,
+    )
+    _render_scope_inspection(inspection)
+
+
 @memory_app.command()
 def search(
     query: Annotated[str, typer.Argument(help="Query for non-vector memory search.")],
@@ -1008,6 +1316,45 @@ def search(
     console.print(table)
 
 
+@memory_app.command("diagnostics")
+def memory_diagnostics(
+    query: Annotated[str, typer.Argument(help="Query to explain retrieval for.")],
+    session: Annotated[
+        str,
+        typer.Option("--session", "-s", help="Session id used for query expansion."),
+    ] = "memory-diagnostics",
+    scope_key: Annotated[
+        str | None,
+        typer.Option("--scope-key", help="Diagnose a specific memory scope key."),
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 8,
+) -> None:
+    """Explain why retrieval selected memories and their prompt budget impact."""
+
+    config = load_config()
+    service = MemoryReviewService(_store(config))
+    diagnostics = service.retrieval_diagnostics(
+        query=query,
+        session_id=session,
+        scope=_memory_scope_from_option(scope_key),
+        limit=limit,
+        prompt_builder=PromptBuilder(
+            semantic_memory_tokens=config.context_semantic_memory_tokens,
+            episodic_memory_tokens=config.context_episodic_memory_tokens,
+            procedural_memory_tokens=config.context_procedural_memory_tokens,
+            session_context_tokens=config.context_session_context_tokens,
+        ),
+    )
+    _render_retrieval_diagnostics(
+        diagnostics,
+        budgets={
+            "semantic": config.context_semantic_memory_tokens,
+            "episodic": config.context_episodic_memory_tokens,
+            "procedural": config.context_procedural_memory_tokens,
+        },
+    )
+
+
 @memory_app.command()
 def forget(
     memory_id: Annotated[str, typer.Argument(help="Semantic memory id to forget.")],
@@ -1051,6 +1398,69 @@ def consolidate() -> None:
     store = _store(config)
     report = ConsolidationService(store).consolidate()
     console.print(report.render())
+
+
+@memory_app.command("maintenance")
+def memory_maintenance(
+    stale_days: Annotated[
+        int,
+        typer.Option("--stale-days", help="Candidate age threshold for stale review items."),
+    ] = 14,
+    limit: Annotated[int, typer.Option("--limit", "-n")] = 50,
+    reject_stale: Annotated[
+        bool,
+        typer.Option("--reject-stale", help="Reject stale pending/edited candidates."),
+    ] = False,
+    cleanup_inactive_index: Annotated[
+        bool,
+        typer.Option(
+            "--cleanup-inactive-index",
+            help="Remove inactive semantic memories from the optional FTS index.",
+        ),
+    ] = False,
+    run_consolidation: Annotated[
+        bool,
+        typer.Option("--consolidate", help="Run manual consolidation as part of maintenance."),
+    ] = False,
+    diagnostics_query: Annotated[
+        str | None,
+        typer.Option("--diagnostics", help="Also run retrieval diagnostics for this query."),
+    ] = None,
+) -> None:
+    """Run memory maintenance checks without changing transcript history."""
+
+    config = load_config()
+    store = _store(config)
+    service = MemoryReviewService(store)
+    report = service.maintenance_report(
+        stale_days=stale_days,
+        limit=limit,
+        reject_stale=reject_stale,
+        cleanup_inactive_index=cleanup_inactive_index,
+    )
+    _render_maintenance_report(report)
+    if run_consolidation:
+        consolidation = ConsolidationService(store).consolidate()
+        console.print(consolidation.render())
+    if diagnostics_query:
+        diagnostics = service.retrieval_diagnostics(
+            query=diagnostics_query,
+            limit=config.retrieval_limit,
+            prompt_builder=PromptBuilder(
+                semantic_memory_tokens=config.context_semantic_memory_tokens,
+                episodic_memory_tokens=config.context_episodic_memory_tokens,
+                procedural_memory_tokens=config.context_procedural_memory_tokens,
+                session_context_tokens=config.context_session_context_tokens,
+            ),
+        )
+        _render_retrieval_diagnostics(
+            diagnostics,
+            budgets={
+                "semantic": config.context_semantic_memory_tokens,
+                "episodic": config.context_episodic_memory_tokens,
+                "procedural": config.context_procedural_memory_tokens,
+            },
+        )
 
 
 @memory_app.command("review")
@@ -1304,6 +1714,15 @@ def stats() -> None:
     for key, count in store.stats().items():
         table.add_row(key, str(count))
     console.print(table)
+
+
+@memory_app.command("metrics")
+def memory_metrics() -> None:
+    """Show operational memory lifecycle and retrieval metrics."""
+
+    config = load_config()
+    service = MemoryReviewService(_store(config))
+    _render_operational_metrics(service.operational_metrics())
 
 
 @skills_app.command("list")

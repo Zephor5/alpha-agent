@@ -225,8 +225,15 @@ P1 Agent Loop implementation notes:
   promotion outcomes. Stored candidate review is available through
   `alpha memory review --list-pending`, `--list-stored`,
   `--candidate-id ... --approve-stored`, `--reject-stored`, `--edit-stored`,
-  and `--inspect-stored`; separate `alpha memory candidates/approve/reject/edit`
-  commands remain future usability work.
+  and `--inspect-stored`.
+- Memory operations are inspectable from the CLI: `alpha memory inspect`
+  answers "what do you remember about me?" with scope/status/confidence/source
+  evidence, `alpha memory diagnostics QUERY` explains score components and
+  PromptBuilder-aligned prompt budget impact by rendered section and budget
+  group, `alpha memory maintenance` handles stale candidate and scoped
+  inactive-index maintenance without transcript mutation, and `alpha memory
+  metrics` reports candidate volume, approval rate, conflict rate, retrieval hit
+  rate, and forgotten/deleted memory count.
 - Session compression now projects structured task state instead of deterministic
   recap text and carries that state through `session_context_states.metadata`.
   Consolidation can build source-backed `scene` and `persona` semantic
@@ -336,15 +343,17 @@ before writing code.
 
 These items make Alpha Agent feel different from a generic chat bot.
 
-- [ ] Add memory review commands:
-  - `alpha memory candidates`
-  - `alpha memory approve <id>`
-  - `alpha memory reject <id>`
-  - `alpha memory edit <id>`
+- [x] Add memory review commands:
+  - `alpha memory review --list-pending`
+  - `alpha memory review --candidate-id <id> --approve-stored`
+  - `alpha memory review --candidate-id <id> --reject-stored`
+  - `alpha memory review --candidate-id <id> --edit-stored`
 - [x] Store extracted candidates separately before promotion in the runtime
   memory pipeline.
-- [ ] Add confidence/source display to channel replies when memory is used.
-- [ ] Add "what do you remember about me?" command.
+- [x] Add confidence/source display to CLI memory inspection, audit, prompt
+  debug, and retrieval diagnostics. Platform reply decoration remains adapter UX
+  work after real adapters exist.
+- [x] Add "what do you remember about me?" command.
 - [x] Add "forget this" / "forget memory id" support.
 - [x] Add per-channel memory policy:
   - DM can write semantic memory by default.
@@ -364,6 +373,12 @@ These items make Alpha Agent feel different from a generic chat bot.
   - detect conflicting semantic facts by subject/predicate.
   - mark older fact superseded instead of deleting immediately.
   - expose lifecycle audit through `alpha memory audit <memory-id>`.
+- [x] Add memory operations reporting:
+  - stale candidate maintenance.
+  - inactive memory search-index cleanup.
+  - retrieval diagnostics with score and prompt budget impact.
+  - candidate volume, approval rate, conflict rate, retrieval hit rate, and
+    forgotten/deleted count.
 
 ## P2: Engineering And Operations
 

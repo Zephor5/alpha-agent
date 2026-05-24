@@ -7,6 +7,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -25,7 +26,7 @@ from alpha_agent.memory.models import (
     SessionContextState,
 )
 from alpha_agent.utils.ids import new_id
-from alpha_agent.utils.time import utc_now_iso
+from alpha_agent.utils.time import utc_now, utc_now_iso
 
 T = TypeVar("T")
 
@@ -552,7 +553,7 @@ class MemoryStore:
     ) -> list[EpisodicMemory]:
         """Search episodic memories using FTS5 when available, otherwise LIKE."""
 
-        scope_sql, scope_params = _scope_filter(scopes, column="m.scope_key")
+        scope_sql, scope_params = _scope_filter(scopes)
         with self.connect() as conn:
             if self._has_fts_table(conn, "episodic_fts") and query.strip():
                 rows = conn.execute(
@@ -1108,6 +1109,89 @@ class MemoryStore:
 
         return self._with_conn(conn, op)
 
+    def list_stale_memory_candidates(
+        self,
+        *,
+        older_than_days: int = 14,
+        scopes: list[MemoryScope] | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[MemoryCandidate]:
+        """Return reviewable candidates that have been idle past the cutoff."""
+
+        cutoff = (utc_now() - timedelta(days=max(0, older_than_days))).isoformat()
+        candidate_statuses = statuses or ["pending", "edited"]
+        placeholders = ",".join("?" for _ in candidate_statuses)
+        scope_sql, scope_params = _scope_filter(scopes)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM memory_candidates
+                WHERE status IN ({placeholders})
+                  AND updated_at < ?
+                  {scope_sql}
+                ORDER BY updated_at ASC, id ASC
+                LIMIT ?
+                """,
+                (*candidate_statuses, cutoff, *scope_params, limit),
+            ).fetchall()
+        return [self._memory_candidate_from_row(row) for row in rows]
+
+    def list_inactive_semantic_memories(
+        self,
+        *,
+        scopes: list[MemoryScope] | None = None,
+        statuses: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[SemanticMemory]:
+        """Return inactive semantic memories for maintenance and audit."""
+
+        inactive_statuses = statuses or ["superseded", "deleted", "conflict_review"]
+        return self.list_semantic_memories(
+            limit=limit,
+            scopes=scopes,
+            statuses=inactive_statuses,
+        )
+
+    def cleanup_inactive_semantic_search_index(
+        self,
+        *,
+        scopes: list[MemoryScope] | None = None,
+        statuses: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[SemanticMemory]:
+        """Remove scoped inactive semantic memories from the optional FTS index."""
+
+        inactive_statuses = statuses or ["superseded", "deleted", "conflict_review"]
+        scope_sql, scope_params = _scope_filter(scopes, column="m.scope_key")
+
+        def op(db: sqlite3.Connection) -> list[SemanticMemory]:
+            if not self._has_fts_table(db, "semantic_fts"):
+                return []
+            placeholders = ",".join("?" for _ in inactive_statuses)
+            limit_sql = " LIMIT ?" if limit is not None else ""
+            params: list[Any] = [*inactive_statuses, *scope_params]
+            if limit is not None:
+                params.append(limit)
+            rows = db.execute(
+                f"""
+                SELECT m.* FROM semantic_memories m
+                JOIN semantic_fts f ON f.memory_id = m.id
+                WHERE m.status IN ({placeholders})
+                {scope_sql}
+                ORDER BY m.updated_at DESC, m.id DESC
+                {limit_sql}
+                """,
+                params,
+            ).fetchall()
+            memories = [self._semantic_from_row(row) for row in rows]
+            for memory in memories:
+                db.execute("DELETE FROM semantic_fts WHERE memory_id = ?", (memory.id,))
+            return memories
+
+        with self.immediate_transaction() as conn:
+            return op(conn)
+
     def insert_memory_candidate(
         self,
         candidate: MemoryCandidate,
@@ -1509,6 +1593,21 @@ class MemoryStore:
             )
         return audits
 
+    def audit_relation_edges_for_memory(
+        self,
+        memory_id: str,
+        *,
+        limit: int = 20,
+    ) -> list[RelationEdgeAudit]:
+        """Return relation audit edges that cite a semantic memory as evidence."""
+
+        audits = self.audit_relation_edges(limit=1000)
+        return [
+            audit
+            for audit in audits
+            if any(memory.id == memory_id for memory in audit.evidence_memories)
+        ][:limit]
+
     def stats(self) -> dict[str, int]:
         """Return counts by memory table."""
 
@@ -1529,6 +1628,67 @@ class MemoryStore:
                 key: int(conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
                 for key, table in tables.items()
             }
+
+    def operational_metrics(self) -> dict[str, int | float]:
+        """Return product and operations metrics for the memory lifecycle."""
+
+        with self.connect() as conn:
+            candidate_volume = int(
+                conn.execute("SELECT count(*) FROM memory_candidates").fetchone()[0]
+            )
+            approved_candidates = int(
+                conn.execute(
+                    """
+                    SELECT count(*) FROM memory_candidates
+                    WHERE status IN ('approved', 'auto_approved')
+                    """
+                ).fetchone()[0]
+            )
+            rejected_candidates = int(
+                conn.execute(
+                    "SELECT count(*) FROM memory_candidates WHERE status = 'rejected'"
+                ).fetchone()[0]
+            )
+            conflict_count = int(
+                conn.execute(
+                    """
+                    SELECT count(*) FROM memory_decisions
+                    WHERE action = 'conflict-review'
+                    """
+                ).fetchone()[0]
+            )
+            retrieval_count = int(
+                conn.execute("SELECT count(*) FROM memory_access_log").fetchone()[0]
+            )
+            retrieval_hit_count = int(
+                conn.execute(
+                    "SELECT count(*) FROM memory_access_log WHERE score > 0"
+                ).fetchone()[0]
+            )
+            forgotten_deleted_count = int(
+                conn.execute(
+                    "SELECT count(*) FROM semantic_memories WHERE status = 'deleted'"
+                ).fetchone()[0]
+            )
+        decisioned = approved_candidates + rejected_candidates
+        return {
+            "candidate_volume": candidate_volume,
+            "approved_candidates": approved_candidates,
+            "rejected_candidates": rejected_candidates,
+            "approval_rate": (
+                approved_candidates / decisioned if decisioned > 0 else 0.0
+            ),
+            "conflict_count": conflict_count,
+            "conflict_rate": (
+                conflict_count / candidate_volume if candidate_volume > 0 else 0.0
+            ),
+            "retrieval_count": retrieval_count,
+            "retrieval_hit_count": retrieval_hit_count,
+            "retrieval_hit_rate": (
+                retrieval_hit_count / retrieval_count if retrieval_count > 0 else 0.0
+            ),
+            "forgotten_deleted_count": forgotten_deleted_count,
+        }
 
     def _fts_query(self, query: str) -> str:
         terms = [term.replace('"', "") for term in query.split() if term.strip()]

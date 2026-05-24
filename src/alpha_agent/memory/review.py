@@ -3,22 +3,28 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
+from alpha_agent.graph.models import RelationEdgeAudit
 from alpha_agent.memory.controller import MemoryController, MemoryPromotionPolicyError
 from alpha_agent.memory.extractor import MemoryExtractor
 from alpha_agent.memory.models import (
     ConversationMessage,
+    EpisodicMemory,
     ExtractedMemoryCandidate,
     MemoryCandidate,
     MemoryDecision,
+    MemoryRetrievalExplanation,
     MemoryScope,
+    ProceduralMemory,
+    RetrievedContext,
     SemanticMemory,
     proposed_layer_for_candidate,
 )
 from alpha_agent.memory.persistence import PersistedMemory
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.store import MemoryStore
+from alpha_agent.runtime.prompt_builder import PromptBuilder
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
 
@@ -40,6 +46,62 @@ class SemanticMemoryAudit:
     source_message_ids: list[str]
     source_messages: list[ConversationMessage]
     supersession_chain: list[SemanticMemory]
+    projection_memories: list[SemanticMemory]
+    relation_edges: list[RelationEdgeAudit]
+
+
+@dataclass(frozen=True)
+class ScopedMemoryInspection:
+    """Visible memory state for one scope-aware inspection request."""
+
+    query: str
+    scope: MemoryScope
+    semantic_memories: list[SemanticMemory]
+    episodic_memories: list[EpisodicMemory]
+    procedural_memories: list[ProceduralMemory]
+    candidates: list[MemoryCandidate]
+
+
+@dataclass(frozen=True)
+class RetrievalDiagnosticMemory:
+    """One retrieved memory with score, reasons, and budget estimate."""
+
+    memory_type: str
+    memory_id: str
+    content: str
+    scope: MemoryScope
+    status: str
+    confidence: float | None
+    source_ids: list[str]
+    explanation: MemoryRetrievalExplanation | None
+    prompt_section: str
+    prompt_tokens: int
+
+
+@dataclass(frozen=True)
+class RetrievalDiagnostics:
+    """Why a query selected specific memories."""
+
+    query: str
+    scope: MemoryScope
+    context: RetrievedContext
+    memories: list[RetrievalDiagnosticMemory]
+    prompt_section_tokens: dict[str, int]
+    prompt_section_budget_groups: dict[str, str]
+
+
+@dataclass(frozen=True)
+class MemoryMaintenanceReport:
+    """Operational maintenance result without transcript mutation."""
+
+    stale_candidates: list[MemoryCandidate]
+    inactive_memories: list[SemanticMemory]
+    cleaned_search_index_memories: list[SemanticMemory] = field(default_factory=list)
+    rejected_stale_count: int = 0
+
+    @property
+    def cleaned_search_index_count(self) -> int:
+        return len(self.cleaned_search_index_memories or [])
 
 
 class MemoryReviewService:
@@ -431,12 +493,150 @@ class MemoryReviewService:
                 *(source for item in chain for source in item.source_memory_ids),
             ]
         )
+        projection_memories: list[SemanticMemory] = []
+        if memory.memory_type in {"scene", "persona"}:
+            projection_memories = self.store.drill_down_semantic_memory(
+                memory.id
+            ).atomic_memories
         return SemanticMemoryAudit(
             memory=memory,
             source_message_ids=source_ids,
             source_messages=self.store.list_conversation_messages_by_ids(source_ids),
             supersession_chain=chain,
+            projection_memories=projection_memories,
+            relation_edges=self.store.audit_relation_edges_for_memory(memory.id),
         )
+
+    def inspect_scope(
+        self,
+        *,
+        query: str = "what do you remember about me?",
+        scope: MemoryScope | None = None,
+        include_inactive: bool = False,
+        limit: int = 20,
+    ) -> ScopedMemoryInspection:
+        """Return visible memories and review candidates for a scope."""
+
+        memory_scope = scope or MemoryScope.default()
+        scopes = memory_scope.allowed_read_scopes()
+        semantic_statuses = (
+            ["active", "superseded", "deleted", "conflict_review"]
+            if include_inactive
+            else ["active"]
+        )
+        return ScopedMemoryInspection(
+            query=query,
+            scope=memory_scope,
+            semantic_memories=self.store.list_semantic_memories(
+                limit=limit,
+                scopes=scopes,
+                statuses=semantic_statuses,
+            ),
+            episodic_memories=self.store.list_episodic_memories(limit, scopes=scopes),
+            procedural_memories=self.store.list_procedural_memories(limit, scopes=scopes),
+            candidates=self.store.list_memory_candidates(
+                statuses=["pending", "edited"],
+                scopes=scopes,
+                limit=limit,
+            ),
+        )
+
+    def retrieval_diagnostics(
+        self,
+        *,
+        query: str,
+        session_id: str = "memory-diagnostics",
+        scope: MemoryScope | None = None,
+        limit: int = 8,
+        prompt_builder: PromptBuilder | None = None,
+    ) -> RetrievalDiagnostics:
+        """Return retrieval explanations without writing access-log rows."""
+
+        memory_scope = scope or MemoryScope.default()
+        context = MemoryRetriever(self.store).retrieve_context(
+            query=query,
+            session_id=session_id,
+            limit=limit,
+            scopes=memory_scope.allowed_read_scopes(),
+            record_access=False,
+        )
+        budget_impact = (prompt_builder or PromptBuilder()).memory_prompt_budget_impact(
+            query,
+            context,
+        )
+        memories: list[RetrievalDiagnosticMemory] = []
+        for memory_type, memory_items in [
+            ("semantic", context.semantic_memories),
+            ("episodic", context.episodic_memories),
+            ("procedural", context.procedural_memories),
+        ]:
+            for memory in memory_items:
+                entry = _diagnostic_memory(
+                    memory_type,
+                    memory,
+                    context.retrieval_explanations.get(f"{memory_type}:{memory.id}"),
+                    prompt_section=_prompt_section(memory_type, memory),
+                    prompt_tokens=budget_impact.memory_tokens.get(
+                        f"{memory_type}:{memory.id}",
+                        0,
+                    ),
+                )
+                memories.append(entry)
+        return RetrievalDiagnostics(
+            query=query,
+            scope=memory_scope,
+            context=context,
+            memories=memories,
+            prompt_section_tokens=dict(budget_impact.section_tokens),
+            prompt_section_budget_groups=dict(budget_impact.section_budget_groups),
+        )
+
+    def maintenance_report(
+        self,
+        *,
+        scope: MemoryScope | None = None,
+        stale_days: int = 14,
+        limit: int = 50,
+        reject_stale: bool = False,
+        cleanup_inactive_index: bool = False,
+        reviewer: str = "maintenance",
+    ) -> MemoryMaintenanceReport:
+        """Run memory maintenance tasks without modifying transcript history."""
+
+        scopes = (scope or MemoryScope.default()).allowed_read_scopes()
+        stale = self.store.list_stale_memory_candidates(
+            older_than_days=stale_days,
+            scopes=scopes,
+            limit=limit,
+        )
+        rejected_stale_count = 0
+        if reject_stale:
+            for candidate in stale:
+                self.reject_stored(candidate.id, reviewer=reviewer)
+            rejected_stale_count = len(stale)
+        inactive = self.store.list_inactive_semantic_memories(
+            scopes=scopes,
+            limit=limit,
+        )
+        cleaned_search_index_memories = (
+            self.store.cleanup_inactive_semantic_search_index(
+                scopes=scopes,
+                limit=limit,
+            )
+            if cleanup_inactive_index
+            else []
+        )
+        return MemoryMaintenanceReport(
+            stale_candidates=stale,
+            inactive_memories=inactive,
+            cleaned_search_index_memories=cleaned_search_index_memories,
+            rejected_stale_count=rejected_stale_count,
+        )
+
+    def operational_metrics(self) -> dict[str, int | float]:
+        """Return memory operations metrics for CLI and future gateway adapters."""
+
+        return self.store.operational_metrics()
 
     def _supersession_chain(self, memory: SemanticMemory) -> list[SemanticMemory]:
         chain: list[SemanticMemory] = []
@@ -533,6 +733,64 @@ def _record_decision(
         ),
         conn=conn,
     )
+
+
+def _diagnostic_memory(
+    memory_type: str,
+    memory: SemanticMemory | EpisodicMemory | ProceduralMemory,
+    explanation: MemoryRetrievalExplanation | None,
+    *,
+    prompt_section: str,
+    prompt_tokens: int,
+) -> RetrievalDiagnosticMemory:
+    if isinstance(memory, SemanticMemory):
+        content = memory.content
+        status = memory.status
+        confidence = memory.confidence
+        source_ids = list(memory.source_memory_ids)
+    elif isinstance(memory, EpisodicMemory):
+        content = memory.summary
+        status = "active"
+        confidence = memory.confidence
+        source_ids = list(memory.source_event_ids)
+    else:
+        content = f"{memory.name}: {memory.description}"
+        status = str(memory.metadata.get("status") or "active")
+        confidence = memory.confidence
+        source_ids = _metadata_source_ids(memory.metadata)
+    return RetrievalDiagnosticMemory(
+        memory_type=memory_type,
+        memory_id=memory.id,
+        content=content,
+        scope=memory.scope,
+        status=status,
+        confidence=confidence,
+        source_ids=source_ids,
+        explanation=explanation,
+        prompt_section=prompt_section,
+        prompt_tokens=prompt_tokens,
+    )
+
+
+def _prompt_section(
+    memory_type: str,
+    memory: SemanticMemory | EpisodicMemory | ProceduralMemory,
+) -> str:
+    if isinstance(memory, SemanticMemory):
+        if memory.memory_type in {"persona", "scene"}:
+            return memory.memory_type
+        return "semantic"
+    return memory_type
+
+
+def _metadata_source_ids(metadata: dict[str, object]) -> list[str]:
+    for key in ("source_ids", "source_memory_ids", "source_event_ids"):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if isinstance(value, str) and value.strip():
+            return [value]
+    return []
 
 
 def _require_visible(candidate: MemoryCandidate, *, scope: MemoryScope) -> None:

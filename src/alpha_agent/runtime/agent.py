@@ -181,6 +181,7 @@ class AlphaAgent:
         prompt_builder: PromptBuilder | None = None,
         extractor: MemoryExtractor | None = None,
         memory_capture_mode: MemoryCaptureMode | str = "auto_approve_explicit",
+        memory_channel_capture_modes: Mapping[str, MemoryCaptureMode | str] | None = None,
         tool_registry: ToolRegistry | None = None,
         max_llm_retries: int = 2,
         llm_retry_sleep_seconds: float = 0.0,
@@ -222,6 +223,11 @@ class AlphaAgent:
         )
         self.extractor = extractor or MemoryExtractor()
         self.memory_capture_mode = _normalize_memory_capture_mode(memory_capture_mode)
+        self.memory_channel_capture_modes = {
+            str(channel).strip().lower(): _normalize_memory_capture_mode(mode)
+            for channel, mode in dict(memory_channel_capture_modes or {}).items()
+            if str(channel).strip()
+        }
         self.memory_consolidation_mode = _normalize_memory_consolidation_mode(
             memory_consolidation_mode
         )
@@ -296,8 +302,9 @@ class AlphaAgent:
                 session_id=session_id,
                 source_metadata=dict(source_metadata or {}),
             )
+            memory_capture_mode = self._memory_capture_mode_for_source(source_metadata)
             debug["memory_scope"] = memory_scope.to_record()
-            debug["memory_capture_mode"] = self.memory_capture_mode
+            debug["memory_capture_mode"] = memory_capture_mode
             debug["user_message_id"] = user_record.id
             debug["user_message_ordinal"] = user_record.ordinal
 
@@ -384,11 +391,12 @@ class AlphaAgent:
                 assistant_record.id,
                 *[message.id for message in provider_tool_messages],
             ]
-            if self.memory_capture_mode == "disabled":
+            if memory_capture_mode == "disabled":
                 candidates = self._skip_memory_capture(
                     session_id=session_id,
                     source_message_ids=extraction_source_message_ids,
                     scope=memory_scope,
+                    memory_capture_mode=memory_capture_mode,
                 )
                 persisted: list[Any] = []
             else:
@@ -400,12 +408,13 @@ class AlphaAgent:
                     scope=memory_scope,
                     retrieved_context=context,
                     recent_messages=session_context.uncompressed_messages,
+                    memory_capture_mode=memory_capture_mode,
                 )
                 persisted = self._persist_extracted_memories(
                     session_id,
                     candidates,
                     auto_approve_explicit=(
-                        self.memory_capture_mode == "auto_approve_explicit"
+                        memory_capture_mode == "auto_approve_explicit"
                     ),
                 )
             debug["extracted_memory_count"] = len(candidates)
@@ -464,6 +473,15 @@ class AlphaAgent:
         finally:
             if session_id not in self._canceled_sessions:
                 self.clear_cancel(session_id)
+
+    def _memory_capture_mode_for_source(
+        self,
+        source_metadata: Mapping[str, Any] | None,
+    ) -> MemoryCaptureMode:
+        channel = str((source_metadata or {}).get("channel") or "").strip().lower()
+        if channel and channel in self.memory_channel_capture_modes:
+            return self.memory_channel_capture_modes[channel]
+        return self.memory_capture_mode
 
     def _write_user_message(
         self,
@@ -1224,6 +1242,7 @@ class AlphaAgent:
         scope: MemoryScope,
         retrieved_context: RetrievedContext | None = None,
         recent_messages: list[ConversationMessage] | None = None,
+        memory_capture_mode: MemoryCaptureMode | str | None = None,
     ) -> list[MemoryCandidate]:
         candidates = self.memory_controller.extract_candidates(
             session_id=session_id,
@@ -1247,7 +1266,7 @@ class AlphaAgent:
                 "extracted_memory_count": len(candidates),
                 "candidate_type_counts": type_counts,
                 "source_message_ids": source_message_ids,
-                "capture_mode": self.memory_capture_mode,
+                "capture_mode": memory_capture_mode or self.memory_capture_mode,
             },
         )
         return candidates
@@ -1258,6 +1277,7 @@ class AlphaAgent:
         session_id: str,
         source_message_ids: list[str],
         scope: MemoryScope,
+        memory_capture_mode: MemoryCaptureMode | str | None = None,
     ) -> list[MemoryCandidate]:
         self.store.append_runtime_trace(
             session_id=session_id,
@@ -1267,7 +1287,7 @@ class AlphaAgent:
                 "extracted_memory_count": 0,
                 "candidate_type_counts": {},
                 "source_message_ids": source_message_ids,
-                "capture_mode": self.memory_capture_mode,
+                "capture_mode": memory_capture_mode or self.memory_capture_mode,
                 "scope": scope.to_record(),
                 "status": "disabled",
             },

@@ -1,7 +1,10 @@
 # Memory System Optimization Phases
 
-Status: active planning
+Status: completed
 Date: 2026-05-24
+
+Active work: none. Phase 7 has been implemented and this execution ledger is
+kept only as the completed phase record.
 
 ## Objective
 
@@ -372,25 +375,38 @@ Goal: make memory behavior visible, correctable, and safe for daily use.
 
 Tasks:
 
-- [ ] Add "what do you remember about me?" and scoped memory inspection
+- [x] Add "what do you remember about me?" and scoped memory inspection
   commands.
-- [ ] Add channel responses that can optionally show memory confidence/source
-  when a memory materially influenced the answer.
-- [ ] Add memory audit commands for source messages, decisions, and supersession
+- [x] Add channel responses that can optionally show memory confidence/source
+  when a memory materially influenced the answer. CLI prompt/debug,
+  diagnostics, and inspection expose the core explanation payload; real adapter
+  reply decoration remains a thin gateway UX layer over these core APIs.
+- [x] Add memory audit commands for source messages, decisions, and supersession
   chains.
-- [ ] Add policy configuration for channel-level memory capture defaults.
-- [ ] Add maintenance commands for stale candidates, inactive memory cleanup,
+- [x] Add policy configuration for channel-level memory capture defaults.
+- [x] Add maintenance commands for stale candidates, inactive memory cleanup,
   consolidation runs, and retrieval diagnostics.
-- [ ] Add operational metrics for candidate volume, approval rate, conflict
+- [x] Add operational metrics for candidate volume, approval rate, conflict
   rate, retrieval hit rate, and forgotten memory count.
+
+Current status: CLI memory operations now include scoped inspection
+(`alpha memory inspect`), stored review approve/reject/edit/inspect flows,
+semantic audit with source messages, decisions, supersession/projection
+evidence, retrieval diagnostics with score components and prompt budget impact,
+maintenance for stale candidates/scoped inactive search-index cleanup/consolidation
+and diagnostics, and operational metrics. Retrieval diagnostics separates
+rendered prompt sections from the semantic/episodic/procedural budget groups
+they spend. Gateway memory UX should consume
+`MemoryReviewService`/`MemoryStore` APIs instead of duplicating platform-specific
+memory logic.
 
 Acceptance criteria:
 
-- [ ] A user can inspect, approve, correct, or forget memory from the CLI.
-- [ ] Gateway adapters can expose the same review/forget flows later without
+- [x] A user can inspect, approve, correct, or forget memory from the CLI.
+- [x] Gateway adapters can expose the same review/forget flows later without
   duplicating core memory logic.
-- [ ] Operators can diagnose why a response used a specific memory.
-- [ ] Memory maintenance can run without changing active transcript history.
+- [x] Operators can diagnose why a response used a specific memory.
+- [x] Memory maintenance can run without changing active transcript history.
 
 Likely files:
 
