@@ -222,6 +222,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_candidates_status
 CREATE INDEX IF NOT EXISTS idx_memory_decisions_candidate
     ON memory_decisions(candidate_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_entity_nodes_salience ON entity_nodes(salience);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relation_edges_unique
+    ON relation_edges(source_node_id, target_node_id, relation_type);
 CREATE INDEX IF NOT EXISTS idx_memory_access_memory ON memory_access_log(memory_id, memory_type);
 CREATE INDEX IF NOT EXISTS idx_gateway_session_lookup
     ON gateway_session_mappings(platform, session_mode, session_key);

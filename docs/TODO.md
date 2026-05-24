@@ -227,6 +227,12 @@ P1 Agent Loop implementation notes:
   `--candidate-id ... --approve-stored`, `--reject-stored`, `--edit-stored`,
   and `--inspect-stored`; separate `alpha memory candidates/approve/reject/edit`
   commands remain future usability work.
+- Session compression now projects structured task state instead of deterministic
+  recap text and carries that state through `session_context_states.metadata`.
+  Consolidation can build source-backed `scene` and `persona` semantic
+  projections from reviewed active atomic evidence, with drill-down to active
+  atomic memories and transcript messages. Graph nodes/edges are limited to an
+  audit index over reviewed, source-backed non-user facts.
 
 ## P1: Feishu Integration
 

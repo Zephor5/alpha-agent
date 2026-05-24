@@ -329,24 +329,25 @@ Goal: add higher-level memory layers only after the atomic layer is reliable.
 
 Tasks:
 
-- [ ] Replace deterministic session compression text with a structured session
+- [x] Replace deterministic session compression text with a structured session
   state projection: current goal, decisions, open questions, pending tasks,
   user constraints, relevant files/entities, and last action.
-- [ ] Add scene memory as topic/project summaries built from active atomic
-  memories and source transcripts.
-- [ ] Add persona/profile memory as a low-frequency, high-stability projection
-  from reviewed semantic memories and scene summaries.
-- [ ] Connect `entity_nodes` and `relation_edges` to extraction/consolidation
-  only where they support retrieval, conflict detection, or audit.
-- [ ] Add drill-down from persona/scene items back to atomic memories and source
+- [x] Add scene memory as topic/project summaries built from reviewed active
+  atomic memories and source transcripts.
+- [x] Add persona/profile memory as a low-frequency, high-stability projection
+  from reviewed semantic memories, optionally using scene summaries as context
+  without exposing scene ids as persona source evidence.
+- [x] Connect `entity_nodes` and `relation_edges` to consolidation as an audit
+  index over reviewed source-backed non-user facts.
+- [x] Add drill-down from persona/scene items back to atomic memories and source
   messages.
 
 Acceptance criteria:
 
-- [ ] Session summaries preserve task state better than message clipping.
-- [ ] Persona updates are infrequent, source-backed, and reversible.
-- [ ] Scene summaries reduce repeated retrieval noise for long-running topics.
-- [ ] Graph data is justified by an actual query or audit use case.
+- [x] Session summaries preserve task state better than message clipping.
+- [x] Persona updates are infrequent, source-backed, and reversible.
+- [x] Scene summaries reduce repeated retrieval noise for long-running topics.
+- [x] Graph data is justified by an audit drill-down/search use case.
 
 Likely files:
 
@@ -356,13 +357,13 @@ Likely files:
 - `src/alpha_agent/memory/models.py`
 - `src/alpha_agent/memory/schema.sql`
 - `src/alpha_agent/memory/store.py`
-- `docs/memory_design.md`
+- `docs/cognition/memory_design.md`
 
 Checkpoint:
 
-- [ ] Long-session prompt tests show stable task continuity.
-- [ ] Persona/scene retrieval never overrides explicit current user requests.
-- [ ] Documentation explains the distinction between transcript, atomic memory,
+- [x] Long-session prompt tests show stable task continuity.
+- [x] Persona/scene retrieval never overrides explicit current user requests.
+- [x] Documentation explains the distinction between transcript, atomic memory,
   scene, and persona.
 
 ## Phase 7: Operations And Product UX

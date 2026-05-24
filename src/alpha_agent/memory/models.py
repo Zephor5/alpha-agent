@@ -260,6 +260,15 @@ class SemanticMemoryDecision:
 
 
 @dataclass(frozen=True)
+class SemanticMemoryDrillDown:
+    """Audit path from a projection memory to atomic memories and source messages."""
+
+    memory: SemanticMemory
+    atomic_memories: list[SemanticMemory]
+    source_messages: list[ConversationMessage]
+
+
+@dataclass(frozen=True)
 class ProceduralMemory:
     """Reusable way of doing something."""
 

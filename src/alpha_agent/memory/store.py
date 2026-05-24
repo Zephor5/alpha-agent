@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TypeVar
 
+from alpha_agent.graph.models import EntityNode, RelationEdge, RelationEdgeAudit
 from alpha_agent.memory.models import (
     ConversationMessage,
     ConversationRole,
@@ -20,6 +21,7 @@ from alpha_agent.memory.models import (
     ProceduralMemory,
     RuntimeTrace,
     SemanticMemory,
+    SemanticMemoryDrillDown,
     SessionContextState,
 )
 from alpha_agent.utils.ids import new_id
@@ -57,6 +59,13 @@ def _loads_dict_list(value: str | None) -> list[dict[str, Any]]:
     return [item for item in loaded if isinstance(item, dict)]
 
 
+def _metadata_string_list(metadata: dict[str, Any], key: str) -> list[str]:
+    value = metadata.get(key)
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
 def _scope_from_row(row: sqlite3.Row) -> MemoryScope:
     record = _loads_dict(row["scope_metadata"])
     record["kind"] = row["scope_kind"]
@@ -89,6 +98,30 @@ def _normalize_optional(value: str | None) -> str | None:
         return None
     normalized = " ".join(value.casefold().split()).strip()
     return normalized or None
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value not in values:
+        values.append(value)
+
+
+def _dedupe_memories(memories: list[SemanticMemory]) -> list[SemanticMemory]:
+    result: list[SemanticMemory] = []
+    seen: set[str] = set()
+    for memory in memories:
+        if memory.id in seen:
+            continue
+        seen.add(memory.id)
+        result.append(memory)
+    return result
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result
 
 
 class MemoryStore:
@@ -1284,6 +1317,198 @@ class MemoryStore:
             ).fetchall()
         return [self._memory_decision_from_row(row) for row in rows]
 
+    def drill_down_semantic_memory(self, memory_id: str) -> SemanticMemoryDrillDown:
+        """Return projection evidence as active atomic memories and source messages."""
+
+        root = self.get_semantic_memory(memory_id)
+        if root is None:
+            raise KeyError(f"semantic memory not found: {memory_id}")
+        atomic_memories: list[SemanticMemory] = []
+        message_ids: list[str] = []
+        seen_memory_ids: set[str] = set()
+
+        def visit(memory: SemanticMemory) -> None:
+            if memory.id in seen_memory_ids:
+                return
+            seen_memory_ids.add(memory.id)
+            for source_id in memory.source_memory_ids:
+                source_memory = self.get_semantic_memory(source_id)
+                if source_memory is None:
+                    continue
+                if source_memory.memory_type in {"scene", "persona"}:
+                    visit(source_memory)
+                    continue
+                if source_memory.status == "active":
+                    atomic_memories.append(source_memory)
+                    for message_id in source_memory.source_memory_ids:
+                        _append_unique(message_ids, message_id)
+                    for message_id in _metadata_string_list(
+                        source_memory.metadata,
+                        "source_message_ids",
+                    ):
+                        _append_unique(message_ids, message_id)
+
+        if root.memory_type in {"scene", "persona"}:
+            visit(root)
+        elif root.status == "active":
+            atomic_memories.append(root)
+            for source_id in root.source_memory_ids:
+                _append_unique(message_ids, source_id)
+        return SemanticMemoryDrillDown(
+            memory=root,
+            atomic_memories=_dedupe_memories(atomic_memories),
+            source_messages=self.list_conversation_messages_by_ids(message_ids),
+        )
+
+    def list_entity_nodes(self, limit: int = 100) -> list[EntityNode]:
+        """List entity nodes ordered by salience."""
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM entity_nodes ORDER BY salience DESC, name ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._entity_node_from_row(row) for row in rows]
+
+    def list_relation_edges(self, limit: int = 100) -> list[RelationEdge]:
+        """List graph relation edges with evidence memory ids."""
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM relation_edges ORDER BY confidence DESC, id ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._relation_edge_from_row(row) for row in rows]
+
+    def list_reviewed_semantic_memory_ids(
+        self,
+        *,
+        statuses: list[str] | None = None,
+    ) -> set[str]:
+        """Return memory ids promoted from approved or auto-approved candidates."""
+
+        candidate_statuses = statuses or ["approved", "auto_approved"]
+        placeholders = ",".join("?" for _ in candidate_statuses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT d.memory_id
+                FROM memory_decisions d
+                JOIN memory_candidates c ON c.id = d.candidate_id
+                WHERE d.memory_id IS NOT NULL
+                  AND c.status IN ({placeholders})
+                  AND d.action IN ('store', 'update', 'merge', 'supersede')
+                """,
+                candidate_statuses,
+            ).fetchall()
+        return {str(row["memory_id"]) for row in rows if row["memory_id"]}
+
+    def audit_relation_edges(
+        self,
+        *,
+        source_name: str | None = None,
+        target_name: str | None = None,
+        relation_type: str | None = None,
+        limit: int = 20,
+    ) -> list[RelationEdgeAudit]:
+        """Search relation edges and resolve active reviewed evidence for audit."""
+
+        conditions: list[str] = []
+        params: list[Any] = []
+        if source_name:
+            conditions.append("lower(source.name) = lower(?)")
+            params.append(source_name)
+        if target_name:
+            conditions.append("lower(target.name) = lower(?)")
+            params.append(target_name)
+        if relation_type:
+            conditions.append("edge.relation_type = ?")
+            params.append(relation_type)
+        where = " AND ".join(conditions) if conditions else "1 = 1"
+        params.append(limit)
+        reviewed_ids = self.list_reviewed_semantic_memory_ids()
+        audits: list[RelationEdgeAudit] = []
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    edge.id AS edge_id,
+                    edge.source_node_id,
+                    edge.target_node_id,
+                    edge.relation_type,
+                    edge.evidence_memory_ids,
+                    edge.confidence,
+                    edge.metadata AS edge_metadata,
+                    source.id AS source_id,
+                    source.name AS source_name,
+                    source.kind AS source_kind,
+                    source.aliases AS source_aliases,
+                    source.salience AS source_salience,
+                    source.metadata AS source_metadata,
+                    target.id AS target_id,
+                    target.name AS target_name,
+                    target.kind AS target_kind,
+                    target.aliases AS target_aliases,
+                    target.salience AS target_salience,
+                    target.metadata AS target_metadata
+                FROM relation_edges edge
+                JOIN entity_nodes source ON source.id = edge.source_node_id
+                JOIN entity_nodes target ON target.id = edge.target_node_id
+                WHERE {where}
+                ORDER BY edge.confidence DESC, edge.id ASC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        for row in rows:
+            edge = RelationEdge(
+                id=row["edge_id"],
+                source_node_id=row["source_node_id"],
+                target_node_id=row["target_node_id"],
+                relation_type=row["relation_type"],
+                evidence_memory_ids=_loads_list(row["evidence_memory_ids"]),
+                confidence=float(row["confidence"]),
+                metadata=_loads_dict(row["edge_metadata"]),
+            )
+            evidence = [
+                memory
+                for memory_id in edge.evidence_memory_ids
+                if (memory := self.get_semantic_memory(memory_id)) is not None
+                and memory.status == "active"
+                and memory.id in reviewed_ids
+            ]
+            source_messages = self.list_conversation_messages_by_ids(
+                _dedupe_strings(
+                    [message_id for memory in evidence for message_id in memory.source_memory_ids]
+                )
+            )
+            if not evidence:
+                continue
+            audits.append(
+                RelationEdgeAudit(
+                    edge=edge,
+                    source_node=EntityNode(
+                        id=row["source_id"],
+                        name=row["source_name"],
+                        kind=row["source_kind"],
+                        aliases=_loads_list(row["source_aliases"]),
+                        salience=float(row["source_salience"]),
+                        metadata=_loads_dict(row["source_metadata"]),
+                    ),
+                    target_node=EntityNode(
+                        id=row["target_id"],
+                        name=row["target_name"],
+                        kind=row["target_kind"],
+                        aliases=_loads_list(row["target_aliases"]),
+                        salience=float(row["target_salience"]),
+                        metadata=_loads_dict(row["target_metadata"]),
+                    ),
+                    evidence_memories=evidence,
+                    source_messages=source_messages,
+                )
+            )
+        return audits
+
     def stats(self) -> dict[str, int]:
         """Return counts by memory table."""
 
@@ -1480,5 +1705,26 @@ class MemoryStore:
             reviewer=row["reviewer"],
             rationale=row["rationale"],
             created_at=row["created_at"],
+            metadata=_loads_dict(row["metadata"]),
+        )
+
+    def _entity_node_from_row(self, row: sqlite3.Row) -> EntityNode:
+        return EntityNode(
+            id=row["id"],
+            name=row["name"],
+            kind=row["kind"],
+            aliases=_loads_list(row["aliases"]),
+            salience=float(row["salience"]),
+            metadata=_loads_dict(row["metadata"]),
+        )
+
+    def _relation_edge_from_row(self, row: sqlite3.Row) -> RelationEdge:
+        return RelationEdge(
+            id=row["id"],
+            source_node_id=row["source_node_id"],
+            target_node_id=row["target_node_id"],
+            relation_type=row["relation_type"],
+            evidence_memory_ids=_loads_list(row["evidence_memory_ids"]),
+            confidence=float(row["confidence"]),
             metadata=_loads_dict(row["metadata"]),
         )

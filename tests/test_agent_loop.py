@@ -426,12 +426,13 @@ def test_agent_compresses_older_context_preserves_tail_and_transcript(
     summary_messages = [
         message
         for message in request
-        if "## Compressed Session Context" in str(message.get("content", ""))
+        if "## Structured Session State" in str(message.get("content", ""))
     ]
     assert len(summary_messages) == 1
     summary_content = str(summary_messages[0]["content"])
-    assert "older user context" in summary_content
+    assert "### Last Action" in summary_content
     assert "older assistant context" in summary_content
+    assert "Structured Session State" in state.summary
     assert "CURRENT UNIQUE REQUEST" not in summary_content
     assert {"role": "user", "content": older_user.raw_content} not in request
     assert {"role": "assistant", "content": older_assistant.raw_content} not in request
@@ -454,6 +455,91 @@ def test_agent_compresses_older_context_preserves_tail_and_transcript(
         "context_compression.started",
         "context_compression.completed",
     }
+
+
+def test_agent_compression_carries_previous_structured_projection_metadata(
+    tmp_path: Path,
+) -> None:
+    class RecordingProvider:
+        name = "recording-provider"
+
+        def complete(self, messages: list[ChatMessage], **kwargs: Any) -> LLMResponse:
+            return LLMResponse(
+                content="compressed response",
+                model="mock",
+                provider=self.name,
+                metadata={},
+                finish_reason="stop",
+            )
+
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    old_source = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="initial context",
+    )
+    store.upsert_session_context_state(
+        SessionContextState(
+            session_id="s1",
+            compressed_until_ordinal=old_source.ordinal,
+            summary=(
+                "## Structured Session State\n\n"
+                "### Current Goal\n- clipped old goal\n\n"
+                "### Decisions\n- None captured.\n\n"
+                "### Open Questions\n- None captured.\n\n"
+                "### Pending Tasks\n- None captured.\n\n"
+                "### User Constraints\n- None captured.\n\n"
+                "### Relevant Files / Entities\n- None captured.\n\n"
+                "### Last Action\n- clipped"
+            ),
+            summary_source_message_ids=[old_source.id],
+            compression_version="structured-session-state-v1",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+            metadata={
+                "projection": {
+                    "current_goal": "Complete Phase 6 architecture fixes",
+                    "decisions": ["Keep graph as an audit index"],
+                    "open_questions": ["Should stale scene evidence be superseded?"],
+                    "pending_tasks": ["Add lifecycle-safe projection tests"],
+                    "user_constraints": ["Do not enter Phase 7"],
+                    "relevant_files_entities": [
+                        "src/alpha_agent/memory/consolidation.py"
+                    ],
+                    "last_action": "1. user: reviewed Phase 6 findings",
+                }
+            },
+        )
+    )
+    for index in range(4):
+        store.append_conversation_message(
+            session_id="s1",
+            role="user" if index % 2 == 0 else "assistant",
+            raw_content=f"new compressible context {index} " + ("detail " * 80),
+        )
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=RecordingProvider(),
+        retriever=MemoryRetriever(store),
+        context_max_prompt_tokens=80,
+        context_compression_threshold_ratio=0.5,
+        context_recent_tail_messages=1,
+    )
+
+    agent.respond("continue", session_id="s1")
+
+    state = store.get_session_context_state("s1")
+    assert state is not None
+    projection = state.metadata["projection"]
+    assert "Keep graph as an audit index" in projection["decisions"]
+    assert "Should stale scene evidence be superseded?" in projection["open_questions"]
+    assert "Add lifecycle-safe projection tests" in projection["pending_tasks"]
+    assert "Do not enter Phase 7" in projection["user_constraints"]
+    assert "src/alpha_agent/memory/consolidation.py" in projection[
+        "relevant_files_entities"
+    ]
+    assert projection["last_action"]
 
 
 def test_agent_keeps_tool_replay_intact_when_compression_boundary_would_split_it(

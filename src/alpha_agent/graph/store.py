@@ -29,6 +29,14 @@ def _loads_dict(value: str | None) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result
+
+
 class GraphStore:
     """Small optional store for entity nodes and relation edges."""
 
@@ -94,7 +102,7 @@ class GraphStore:
         confidence: float = 0.5,
         metadata: dict[str, Any] | None = None,
     ) -> RelationEdge:
-        """Insert a relation edge."""
+        """Insert or merge a relation edge by endpoint and relation type."""
 
         edge = RelationEdge(
             id=new_id("edge"),
@@ -106,6 +114,43 @@ class GraphStore:
             metadata=metadata or {},
         )
         with self.connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT * FROM relation_edges
+                WHERE source_node_id = ?
+                  AND target_node_id = ?
+                  AND relation_type = ?
+                """,
+                (edge.source_node_id, edge.target_node_id, edge.relation_type),
+            ).fetchone()
+            if existing is not None:
+                merged_evidence = _dedupe(
+                    [
+                        *_loads_list(existing["evidence_memory_ids"]),
+                        *edge.evidence_memory_ids,
+                    ]
+                )
+                merged_metadata = {**_loads_dict(existing["metadata"]), **edge.metadata}
+                conn.execute(
+                    """
+                    UPDATE relation_edges
+                    SET evidence_memory_ids = ?,
+                        confidence = max(confidence, ?),
+                        metadata = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        _dumps(merged_evidence),
+                        edge.confidence,
+                        _dumps(merged_metadata),
+                        existing["id"],
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM relation_edges WHERE id = ?",
+                    (existing["id"],),
+                ).fetchone()
+                return self._edge_from_row(row)
             conn.execute(
                 """
                 INSERT INTO relation_edges

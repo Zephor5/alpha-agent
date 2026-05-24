@@ -626,6 +626,12 @@ class AlphaAgent:
             if session_context.state is not None
             else []
         )
+        previous_projection = (
+            session_context.state.metadata.get("projection", {})
+            if session_context.state is not None
+            and isinstance(session_context.state.metadata.get("projection"), dict)
+            else {}
+        )
         failure_stage = "compress"
         try:
             compression_result = self.context_compressor.compress(
@@ -638,6 +644,7 @@ class AlphaAgent:
                     budget=budget,
                     compressed_until_ordinal=session_context.compressed_until_ordinal,
                     previous_summary_source_message_ids=previous_summary_source_message_ids,
+                    previous_projection=previous_projection,
                 ),
             )
             failure_stage = "validation"

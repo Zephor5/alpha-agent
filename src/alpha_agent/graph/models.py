@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from alpha_agent.memory.models import ConversationMessage, SemanticMemory
+
 
 @dataclass(frozen=True)
 class EntityNode:
@@ -29,3 +31,14 @@ class RelationEdge:
     evidence_memory_ids: list[str] = field(default_factory=list)
     confidence: float = 0.5
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RelationEdgeAudit:
+    """Relation edge plus active evidence memories and transcript sources."""
+
+    edge: RelationEdge
+    source_node: EntityNode
+    target_node: EntityNode
+    evidence_memories: list[SemanticMemory]
+    source_messages: list[ConversationMessage]

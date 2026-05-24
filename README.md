@@ -303,7 +303,7 @@ Retrieval uses:
 - Active status.
 - Source confidence.
 - Lightweight entity hints from title-cased names.
-- Query expansion from current query entities, compressed session task text, and
+- Query expansion from current query entities, structured session state, and
   high-confidence profile/preference memories.
 
 The ranking formula is explicit:
@@ -326,6 +326,33 @@ and selection reasons. Prompt construction applies independent budgets for
 semantic, episodic, procedural, and session context so one layer cannot consume
 the full context message.
 
+Session compression now stores a structured session-state projection instead of
+message-clipping text. The projection tracks current goal, decisions, open
+questions, pending tasks, user constraints, relevant files/entities, and the
+last compressed action in `session_context_states.metadata["projection"]`.
+Subsequent compression reads that structured projection instead of recovering
+state from clipped Markdown.
+
+Consolidation can also create two source-backed higher-level semantic memory
+types:
+
+- `scene`: topic/project summaries built from reviewed active atomic semantic
+  memories that still resolve to transcript source messages.
+- `persona`: low-frequency profile summaries built only from active,
+  high-confidence, high-stability reviewed memories; scene summaries may inform
+  wording but are not exposed as persona source ids.
+
+Persona and scene items are reference-only prompt context. They include source
+memory ids and source message ids for active reviewed evidence only, and can be
+drilled down to active atomic semantic memories plus original transcript
+messages. Superseded projection rows retain older evidence for audit history,
+but stale source ids are not shown as active prompt evidence.
+
+Graph data remains auxiliary: consolidation only writes entity nodes and
+relation edges for reviewed, source-backed non-user facts. The graph is an audit
+index: relation search resolves active evidence memories and transcript source
+messages, while stale edge evidence is filtered out of active audit results.
+
 ## Current Limitations
 
 - No vector retrieval yet; non-vector retrieval remains the only active
@@ -337,7 +364,8 @@ the full context message.
 - Memory extraction defaults to deterministic heuristics; LLM-assisted
   extraction is available as an injected component with local JSON schema
   validation.
-- Graph memory is minimal.
+- Graph memory is intentionally narrow and evidence-backed; it is not a general
+  graph aggregation layer.
 
 ## Roadmap
 

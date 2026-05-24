@@ -16,9 +16,14 @@
 > Implementation note: Alpha's current runtime no longer uses a separate
 > priority-pruned `working_memory` table for recent conversation context.
 > Short-term session context is now derived from append-only
-> `conversation_messages` plus an optional compressed `session_context_states`
-> summary. Long-term retrieval remains semantic/episodic/procedural and
-> query-dependent.
+> `conversation_messages` plus optional `session_context_states` rows whose
+> `metadata.projection` stores structured state. The projection records current
+> goal, decisions, open questions, pending tasks, user constraints, relevant
+> files/entities, and last action, and later compression reads that metadata
+> instead of reconstructing state from clipped Markdown.
+> Long-term retrieval remains query-dependent across episodic, semantic, and
+> procedural memory, with scene/persona projections stored as source-backed
+> semantic memories.
 
 ---
 
@@ -182,6 +187,19 @@ M0 的作用：
 ```
 
 M0 可以放在 Redis、内存、session store 里。
+
+Alpha 当前实现里，M0 不是单独表，而是：
+
+```text
+conversation_messages
+  + session_context_states.structured_projection
+  + uncompressed transcript tail
+```
+
+`session_context_states` 不再保存普通“压缩聊天摘要”，而是保存可检查的
+session state：current goal、decisions、open questions、pending tasks、
+user constraints、relevant files/entities、last action。当前用户消息仍然是
+prompt 中最后一条真实用户消息，session state 只能作为低优先级背景。
 
 ---
 
@@ -573,6 +591,17 @@ M3 的作用：
 4. 支持 drill-down 到 M2/M1
 ```
 
+Alpha 当前实现将 scene 保存为 `semantic_memories.memory_type = "scene"`，
+而不是新增独立表。scene 只从 reviewed、active atomic semantic memories
+生成，并且这些 atomic memories 必须还能解析到 `conversation_messages`
+源消息。reviewed 当前定义为 approved 或 auto_approved candidate lineage
+产生的 semantic memory。scene 的 active `source_memory_ids` 只指向仍然 active
+的 reviewed M2 原子记忆，metadata 中的 `source_message_ids` 指向当前 active
+证据对应的 M1 transcript。source memory 被 deleted、superseded 或
+conflict_review 后，新的 active scene 会去掉该 source；旧 scene 只作为
+superseded audit chain 保留。`drill_down_semantic_memory()` 可以从 active scene
+回溯到 active atomic memories 和原始消息。
+
 ---
 
 # 9. M4：用户画像 Persona / Profile Memory
@@ -682,6 +711,15 @@ CREATE TABLE persona_items (
 ```
 
 M4 不能频繁更新。它应该由 M3 聚合后定期更新。
+
+Alpha 当前实现将 persona 保存为
+`semantic_memories.memory_type = "persona"`。persona 只使用 active、
+high-confidence、high-stability 的 reviewed semantic memories 作为直接
+source evidence。scene summary 可以作为生成 persona 文案的上下文，但不能作为
+persona 的 `source_memory_ids` 暴露；persona drill-down 必须回到 atomic
+semantic memories 和 transcript messages。pending/rejected candidates 不参与
+persona 生成。persona 和 scene 在 prompt 中都属于 reference-only context，
+不能覆盖当前用户消息中的显式要求。
 
 ---
 

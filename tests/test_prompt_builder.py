@@ -15,6 +15,11 @@ from alpha_agent.memory.models import (
     SessionContextState,
 )
 from alpha_agent.memory.store import MemoryStore
+from alpha_agent.runtime.context_compression import (
+    CompressionBudget,
+    CompressionFocus,
+    DeterministicContextCompressor,
+)
 from alpha_agent.runtime.prompt_builder import PromptBuilder
 from alpha_agent.runtime.session_context import SessionContextManager, SessionContextProjection
 
@@ -97,6 +102,57 @@ def test_prompt_includes_memory_sections() -> None:
     assert sum(1 for message in messages if message["role"] == "system") == 1
 
 
+def test_prompt_keeps_scene_and_persona_reference_only_below_current_request() -> None:
+    context = RetrievedContext(
+        semantic_memories=[
+            SemanticMemory(
+                id="sem_persona",
+                content="User usually prefers Python examples.",
+                memory_type="persona",
+                subject="user.profile",
+                predicate="summarizes",
+                object="Python examples",
+                entities=["user", "Python"],
+                confidence=0.9,
+                salience=0.8,
+                stability=0.95,
+                source_memory_ids=["sem_atomic"],
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                metadata={"projection_layer": "persona", "source_message_ids": ["msg-1"]},
+            ),
+            SemanticMemory(
+                id="sem_scene",
+                content="Project Atlas is migrating memory retrieval.",
+                memory_type="scene",
+                subject="scene:project atlas",
+                predicate="summarizes",
+                object="memory retrieval migration",
+                entities=["Project Atlas"],
+                confidence=0.88,
+                salience=0.75,
+                stability=0.85,
+                source_memory_ids=["sem_atomic"],
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                metadata={"projection_layer": "scene", "source_message_ids": ["msg-1"]},
+            ),
+        ],
+        episodic_memories=[],
+        procedural_memories=[],
+    )
+
+    messages = PromptBuilder().build("Use Go for this answer.", context)
+    context_prompt = cast(str, messages[1].get("content"))
+
+    assert "never override explicit instructions in the current user message" in context_prompt
+    assert "### Persona / Profile Projection" in context_prompt
+    assert "### Scene Summaries" in context_prompt
+    assert "source_memories=sem_atomic" in context_prompt
+    assert "source_messages=msg-1" in context_prompt
+    assert messages[-1] == {"role": "user", "content": "Use Go for this answer."}
+
+
 def test_prompt_omits_empty_context_message() -> None:
     context = RetrievedContext(
         semantic_memories=[],
@@ -109,6 +165,82 @@ def test_prompt_omits_empty_context_message() -> None:
     assert [message["role"] for message in messages] == ["system", "user"]
     assert messages[-1]["content"] == "hello"
     assert sum(1 for message in messages if message["role"] == "system") == 1
+
+
+def test_deterministic_context_compressor_outputs_structured_session_state() -> None:
+    messages = [
+        ConversationMessage(
+            id="msg_1",
+            session_id="s1",
+            ordinal=1,
+            role="user",
+            raw_content=(
+                "Goal: finish memory Phase 6. Must avoid Phase 7. "
+                "Relevant file src/alpha_agent/memory/store.py."
+            ),
+            model_content=None,
+            tool_call_id=None,
+            tool_calls=[],
+            tool_result_id=None,
+            provider_metadata={},
+            source_metadata={},
+            created_at="2026-01-01T00:00:00+00:00",
+        ),
+        ConversationMessage(
+            id="msg_2",
+            session_id="s1",
+            ordinal=2,
+            role="assistant",
+            raw_content="Decision: store scene summaries as source-backed projections.",
+            model_content=None,
+            tool_call_id=None,
+            tool_calls=[],
+            tool_result_id=None,
+            provider_metadata={},
+            source_metadata={},
+            created_at="2026-01-01T00:00:01+00:00",
+        ),
+        ConversationMessage(
+            id="msg_3",
+            session_id="s1",
+            ordinal=3,
+            role="user",
+            raw_content="Open question: should graph edges exist only when auditable?",
+            model_content=None,
+            tool_call_id=None,
+            tool_calls=[],
+            tool_result_id=None,
+            provider_metadata={},
+            source_metadata={},
+            created_at="2026-01-01T00:00:02+00:00",
+        ),
+    ]
+
+    result = DeterministicContextCompressor().compress(
+        messages,
+        previous_summary="",
+        focus=CompressionFocus(
+            session_id="s1",
+            current_user_message="CURRENT REQUEST SHOULD NOT ENTER SUMMARY",
+            prompt_token_estimate=500,
+            budget=CompressionBudget(max_summary_tokens=256),
+            compressed_until_ordinal=0,
+        ),
+    )
+
+    assert "## Structured Session State" in result.summary
+    assert "### Current Goal" in result.summary
+    assert "finish memory Phase 6" in result.summary
+    assert "### Decisions" in result.summary
+    assert "source-backed projections" in result.summary
+    assert "### Open Questions" in result.summary
+    assert "graph edges" in result.summary
+    assert "### User Constraints" in result.summary
+    assert "avoid Phase 7" in result.summary
+    assert "src/alpha_agent/memory/store.py" in result.summary
+    assert "CURRENT REQUEST" not in result.summary
+    assert result.metadata["projection"]["current_goal"]
+    assert result.metadata["projection"]["last_action"]
 
 
 def test_prompt_keeps_irrelevant_procedure_body_out_of_context() -> None:
@@ -278,7 +410,7 @@ def test_prompt_applies_session_context_budget() -> None:
     )
     rendered = "\n".join(str(message.get("content", "")) for message in messages)
 
-    assert "## Compressed Session Context" in rendered
+    assert "## Structured Session State" in rendered
     assert "..." in rendered
     assert rendered.count("long detail") < 5
     assert rendered.count("message detail") < 5
@@ -453,7 +585,7 @@ def test_prompt_projects_session_summary_and_prior_messages_before_current_user(
         "assistant",
         "user",
     ]
-    assert "## Compressed Session Context (Reference Only)" in cast(
+    assert "## Structured Session State (Reference Only)" in cast(
         str,
         messages[1]["content"],
     )
