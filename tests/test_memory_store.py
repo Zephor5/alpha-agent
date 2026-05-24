@@ -342,3 +342,53 @@ def test_memory_candidates_and_decisions_are_auditable(tmp_path: Path) -> None:
     assert store.list_memory_candidates(status="pending") == []
     assert store.list_memory_candidates(status="rejected")[0].source_message_ids == ["msg-1"]
     assert store.stats()["memory_decisions"] == 1
+
+
+def test_memory_candidate_audit_recovers_sources_and_decision_history(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    now = utc_now_iso()
+    source = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="Remember that I prefer green tea",
+        source_metadata={"message_id": "platform-1"},
+    )
+    candidate = MemoryCandidate(
+        id="cand-audit",
+        candidate_type="semantic",
+        proposed_layer="semantic",
+        content="User prefers green tea",
+        weak_structure={"subject": "user", "predicate": "prefers", "object": "green tea"},
+        salience=0.9,
+        confidence=0.8,
+        scope=MemoryScope.default(),
+        source_message_ids=[source.id],
+        status="pending",
+        created_at=now,
+        updated_at=now,
+    )
+
+    store.insert_memory_candidate(candidate)
+    store.insert_memory_decision(
+        MemoryDecision(
+            id="decision-1",
+            candidate_id="cand-audit",
+            action="pending",
+            memory_type=None,
+            memory_id=None,
+            reviewer="memory_controller",
+            rationale="needs review",
+            created_at=now,
+        )
+    )
+
+    sources = store.list_conversation_messages_by_ids([source.id, "missing-msg"])
+    decisions = store.list_memory_decisions("cand-audit")
+
+    assert [message.id for message in sources] == [source.id]
+    assert sources[0].raw_content == "Remember that I prefer green tea"
+    assert decisions[0].action == "pending"
+    assert decisions[0].rationale == "needs review"

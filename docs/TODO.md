@@ -205,18 +205,21 @@ P1 Agent Loop implementation notes:
   Procedural memories require explicit textual relevance before their procedure
   bodies can enter the prompt.
 - `alpha memory review MESSAGE --session ...` previews extracted candidates
-  without writing semantic/episodic/procedural memory. CLI flags support
-  approve-all, reject-all, per-candidate approve/reject, and selected candidate
-  edit-and-approve. Platform review commands for Feishu/WeChat remain future
-  adapter work tracked in the integration sections.
+  without writing durable semantic/episodic/procedural memory unless approved.
+  CLI flags support approve-all, reject-all, per-candidate approve/reject, and
+  selected candidate edit-and-approve. Rejected one-shot candidates are stored
+  as rejected candidates with decision rows for audit. Platform review commands
+  for Feishu/WeChat remain future adapter work tracked in the integration
+  sections.
 - Long-term memory now carries an explicit scope. CLI turns use the deterministic
   `user:default` scope, gateway session metadata can derive chat/thread scopes,
   and retrieval filters by the allowed scope set before ranking.
 - Runtime extraction now persists `memory_candidates` first and records
-  `memory_decisions` for pending, auto-approve, approve, reject, and promotion
-  outcomes. Stored candidate review is available through
-  `alpha memory review --list-pending --candidate-id ... --approve-stored` or
-  `--reject-stored`; separate `alpha memory candidates/approve/reject/edit`
+  `memory_decisions` for pending, auto-approve, approve, reject, edit, and
+  promotion outcomes. Stored candidate review is available through
+  `alpha memory review --list-pending`, `--list-stored`,
+  `--candidate-id ... --approve-stored`, `--reject-stored`, `--edit-stored`,
+  and `--inspect-stored`; separate `alpha memory candidates/approve/reject/edit`
   commands remain future usability work.
 
 ## P1: Feishu Integration

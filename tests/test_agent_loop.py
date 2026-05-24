@@ -69,6 +69,11 @@ def test_mock_agent_loop_stores_user_and_assistant_messages(tmp_path: Path) -> N
     }
     assert len(semantic) == 1
     assert candidates
+    for candidate in candidates:
+        assert [decision.action for decision in store.list_memory_decisions(candidate.id)] == [
+            "auto_approve",
+            "promote",
+        ]
     assert result.debug["persisted_memory_count"] >= 1
     assert result.debug["memory_scope"]["scope_key"] == "user:default"
     assert result.debug["extracted_memory_count"] >= 1

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from alpha_agent.memory.models import EpisodicMemory, MemoryScope
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.utils.ids import new_id
@@ -22,6 +24,7 @@ class EpisodicMemoryManager:
         salience: float,
         confidence: float = 0.7,
         scope: MemoryScope | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> EpisodicMemory:
         """Create an episodic memory from important events."""
 
@@ -42,7 +45,7 @@ class EpisodicMemoryManager:
             metadata={},
             scope=scope or MemoryScope.default(),
         )
-        return self.store.insert_episodic_memory(memory)
+        return self.store.insert_episodic_memory(memory, conn=conn)
 
     def retrieve_relevant(self, query: str, limit: int = 8) -> list[EpisodicMemory]:
         """Retrieve relevant episodic memories using non-vector search."""

@@ -255,6 +255,26 @@ class MemoryStore:
             rows = conn.execute(query, params).fetchall()
         return [self._conversation_message_from_row(row) for row in rows]
 
+    def list_conversation_messages_by_ids(
+        self,
+        message_ids: list[str],
+    ) -> list[ConversationMessage]:
+        """Return transcript messages for the given ids, preserving requested order."""
+
+        if not message_ids:
+            return []
+        placeholders = ",".join("?" for _ in message_ids)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM conversation_messages
+                WHERE id IN ({placeholders})
+                """,
+                message_ids,
+            ).fetchall()
+        by_id = {str(row["id"]): self._conversation_message_from_row(row) for row in rows}
+        return [by_id[message_id] for message_id in message_ids if message_id in by_id]
+
     def latest_conversation_ordinal(self, session_id: str) -> int:
         """Return the latest message ordinal for a session, or zero if it has none."""
 
@@ -861,6 +881,7 @@ class MemoryStore:
         self,
         *,
         status: str | None = None,
+        statuses: list[str] | None = None,
         scopes: list[MemoryScope] | None = None,
         limit: int = 50,
     ) -> list[MemoryCandidate]:
@@ -871,6 +892,10 @@ class MemoryStore:
         if status is not None:
             conditions.append("status = ?")
             params.append(status)
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            conditions.append(f"status IN ({placeholders})")
+            params.extend(statuses)
         scope_sql, scope_params = _scope_filter(scopes)
         query = f"""
             SELECT * FROM memory_candidates
@@ -884,15 +909,21 @@ class MemoryStore:
             rows = conn.execute(query, params).fetchall()
         return [self._memory_candidate_from_row(row) for row in rows]
 
-    def get_memory_candidate(self, candidate_id: str) -> MemoryCandidate | None:
+    def get_memory_candidate(
+        self,
+        candidate_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> MemoryCandidate | None:
         """Return one stored memory candidate by id."""
 
-        with self.connect() as conn:
-            row = conn.execute(
+        def op(db: sqlite3.Connection) -> MemoryCandidate | None:
+            row = db.execute(
                 "SELECT * FROM memory_candidates WHERE id = ?",
                 (candidate_id,),
             ).fetchone()
-        return self._memory_candidate_from_row(row) if row is not None else None
+            return self._memory_candidate_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
 
     def update_memory_candidate_status(
         self,
@@ -914,6 +945,48 @@ class MemoryStore:
                 WHERE id = ?
                 """,
                 (
+                    status,
+                    _dumps(reviewer_metadata or {}),
+                    utc_now_iso(),
+                    candidate_id,
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM memory_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"memory candidate not found: {candidate_id}")
+            return self._memory_candidate_from_row(row)
+
+        return self._with_conn(conn, op)
+
+    def update_memory_candidate_review(
+        self,
+        candidate_id: str,
+        *,
+        content: str,
+        weak_structure: dict[str, Any],
+        status: str,
+        reviewer_metadata: dict[str, Any] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> MemoryCandidate:
+        """Update editable review fields without changing candidate source evidence."""
+
+        def op(db: sqlite3.Connection) -> MemoryCandidate:
+            db.execute(
+                """
+                UPDATE memory_candidates
+                SET content = ?,
+                    weak_structure = ?,
+                    status = ?,
+                    reviewer_metadata = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    content,
+                    _dumps(weak_structure),
                     status,
                     _dumps(reviewer_metadata or {}),
                     utc_now_iso(),
@@ -960,6 +1033,20 @@ class MemoryStore:
             return decision
 
         return self._with_conn(conn, op)
+
+    def list_memory_decisions(self, candidate_id: str) -> list[MemoryDecision]:
+        """Return the ordered decision history for a stored candidate."""
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM memory_decisions
+                WHERE candidate_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (candidate_id,),
+            ).fetchall()
+        return [self._memory_decision_from_row(row) for row in rows]
 
     def stats(self) -> dict[str, int]:
         """Return counts by memory table."""
@@ -1136,5 +1223,18 @@ class MemoryStore:
             reviewer_metadata=_loads_dict(row["reviewer_metadata"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            metadata=_loads_dict(row["metadata"]),
+        )
+
+    def _memory_decision_from_row(self, row: sqlite3.Row) -> MemoryDecision:
+        return MemoryDecision(
+            id=row["id"],
+            candidate_id=row["candidate_id"],
+            action=row["action"],
+            memory_type=row["memory_type"],
+            memory_id=row["memory_id"],
+            reviewer=row["reviewer"],
+            rationale=row["rationale"],
+            created_at=row["created_at"],
             metadata=_loads_dict(row["metadata"]),
         )

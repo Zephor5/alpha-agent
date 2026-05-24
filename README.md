@@ -101,6 +101,10 @@ uv run alpha memory stats
 uv run alpha memory consolidate
 uv run alpha memory review "remember that I prefer concise answers"
 uv run alpha memory review --list-pending
+uv run alpha memory review --list-stored
+uv run alpha memory review --candidate-id <candidate-id> --inspect-stored
+uv run alpha memory review --candidate-id <candidate-id> --edit-stored --edit-content "User prefers concise answers"
+uv run alpha memory review --candidate-id <candidate-id> --approve-stored
 ```
 
 Inspect procedural skills:

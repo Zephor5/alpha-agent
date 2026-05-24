@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from typing import Any
 
@@ -135,19 +136,36 @@ class MemoryController:
                 and auto_approve_explicit
                 and self._should_auto_approve(candidate, explicit_batch=explicit_batch)
             ):
-                approved = self.store.update_memory_candidate_status(
-                    candidate.id,
-                    "auto_approved",
-                    reviewer_metadata={"reviewer": "memory_controller"},
-                )
-                persisted.extend(
-                    self.promote_candidate(
-                        approved,
-                        action="auto_approve",
-                        reviewer="memory_controller",
-                        rationale="explicit high-confidence runtime memory",
+                with self.store.immediate_transaction() as conn:
+                    approved = self.store.update_memory_candidate_status(
+                        candidate.id,
+                        "auto_approved",
+                        reviewer_metadata={"reviewer": "memory_controller"},
+                        conn=conn,
                     )
-                )
+                    self.store.insert_memory_decision(
+                        MemoryDecision(
+                            id=new_id("decision"),
+                            candidate_id=approved.id,
+                            action="auto_approve",
+                            memory_type=None,
+                            memory_id=None,
+                            reviewer="memory_controller",
+                            rationale="explicit high-confidence runtime memory",
+                            created_at=utc_now_iso(),
+                            metadata={},
+                        ),
+                        conn=conn,
+                    )
+                    persisted.extend(
+                        self.promote_candidate(
+                            approved,
+                            action="promote",
+                            reviewer="memory_controller",
+                            rationale="promoted after runtime auto-approval",
+                            conn=conn,
+                        )
+                    )
                 continue
             self.store.insert_memory_decision(
                 MemoryDecision(
@@ -180,11 +198,45 @@ class MemoryController:
         action: str,
         reviewer: str | None,
         rationale: str,
+        conn: sqlite3.Connection | None = None,
     ) -> list[PersistedMemory]:
         """Persist one approved candidate and record the decision."""
 
+        if conn is not None:
+            return self._promote_candidate_in_conn(
+                candidate,
+                action=action,
+                reviewer=reviewer,
+                rationale=rationale,
+                conn=conn,
+            )
+        with self.store.immediate_transaction() as local:
+            return self._promote_candidate_in_conn(
+                candidate,
+                action=action,
+                reviewer=reviewer,
+                rationale=rationale,
+                conn=local,
+            )
+
+    def _promote_candidate_in_conn(
+        self,
+        candidate: MemoryCandidate,
+        *,
+        action: str,
+        reviewer: str | None,
+        rationale: str,
+        conn: sqlite3.Connection,
+    ) -> list[PersistedMemory]:
         extracted = _stored_candidate_to_extracted(candidate)
-        persisted = persist_candidates(self.store, [extracted], scope=candidate.scope)
+        persisted = persist_candidates(
+            self.store,
+            [extracted],
+            scope=candidate.scope,
+            conn=conn,
+        )
+        if not persisted:
+            raise ValueError(f"memory candidate {candidate.id} cannot be promoted")
         for item in persisted:
             self.store.insert_memory_decision(
                 MemoryDecision(
@@ -197,21 +249,8 @@ class MemoryController:
                     rationale=rationale,
                     created_at=utc_now_iso(),
                     metadata={"candidate_type": item.candidate_type},
-                )
-            )
-        if not persisted:
-            self.store.insert_memory_decision(
-                MemoryDecision(
-                    id=new_id("decision"),
-                    candidate_id=candidate.id,
-                    action="skip",
-                    memory_type=None,
-                    memory_id=None,
-                    reviewer=reviewer,
-                    rationale="candidate did not map to a durable memory",
-                    created_at=utc_now_iso(),
-                    metadata={},
-                )
+                ),
+                conn=conn,
             )
         return persisted
 

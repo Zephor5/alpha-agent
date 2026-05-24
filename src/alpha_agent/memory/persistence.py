@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 from alpha_agent.memory.episodic import EpisodicMemoryManager
@@ -24,6 +25,7 @@ def persist_candidates(
     candidates: list[ExtractedMemoryCandidate],
     *,
     scope: MemoryScope | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> list[PersistedMemory]:
     """Persist approved extracted candidates using the runtime memory mapping."""
 
@@ -39,6 +41,7 @@ def persist_candidates(
                 salience=candidate.salience,
                 confidence=candidate.confidence,
                 scope=memory_scope,
+                conn=conn,
             )
             persisted.append(
                 PersistedMemory(
@@ -57,6 +60,7 @@ def persist_candidates(
                 salience=candidate.salience,
                 source_memory_ids=candidate.source_event_ids,
                 scope=memory_scope,
+                conn=conn,
             )
             persisted.append(
                 PersistedMemory(
@@ -72,6 +76,7 @@ def persist_candidates(
                 salience=candidate.salience,
                 confidence=candidate.confidence,
                 scope=memory_scope,
+                conn=conn,
             )
             persisted.append(
                 PersistedMemory(

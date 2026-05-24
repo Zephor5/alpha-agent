@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from alpha_agent.memory.models import MemoryScope, SemanticMemory
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.utils.ids import new_id
@@ -25,6 +27,7 @@ class SemanticMemoryManager:
         source_memory_ids: list[str] | None = None,
         scope: MemoryScope | None = None,
         status: str = "active",
+        conn: sqlite3.Connection | None = None,
     ) -> SemanticMemory:
         """Upsert a stable fact by subject, predicate, and object."""
 
@@ -44,7 +47,7 @@ class SemanticMemoryManager:
             status=status,
             scope=scope or MemoryScope.default(),
         )
-        return self.store.upsert_semantic_memory(memory)
+        return self.store.upsert_semantic_memory(memory, conn=conn)
 
     def retrieve_relevant(self, query: str, limit: int = 8) -> list[SemanticMemory]:
         """Retrieve relevant facts using non-vector search."""

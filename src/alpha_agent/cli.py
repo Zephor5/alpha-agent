@@ -248,6 +248,66 @@ def _render_stored_candidates(candidates: list[Any]) -> None:
         )
 
 
+def _render_candidate_audit(audit: Any) -> None:
+    candidate = audit.candidate
+    console.print(
+        f"Candidate: id={candidate.id} status={candidate.status} "
+        f"type={candidate.candidate_type} scope={candidate.scope.scope_key} "
+        f"source_message_ids={','.join(candidate.source_message_ids)} "
+        f"content={candidate.content}"
+    )
+    source_table = Table(title="Source Transcript Evidence")
+    source_table.add_column("ID")
+    source_table.add_column("Session")
+    source_table.add_column("Ordinal", justify="right")
+    source_table.add_column("Role")
+    source_table.add_column("Content")
+    for message in audit.source_messages:
+        source_table.add_row(
+            message.id,
+            message.session_id,
+            str(message.ordinal),
+            message.role,
+            message.raw_content,
+        )
+    console.print(source_table)
+    decision_table = Table(title="Decision History")
+    decision_table.add_column("Action")
+    decision_table.add_column("Reviewer")
+    decision_table.add_column("Memory")
+    decision_table.add_column("Rationale")
+    decision_table.add_column("Metadata")
+    for decision in audit.decisions:
+        memory_ref = ""
+        if decision.memory_type or decision.memory_id:
+            memory_ref = f"{decision.memory_type or ''}:{decision.memory_id or ''}"
+        metadata = ", ".join(
+            f"{key}={value}" for key, value in decision.metadata.items()
+        )
+        decision_table.add_row(
+            decision.action,
+            decision.reviewer or "",
+            memory_ref,
+            decision.rationale,
+            metadata,
+        )
+    console.print(decision_table)
+    for message in audit.source_messages:
+        console.print(
+            f"Source: id={message.id} session={message.session_id} "
+            f"ordinal={message.ordinal} role={message.role} content={message.raw_content}"
+        )
+    for decision in audit.decisions:
+        metadata = " ".join(
+            f"{key}={value}" for key, value in decision.metadata.items()
+        )
+        console.print(
+            f"Decision: action={decision.action} reviewer={decision.reviewer or ''} "
+            f"memory_type={decision.memory_type or ''} memory_id={decision.memory_id or ''} "
+            f"rationale={decision.rationale} {metadata}".rstrip()
+        )
+
+
 def _memory_access_rows(
     store: MemoryStore,
     *,
@@ -820,9 +880,9 @@ def memory_review(
         typer.Argument(help="Message to extract memory candidates from."),
     ] = None,
     session: Annotated[
-        str,
+        str | None,
         typer.Option("--session", "-s", help="Session id for approved review source events."),
-    ] = "memory-review",
+    ] = None,
     approve_all: Annotated[
         bool,
         typer.Option("--approve-all", help="Store all extracted candidates."),
@@ -833,16 +893,19 @@ def memory_review(
     ] = None,
     reject_all: Annotated[
         bool,
-        typer.Option("--reject-all", help="Reject all extracted candidates without storing."),
+        typer.Option("--reject-all", help="Reject and audit all extracted candidates."),
     ] = False,
     reject: Annotated[
         list[int] | None,
-        typer.Option("--reject", help="1-based candidate index to skip; can be repeated."),
+        typer.Option(
+            "--reject",
+            help="1-based candidate index to reject and audit; can be repeated.",
+        ),
     ] = None,
     candidate_index: Annotated[
-        int,
+        int | None,
         typer.Option("--candidate", help="1-based candidate index to edit and approve."),
-    ] = 1,
+    ] = None,
     edit_content: Annotated[
         str | None,
         typer.Option("--edit-content", help="Replacement content for the edited candidate."),
@@ -863,9 +926,16 @@ def memory_review(
         bool,
         typer.Option("--list-pending", help="List stored pending candidates."),
     ] = False,
+    list_stored: Annotated[
+        bool,
+        typer.Option("--list-stored", help="List stored pending and edited candidates."),
+    ] = False,
     candidate_id: Annotated[
         str | None,
-        typer.Option("--candidate-id", help="Stored candidate id to approve or reject."),
+        typer.Option(
+            "--candidate-id",
+            help="Stored candidate id to approve, reject, edit, or inspect.",
+        ),
     ] = None,
     approve_stored: Annotated[
         bool,
@@ -875,8 +945,21 @@ def memory_review(
         bool,
         typer.Option("--reject-stored", help="Reject a stored candidate by id."),
     ] = False,
+    edit_stored: Annotated[
+        bool,
+        typer.Option("--edit-stored", help="Edit a stored candidate by id."),
+    ] = False,
+    inspect_stored: Annotated[
+        bool,
+        typer.Option(
+            "--inspect-stored",
+            "--inspect-source",
+            "--decision-history",
+            help="Show stored candidate source transcript evidence and decision history.",
+        ),
+    ] = False,
 ) -> None:
-    """Preview, list, approve, or reject memory candidates."""
+    """Preview, list, approve, reject, edit, or inspect memory candidates."""
 
     edit_requested = any(
         value is not None for value in (edit_content, edit_subject, edit_predicate, edit_object)
@@ -889,20 +972,68 @@ def memory_review(
         raise typer.BadParameter("Use either --approve-all or --approve, not both.")
     if approve_indices & reject_indices:
         raise typer.BadParameter("A candidate cannot be both approved and rejected.")
-    if approve_stored and reject_stored:
-        raise typer.BadParameter("Use either --approve-stored or --reject-stored, not both.")
+    stored_actions = [
+        list_pending,
+        list_stored,
+        approve_stored,
+        reject_stored,
+        edit_stored,
+        inspect_stored,
+    ]
+    if sum(1 for action in stored_actions if action) > 1:
+        raise typer.BadParameter(
+            "Use only one stored review action: --approve-stored, --reject-stored, "
+            "--edit-stored, or --inspect-stored."
+        )
+    stored_or_list_requested = any(stored_actions)
+    one_shot_options_requested = (
+        message is not None
+        or approve_all
+        or bool(approve_indices)
+        or reject_all
+        or bool(reject_indices)
+        or candidate_index is not None
+        or session is not None
+    )
+    invalid_edit_fields = edit_requested and not edit_stored
+    invalid_list_candidate_id = candidate_id is not None and (list_pending or list_stored)
+    if stored_or_list_requested and (
+        one_shot_options_requested or invalid_edit_fields or invalid_list_candidate_id
+    ):
+        raise typer.BadParameter(
+            "Stored review actions cannot be combined with MESSAGE, one-shot review "
+            "flags, --candidate, unrelated edit fields, or list filters."
+        )
 
     config = load_config()
     service = MemoryReviewService(_store(config))
     if list_pending:
         _render_stored_candidates(service.list_candidates(status="pending"))
         return
-    if approve_stored or reject_stored:
+    if list_stored:
+        _render_stored_candidates(service.list_reviewable_candidates())
+        return
+    if approve_stored or reject_stored or edit_stored or inspect_stored:
         if not candidate_id:
             raise typer.BadParameter("--candidate-id is required for stored review actions.")
         if approve_stored:
             stored = service.approve_stored(candidate_id)
             console.print(f"Approved {len(stored)} candidate(s).")
+            return
+        if edit_stored:
+            if not edit_requested:
+                raise typer.BadParameter("--edit-stored requires at least one edit field.")
+            edited = service.edit_stored(
+                candidate_id,
+                content=edit_content,
+                subject=edit_subject,
+                predicate=edit_predicate,
+                object_value=edit_object,
+            )
+            console.print(f"Edited stored candidate {edited.id}.")
+            return
+        if inspect_stored:
+            _render_candidate_audit(service.inspect_stored(candidate_id))
             return
         rejected = service.reject_stored(candidate_id)
         console.print(f"Rejected candidate {rejected.id}.")
@@ -916,6 +1047,12 @@ def memory_review(
         console.print("No memory candidates extracted.")
         return
     if reject_all:
+        service.reject(
+            message=message,
+            session_id=session or "memory-review",
+            candidates=candidates,
+            reviewer="cli",
+        )
         console.print(f"Rejected {len(candidates)} candidate(s).")
         return
 
@@ -926,24 +1063,36 @@ def memory_review(
 
     reviewed_candidates = list(candidates)
     if edit_requested:
-        if candidate_index < 1 or candidate_index > len(candidates):
+        edited_index = candidate_index or 1
+        if edited_index < 1 or edited_index > len(candidates):
             raise typer.BadParameter("--candidate must refer to an extracted candidate.")
-        reviewed_candidates[candidate_index - 1] = edit_candidate(
-            candidates[candidate_index - 1],
+        reviewed_candidates[edited_index - 1] = edit_candidate(
+            candidates[edited_index - 1],
             content=edit_content,
             subject=edit_subject,
             predicate=edit_predicate,
             object_value=edit_object,
         )
-        console.print(f"Edited candidate {candidate_index}.")
+        console.print(f"Edited candidate {edited_index}.")
         if not approve_all and not approve_indices:
-            approve_indices.add(candidate_index)
+            approve_indices.add(edited_index)
 
     if approve_all:
         selected_indices = valid_indices - reject_indices
     else:
         selected_indices = approve_indices - reject_indices
     if reject_indices:
+        rejected = [
+            candidate
+            for index, candidate in enumerate(reviewed_candidates, start=1)
+            if index in reject_indices
+        ]
+        service.reject(
+            message=message,
+            session_id=session or "memory-review",
+            candidates=rejected,
+            reviewer="cli",
+        )
         console.print(f"Rejected {len(reject_indices)} candidate(s).")
     if selected_indices:
         selected = [
@@ -951,7 +1100,11 @@ def memory_review(
             for index, candidate in enumerate(reviewed_candidates, start=1)
             if index in selected_indices
         ]
-        stored = service.approve(message=message, session_id=session, candidates=selected)
+        stored = service.approve(
+            message=message,
+            session_id=session or "memory-review",
+            candidates=selected,
+        )
         console.print(f"Approved {len(stored)} candidate(s).")
         return
     console.print(

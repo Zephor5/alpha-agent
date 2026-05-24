@@ -129,25 +129,26 @@ Tasks:
 - [x] Add `memory_candidates` with candidate type, proposed layer, content,
   weak structure, salience, confidence, scope, source message ids, status,
   reviewer metadata, and timestamps.
-- [ ] Add `memory_decisions` or decision metadata for approve, reject, edit,
-  auto-approve, promote, supersede, and delete actions.
+- [x] Add `memory_decisions` or decision metadata for Phase 2 actions: approve,
+  reject, edit, auto-approve, and promote. Supersede/delete remain Phase 3.
 - [x] Change normal turn extraction to write candidates first.
 - [x] Add policy-controlled auto-approval only for explicit high-confidence
   cases, such as direct "remember" instructions in trusted scopes.
-- [ ] Extend CLI review commands from one-shot preview toward stored candidate
+- [x] Extend CLI review commands from one-shot preview toward stored candidate
   workflows: list, approve, reject, edit, and inspect source.
 - [x] Emit structured traces for candidate creation and decision outcomes.
 
-Current status: `memory_decisions` exists for pending, approve, reject,
-auto-approve, promote, and skip paths. Edit/supersede/delete decision semantics
-are still Phase 2/3 follow-up work.
+Current status: `memory_decisions` exists for pending, approve, reject, edit,
+auto-approve, and promote paths. Unpromotable approved candidates fail and roll
+back instead of being treated as successful approvals. Supersede/delete decision
+semantics are still Phase 3 follow-up work.
 
 Acceptance criteria:
 
 - [x] No semantic or episodic long-term memory is written without an explicit
   decision path.
 - [x] Rejected candidates remain auditable but never enter retrieval.
-- [ ] Edited candidates preserve the original source message ids and decision
+- [x] Edited candidates preserve the original source message ids and decision
   history.
 - [x] Review commands can recover from a previous session instead of requiring
   the original message argument again.

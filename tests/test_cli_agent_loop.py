@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from alpha_agent.cli import app
@@ -253,7 +254,7 @@ def test_memory_review_approve_all_stores_candidates(tmp_path: Path) -> None:
     assert [memory.object for memory in store.list_semantic_memories()] == ["tea"]
     assert len(store.list_episodic_memories()) == 1
     assert len(store.list_memory_candidates(status="approved")) == 2
-    assert store.stats()["memory_decisions"] == 2
+    assert store.stats()["memory_decisions"] == 4
 
 
 def test_memory_list_filters_default_scope_and_active_semantic_status(tmp_path: Path) -> None:
@@ -318,6 +319,12 @@ def test_memory_review_reject_all_does_not_store_candidates(tmp_path: Path) -> N
     assert "Rejected 2 candidate" in result.output
     assert store.list_semantic_memories() == []
     assert store.list_episodic_memories() == []
+    rejected = store.list_memory_candidates(status="rejected")
+    assert len(rejected) == 2
+    for candidate in rejected:
+        assert [decision.action for decision in store.list_memory_decisions(candidate.id)] == [
+            "reject"
+        ]
 
 
 def test_memory_review_approve_one_unedited_candidate(tmp_path: Path) -> None:
@@ -369,6 +376,11 @@ def test_memory_review_mixed_approve_and_reject_candidates(tmp_path: Path) -> No
     assert "Approved 1 candidate" in result.output
     assert [memory.object for memory in store.list_semantic_memories()] == ["tea"]
     assert store.list_episodic_memories() == []
+    rejected = store.list_memory_candidates(status="rejected")
+    assert len(rejected) == 1
+    assert [decision.action for decision in store.list_memory_decisions(rejected[0].id)] == [
+        "reject"
+    ]
 
 
 def test_memory_review_edit_one_while_approving_selected_candidates(tmp_path: Path) -> None:
@@ -450,7 +462,149 @@ def test_memory_review_lists_and_approves_stored_candidate(tmp_path: Path) -> No
     assert "Approved 1 candidate" in approved.output
     assert store.get_memory_candidate("cand-cli-1").status == "approved"
     assert [memory.object for memory in store.list_semantic_memories()] == ["tea"]
-    assert store.stats()["memory_decisions"] == 1
+    assert store.stats()["memory_decisions"] == 2
+
+
+def test_memory_review_edits_and_inspects_stored_candidate(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    source = store.append_conversation_message(
+        session_id="session-review",
+        role="user",
+        raw_content="Remember that I prefer coffee",
+    )
+    now = utc_now_iso()
+    store.insert_memory_candidate(
+        MemoryCandidate(
+            id="cand-cli-edit",
+            candidate_type="semantic",
+            proposed_layer="semantic",
+            content="User prefers coffee",
+            weak_structure={"subject": "user", "predicate": "prefers", "object": "coffee"},
+            salience=0.9,
+            confidence=0.8,
+            scope=MemoryScope.default(),
+            source_message_ids=[source.id],
+            status="pending",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    runner = CliRunner()
+
+    edited = runner.invoke(
+        app,
+        [
+            "memory",
+            "review",
+            "--candidate-id",
+            "cand-cli-edit",
+            "--edit-stored",
+            "--edit-content",
+            "User prefers tea",
+            "--edit-object",
+            "tea",
+        ],
+        env=_env(tmp_path),
+    )
+    inspected = runner.invoke(
+        app,
+        [
+            "memory",
+            "review",
+            "--candidate-id",
+            "cand-cli-edit",
+            "--inspect-stored",
+        ],
+        env=_env(tmp_path),
+    )
+    listed_pending = runner.invoke(
+        app,
+        ["memory", "review", "--list-pending"],
+        env=_env(tmp_path),
+    )
+    listed_stored = runner.invoke(
+        app,
+        ["memory", "review", "--list-stored"],
+        env=_env(tmp_path),
+    )
+
+    store = _store(tmp_path)
+    candidate = store.get_memory_candidate("cand-cli-edit")
+    assert edited.exit_code == 0
+    assert inspected.exit_code == 0
+    assert listed_pending.exit_code == 0
+    assert listed_stored.exit_code == 0
+    assert "Edited stored candidate cand-cli-edit" in edited.output
+    assert "Remember that I prefer coffee" in inspected.output
+    assert "action=edit" in inspected.output
+    assert "original_content=User prefers coffee" in inspected.output
+    assert "edited_content=User prefers tea" in inspected.output
+    assert "cand-cli-edit" not in listed_pending.output
+    assert "cand-cli-edit" in listed_stored.output
+    assert candidate is not None
+    assert candidate.status == "edited"
+    assert candidate.content == "User prefers tea"
+    assert candidate.source_message_ids == [source.id]
+
+
+def test_memory_review_list_flags_conflict_with_stored_actions(tmp_path: Path) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "review",
+            "--list-pending",
+            "--candidate-id",
+            "cand-cli-edit",
+            "--approve-stored",
+        ],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code != 0
+    assert "Use only one stored review action" in result.output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["unexpected message", "--list-pending"],
+        ["--list-stored", "--approve", "1"],
+        ["--list-stored", "--reject", "1"],
+        ["--list-stored", "--approve-all"],
+        ["--list-stored", "--reject-all"],
+        ["--list-stored", "--candidate", "1"],
+        ["--list-stored", "--edit-content", "User prefers tea"],
+        ["--list-stored", "--candidate-id", "cand-1"],
+        ["--list-stored", "--session", "session-review"],
+        ["unexpected message", "--candidate-id", "cand-1", "--inspect-stored"],
+        ["--candidate-id", "cand-1", "--inspect-stored", "--session", "session-review"],
+        ["--candidate-id", "cand-1", "--inspect-stored", "--approve", "1"],
+        ["--candidate-id", "cand-1", "--inspect-stored", "--reject", "1"],
+        ["--candidate-id", "cand-1", "--inspect-stored", "--approve-all"],
+        ["--candidate-id", "cand-1", "--inspect-stored", "--reject-all"],
+        ["--candidate-id", "cand-1", "--inspect-stored", "--candidate", "1"],
+        [
+            "--candidate-id",
+            "cand-1",
+            "--inspect-stored",
+            "--edit-content",
+            "User prefers tea",
+        ],
+    ],
+)
+def test_memory_review_stored_and_list_modes_reject_one_shot_flags(
+    tmp_path: Path,
+    args: list[str],
+) -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["memory", "review", *args], env=_env(tmp_path))
+
+    assert result.exit_code != 0
+    assert "Stored review actions cannot be combined" in result.output
 
 
 def test_memory_review_list_pending_does_not_cross_scope(tmp_path: Path) -> None:
