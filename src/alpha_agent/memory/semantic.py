@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from alpha_agent.memory.models import SemanticMemory
+from alpha_agent.memory.models import MemoryScope, SemanticMemory
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
@@ -23,6 +23,8 @@ class SemanticMemoryManager:
         confidence: float = 0.75,
         salience: float = 0.6,
         source_memory_ids: list[str] | None = None,
+        scope: MemoryScope | None = None,
+        status: str = "active",
     ) -> SemanticMemory:
         """Upsert a stable fact by subject, predicate, and object."""
 
@@ -39,6 +41,8 @@ class SemanticMemoryManager:
             created_at=now,
             updated_at=now,
             metadata={},
+            status=status,
+            scope=scope or MemoryScope.default(),
         )
         return self.store.upsert_semantic_memory(memory)
 

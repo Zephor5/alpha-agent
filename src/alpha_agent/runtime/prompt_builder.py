@@ -145,7 +145,12 @@ background context; the original transcript remains the source of truth."""
         if not context.semantic_memories:
             return ""
         lines = [
-            f"- ({memory.confidence:.2f}) {memory.content}" for memory in context.semantic_memories
+            (
+                f"- ({memory.confidence:.2f}; status={memory.status}; "
+                f"scope={memory.scope.scope_key}; source={','.join(memory.source_memory_ids)}) "
+                f"{memory.content}"
+            )
+            for memory in context.semantic_memories
         ]
         return "### User Facts\n" + "\n".join(lines)
 
@@ -153,7 +158,11 @@ background context; the original transcript remains the source of truth."""
         if not context.episodic_memories:
             return ""
         lines = [
-            f"- ({memory.salience:.2f}) {memory.summary}" for memory in context.episodic_memories
+            (
+                f"- ({memory.salience:.2f}; scope={memory.scope.scope_key}; "
+                f"source={','.join(memory.source_event_ids)}) {memory.summary}"
+            )
+            for memory in context.episodic_memories
         ]
         return "### Prior Episodes\n" + "\n".join(lines)
 
@@ -162,7 +171,7 @@ background context; the original transcript remains the source of truth."""
             return ""
         lines = []
         for memory in context.procedural_memories:
-            line = f"- {memory.name}: {memory.description}"
+            line = f"- (scope={memory.scope.scope_key}) {memory.name}: {memory.description}"
             if self._procedure_matches_user_message(user_message, memory):
                 line += f"\n{memory.procedure_markdown}"
             lines.append(line)

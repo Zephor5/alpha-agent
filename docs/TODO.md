@@ -209,6 +209,15 @@ P1 Agent Loop implementation notes:
   approve-all, reject-all, per-candidate approve/reject, and selected candidate
   edit-and-approve. Platform review commands for Feishu/WeChat remain future
   adapter work tracked in the integration sections.
+- Long-term memory now carries an explicit scope. CLI turns use the deterministic
+  `user:default` scope, gateway session metadata can derive chat/thread scopes,
+  and retrieval filters by the allowed scope set before ranking.
+- Runtime extraction now persists `memory_candidates` first and records
+  `memory_decisions` for pending, auto-approve, approve, reject, and promotion
+  outcomes. Stored candidate review is available through
+  `alpha memory review --list-pending --candidate-id ... --approve-stored` or
+  `--reject-stored`; separate `alpha memory candidates/approve/reject/edit`
+  commands remain future usability work.
 
 ## P1: Feishu Integration
 
@@ -317,7 +326,8 @@ These items make Alpha Agent feel different from a generic chat bot.
   - `alpha memory approve <id>`
   - `alpha memory reject <id>`
   - `alpha memory edit <id>`
-- [ ] Store extracted candidates separately before promotion when review mode is on.
+- [x] Store extracted candidates separately before promotion in the runtime
+  memory pipeline.
 - [ ] Add confidence/source display to channel replies when memory is used.
 - [ ] Add "what do you remember about me?" command.
 - [ ] Add "forget this" / "forget memory id" support.

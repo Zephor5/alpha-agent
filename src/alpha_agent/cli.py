@@ -48,6 +48,7 @@ from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
 from alpha_agent.memory.consolidation import ConsolidationService
+from alpha_agent.memory.models import MemoryScope
 from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.review import MemoryReviewService, edit_candidate
@@ -220,6 +221,33 @@ def _render_candidates(candidates: list[Any]) -> None:
         )
 
 
+def _render_stored_candidates(candidates: list[Any]) -> None:
+    table = Table(title="Stored Memory Candidates")
+    table.add_column("ID")
+    table.add_column("Status")
+    table.add_column("Type")
+    table.add_column("Scope")
+    table.add_column("Content")
+    table.add_column("Source Messages")
+    for candidate in candidates:
+        table.add_row(
+            candidate.id,
+            candidate.status,
+            candidate.candidate_type,
+            candidate.scope.scope_key,
+            candidate.content,
+            ", ".join(candidate.source_message_ids),
+        )
+    console.print(table)
+    for candidate in candidates:
+        console.print(
+            f"Candidate: id={candidate.id} status={candidate.status} "
+            f"type={candidate.candidate_type} scope={candidate.scope.scope_key} "
+            f"source_message_ids={','.join(candidate.source_message_ids)} "
+            f"content={candidate.content}"
+        )
+
+
 def _memory_access_rows(
     store: MemoryStore,
     *,
@@ -354,6 +382,24 @@ def _render_source_context(source: ConversationSource | None) -> None:
     table.add_row("thread_id", source.thread_id or "")
     table.add_row("message_id", source.message_id or "")
     console.print(table)
+
+
+def _source_metadata(source: ConversationSource | None) -> dict[str, Any] | None:
+    if source is None:
+        return None
+    metadata = dict(source.metadata)
+    metadata.update(
+        {
+            "platform": source.platform,
+            "chat_id": source.chat_id,
+            "chat_type": source.chat_type,
+            "user_id": source.user_id,
+            "user_name": source.user_name,
+            "thread_id": source.thread_id,
+            "message_id": source.message_id,
+        }
+    )
+    return metadata
 
 
 @app.command("init")
@@ -685,15 +731,20 @@ def memory_list(limit: Annotated[int, typer.Option("--limit", "-n")] = 20) -> No
 
     config = load_config()
     store = _store(config)
+    scopes = MemoryScope.default().allowed_read_scopes()
     table = Table(title="Recent Memories")
     table.add_column("Type")
     table.add_column("ID")
     table.add_column("Content")
-    for semantic_memory in store.list_semantic_memories(limit):
+    for semantic_memory in store.list_semantic_memories(
+        limit,
+        scopes=scopes,
+        statuses=["active"],
+    ):
         table.add_row("semantic", semantic_memory.id, semantic_memory.content)
-    for episodic_memory in store.list_episodic_memories(limit):
+    for episodic_memory in store.list_episodic_memories(limit, scopes=scopes):
         table.add_row("episodic", episodic_memory.id, episodic_memory.summary)
-    for procedural_memory in store.list_procedural_memories(limit):
+    for procedural_memory in store.list_procedural_memories(limit, scopes=scopes):
         table.add_row("procedural", procedural_memory.id, procedural_memory.name)
     console.print(table)
 
@@ -710,6 +761,7 @@ def search(
         query=query,
         session_id="memory-search",
         limit=config.retrieval_limit,
+        scopes=MemoryScope.default().allowed_read_scopes(),
         record_access=False,
     )
     table = Table(title=f"Memory search: {query}")
@@ -737,7 +789,10 @@ def consolidate() -> None:
 
 @memory_app.command("review")
 def memory_review(
-    message: Annotated[str, typer.Argument(help="Message to extract memory candidates from.")],
+    message: Annotated[
+        str | None,
+        typer.Argument(help="Message to extract memory candidates from."),
+    ] = None,
     session: Annotated[
         str,
         typer.Option("--session", "-s", help="Session id for approved review source events."),
@@ -778,8 +833,24 @@ def memory_review(
         str | None,
         typer.Option("--edit-object", help="Replacement semantic object."),
     ] = None,
+    list_pending: Annotated[
+        bool,
+        typer.Option("--list-pending", help="List stored pending candidates."),
+    ] = False,
+    candidate_id: Annotated[
+        str | None,
+        typer.Option("--candidate-id", help="Stored candidate id to approve or reject."),
+    ] = None,
+    approve_stored: Annotated[
+        bool,
+        typer.Option("--approve-stored", help="Approve a stored candidate by id."),
+    ] = False,
+    reject_stored: Annotated[
+        bool,
+        typer.Option("--reject-stored", help="Reject a stored candidate by id."),
+    ] = False,
 ) -> None:
-    """Preview extracted memory candidates and store only explicit approvals."""
+    """Preview, list, approve, or reject memory candidates."""
 
     edit_requested = any(
         value is not None for value in (edit_content, edit_subject, edit_predicate, edit_object)
@@ -792,9 +863,27 @@ def memory_review(
         raise typer.BadParameter("Use either --approve-all or --approve, not both.")
     if approve_indices & reject_indices:
         raise typer.BadParameter("A candidate cannot be both approved and rejected.")
+    if approve_stored and reject_stored:
+        raise typer.BadParameter("Use either --approve-stored or --reject-stored, not both.")
 
     config = load_config()
     service = MemoryReviewService(_store(config))
+    if list_pending:
+        _render_stored_candidates(service.list_candidates(status="pending"))
+        return
+    if approve_stored or reject_stored:
+        if not candidate_id:
+            raise typer.BadParameter("--candidate-id is required for stored review actions.")
+        if approve_stored:
+            stored = service.approve_stored(candidate_id)
+            console.print(f"Approved {len(stored)} candidate(s).")
+            return
+        rejected = service.reject_stored(candidate_id)
+        console.print(f"Rejected candidate {rejected.id}.")
+        return
+    if message is None:
+        raise typer.BadParameter("MESSAGE is required unless using stored review actions.")
+
     candidates = service.preview(message)
     _render_candidates(candidates)
     if not candidates:
@@ -925,10 +1014,15 @@ def prompt(
         thread_id=thread_id,
         message_id=message_id,
     )
+    memory_scope = MemoryScope.from_source_metadata(
+        session_id=session,
+        source_metadata=_source_metadata(source),
+    )
     context = retriever.retrieve_context(
         message,
         session_id=session,
         limit=config.retrieval_limit,
+        scopes=memory_scope.allowed_read_scopes(),
         record_access=False,
     )
     retrieved_ids = {
@@ -948,6 +1042,7 @@ def prompt(
         session_context=session_context,
     )
     console.print(f"Session: {session}")
+    console.print(f"Memory scope: {memory_scope.scope_key}")
     _render_source_context(source)
     context_table = Table(title="Session Context")
     context_table.add_column("Field")

@@ -32,6 +32,10 @@ putting everything into one transcript:
 - Episodic memory: specific experiences and remembered events.
 - Semantic memory: durable facts, preferences, and user-specific knowledge.
 - Procedural memory: reusable ways of doing things, stored as skills.
+- Memory scope: long-term memory is stored and retrieved by explicit default,
+  platform-user, chat/thread, or project scopes.
+- Candidate lifecycle: extracted candidates are stored before promotion, with
+  auditable approve, reject, and auto-approve decisions.
 - Salience scoring: deterministic importance estimates for what should persist.
 - Consolidation: a manual pass that promotes stable facts from episodes.
 
@@ -95,6 +99,8 @@ uv run alpha memory list
 uv run alpha memory search "sqlite preferences"
 uv run alpha memory stats
 uv run alpha memory consolidate
+uv run alpha memory review "remember that I prefer concise answers"
+uv run alpha memory review --list-pending
 ```
 
 Inspect procedural skills:
@@ -107,6 +113,7 @@ Print the prompt without calling the LLM:
 
 ```bash
 uv run alpha debug prompt "what do you remember about my preferences?"
+uv run alpha debug prompt "what do you remember here?" --session <session-id>
 ```
 
 Inspect raw LLM request/response traces from CLI runs:

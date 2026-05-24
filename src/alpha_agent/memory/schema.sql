@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS episodic_memories (
     created_at TEXT NOT NULL,
     last_accessed_at TEXT,
     access_count INTEGER NOT NULL DEFAULT 0,
+    scope_kind TEXT NOT NULL DEFAULT 'global_user',
+    scope_key TEXT NOT NULL DEFAULT 'user:default',
+    scope_metadata TEXT NOT NULL DEFAULT '{}',
     metadata TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -62,15 +65,19 @@ CREATE TABLE IF NOT EXISTS semantic_memories (
     confidence REAL NOT NULL DEFAULT 0.5,
     salience REAL NOT NULL DEFAULT 0.5,
     source_memory_ids TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'active',
+    scope_kind TEXT NOT NULL DEFAULT 'global_user',
+    scope_key TEXT NOT NULL DEFAULT 'user:default',
+    scope_metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
-    UNIQUE(subject, predicate, object)
+    UNIQUE(subject, predicate, object, scope_key)
 );
 
 CREATE TABLE IF NOT EXISTS procedural_memories (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     description TEXT NOT NULL,
     trigger TEXT NOT NULL,
     procedure_markdown TEXT NOT NULL,
@@ -79,7 +86,43 @@ CREATE TABLE IF NOT EXISTS procedural_memories (
     confidence REAL NOT NULL DEFAULT 0.5,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    scope_kind TEXT NOT NULL DEFAULT 'global_user',
+    scope_key TEXT NOT NULL DEFAULT 'user:default',
+    scope_metadata TEXT NOT NULL DEFAULT '{}',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(name, scope_key)
+);
+
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    id TEXT PRIMARY KEY,
+    candidate_type TEXT NOT NULL,
+    proposed_layer TEXT NOT NULL,
+    content TEXT NOT NULL,
+    weak_structure TEXT NOT NULL DEFAULT '{}',
+    salience REAL NOT NULL DEFAULT 0.5,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    scope_kind TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    scope_metadata TEXT NOT NULL DEFAULT '{}',
+    source_message_ids TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending',
+    reviewer_metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     metadata TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS memory_decisions (
+    id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    memory_type TEXT,
+    memory_id TEXT,
+    reviewer TEXT,
+    rationale TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    FOREIGN KEY(candidate_id) REFERENCES memory_candidates(id)
 );
 
 CREATE TABLE IF NOT EXISTS entity_nodes (
@@ -108,6 +151,7 @@ CREATE TABLE IF NOT EXISTS memory_access_log (
     query TEXT NOT NULL,
     accessed_at TEXT NOT NULL,
     score REAL NOT NULL DEFAULT 0.0,
+    scope_key TEXT NOT NULL DEFAULT 'user:default',
     metadata TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -153,10 +197,17 @@ CREATE INDEX IF NOT EXISTS idx_runtime_traces_event_type_timestamp
     ON runtime_traces(event_type, timestamp);
 CREATE INDEX IF NOT EXISTS idx_episodic_created_at ON episodic_memories(created_at);
 CREATE INDEX IF NOT EXISTS idx_episodic_salience ON episodic_memories(salience);
+CREATE INDEX IF NOT EXISTS idx_episodic_scope ON episodic_memories(scope_key);
 CREATE INDEX IF NOT EXISTS idx_semantic_subject ON semantic_memories(subject);
 CREATE INDEX IF NOT EXISTS idx_semantic_predicate ON semantic_memories(predicate);
 CREATE INDEX IF NOT EXISTS idx_semantic_salience ON semantic_memories(salience);
-CREATE INDEX IF NOT EXISTS idx_procedural_name ON procedural_memories(name);
+CREATE INDEX IF NOT EXISTS idx_semantic_scope_status ON semantic_memories(scope_key, status);
+CREATE INDEX IF NOT EXISTS idx_procedural_name_scope ON procedural_memories(name, scope_key);
+CREATE INDEX IF NOT EXISTS idx_procedural_scope ON procedural_memories(scope_key);
+CREATE INDEX IF NOT EXISTS idx_memory_candidates_status
+    ON memory_candidates(status, scope_key, updated_at);
+CREATE INDEX IF NOT EXISTS idx_memory_decisions_candidate
+    ON memory_decisions(candidate_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_entity_nodes_salience ON entity_nodes(salience);
 CREATE INDEX IF NOT EXISTS idx_memory_access_memory ON memory_access_log(memory_id, memory_type);
 CREATE INDEX IF NOT EXISTS idx_gateway_session_lookup

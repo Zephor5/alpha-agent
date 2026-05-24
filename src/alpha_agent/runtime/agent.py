@@ -20,15 +20,16 @@ from alpha_agent.llm.base import (
     LLMToolDefinitionInput,
 )
 from alpha_agent.memory.episodic import EpisodicMemoryManager
+from alpha_agent.memory.controller import MemoryController
 from alpha_agent.memory.extractor import MemoryExtractor
 from alpha_agent.memory.models import (
     ConversationMessage,
-    ExtractedMemoryCandidate,
+    MemoryCandidate,
+    MemoryScope,
     RetrievedContext,
     RuntimeTrace,
     SessionContextState,
 )
-from alpha_agent.memory.persistence import persist_candidates
 from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.semantic import SemanticMemoryManager
@@ -206,6 +207,11 @@ class AlphaAgent:
             max_summary_tokens=context_max_summary_tokens,
         )
         self.extractor = extractor or MemoryExtractor()
+        self.memory_controller = MemoryController(
+            store,
+            retriever=retriever,
+            extractor=self.extractor,
+        )
         self.episodic = EpisodicMemoryManager(store)
         self.semantic = SemanticMemoryManager(store)
         self.procedural = ProceduralMemoryManager(store)
@@ -267,11 +273,16 @@ class AlphaAgent:
                 user_message,
                 source_metadata=source_metadata,
             )
+            memory_scope = self.memory_controller.scope_for_turn(
+                session_id=session_id,
+                source_metadata=dict(source_metadata or {}),
+            )
+            debug["memory_scope"] = memory_scope.to_record()
             debug["user_message_id"] = user_record.id
             debug["user_message_ordinal"] = user_record.ordinal
 
             self._check_canceled(session_id, "before_retrieval")
-            context = self._retrieve_memory(user_message, session_id)
+            context = self._retrieve_memory(user_message, session_id, memory_scope)
             retrieved_ids = self._retrieved_ids(context)
             debug["retrieved_memory_ids"] = retrieved_ids
 
@@ -346,9 +357,12 @@ class AlphaAgent:
                 user_message=user_message,
                 assistant_response=llm_response.content,
                 source_message_ids=extraction_source_message_ids,
+                scope=memory_scope,
             )
-            self._persist_extracted_memories(candidates)
+            persisted = self._persist_extracted_memories(session_id, candidates)
             debug["extracted_memory_count"] = len(candidates)
+            debug["persisted_memory_count"] = len(persisted)
+            debug["memory_candidate_ids"] = [candidate.id for candidate in candidates]
             debug["consolidation"] = self._decide_consolidation_trigger(candidates)
 
             return AgentTurnResult(
@@ -408,10 +422,16 @@ class AlphaAgent:
             source_metadata=dict(source_metadata or {}),
         )
 
-    def _retrieve_memory(self, user_message: str, session_id: str) -> RetrievedContext:
-        return self.retriever.retrieve_context(
-            user_message,
-            session_id,
+    def _retrieve_memory(
+        self,
+        user_message: str,
+        session_id: str,
+        scope: MemoryScope,
+    ) -> RetrievedContext:
+        return self.memory_controller.retrieve_context(
+            query=user_message,
+            session_id=session_id,
+            scope=scope,
             limit=self.retrieval_limit,
         )
 
@@ -1137,15 +1157,20 @@ class AlphaAgent:
         user_message: str,
         assistant_response: str,
         source_message_ids: list[str],
-    ) -> list[ExtractedMemoryCandidate]:
-        candidates = self.extractor.extract(
+        scope: MemoryScope,
+    ) -> list[MemoryCandidate]:
+        candidates = self.memory_controller.extract_candidates(
+            session_id=session_id,
             user_message=user_message,
             assistant_response=assistant_response,
-            source_event_ids=source_message_ids,
+            source_message_ids=source_message_ids,
+            scope=scope,
         )
         type_counts: dict[str, int] = {}
         for candidate in candidates:
-            type_counts[candidate.type] = type_counts.get(candidate.type, 0) + 1
+            type_counts[candidate.candidate_type] = (
+                type_counts.get(candidate.candidate_type, 0) + 1
+            )
         self.store.append_runtime_trace(
             session_id=session_id,
             event_type="memory.extracted",
@@ -1158,12 +1183,19 @@ class AlphaAgent:
         )
         return candidates
 
-    def _persist_extracted_memories(self, candidates: list[ExtractedMemoryCandidate]) -> None:
-        persist_candidates(self.store, candidates)
+    def _persist_extracted_memories(
+        self,
+        session_id: str,
+        candidates: list[MemoryCandidate],
+    ) -> list[Any]:
+        return self.memory_controller.decide_runtime_candidates(
+            session_id=session_id,
+            candidates=candidates,
+        )
 
     def _decide_consolidation_trigger(
         self,
-        candidates: list[ExtractedMemoryCandidate],
+        candidates: list[MemoryCandidate],
     ) -> dict[str, Any]:
         high_salience_count = sum(1 for candidate in candidates if candidate.salience >= 0.75)
         should_consolidate = high_salience_count >= 3

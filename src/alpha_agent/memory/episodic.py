@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from alpha_agent.memory.models import EpisodicMemory
+from alpha_agent.memory.models import EpisodicMemory, MemoryScope
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.text import extract_lightweight_entities, tokenize
@@ -21,6 +21,7 @@ class EpisodicMemoryManager:
         source_event_ids: list[str],
         salience: float,
         confidence: float = 0.7,
+        scope: MemoryScope | None = None,
     ) -> EpisodicMemory:
         """Create an episodic memory from important events."""
 
@@ -39,6 +40,7 @@ class EpisodicMemoryManager:
             confidence=max(0.0, min(1.0, confidence)),
             created_at=utc_now_iso(),
             metadata={},
+            scope=scope or MemoryScope.default(),
         )
         return self.store.insert_episodic_memory(memory)
 

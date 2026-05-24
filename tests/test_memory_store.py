@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from alpha_agent.memory.models import SessionContextState
+from alpha_agent.memory.models import (
+    MemoryCandidate,
+    MemoryDecision,
+    MemoryScope,
+    ProceduralMemory,
+    SessionContextState,
+)
 from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.utils.time import utc_now_iso
@@ -213,6 +219,74 @@ def test_semantic_upsert_merges_same_fact(tmp_path: Path) -> None:
     assert memories[0].content == "Updated content"
 
 
+def test_procedural_upsert_is_scope_aware(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    now = utc_now_iso()
+    default_scope = MemoryScope.default()
+    other_scope = MemoryScope(
+        kind="platform_user",
+        scope_key="platform:telegram:user:other",
+        platform="telegram",
+        user_id="other",
+    )
+
+    first = store.upsert_procedural_memory(
+        ProceduralMemory(
+            id="proc-default",
+            name="Debug Loop",
+            description="Default scope procedure",
+            trigger="debug",
+            procedure_markdown="Default steps",
+            success_count=0,
+            failure_count=0,
+            confidence=0.7,
+            created_at=now,
+            updated_at=now,
+            scope=default_scope,
+        )
+    )
+    second = store.upsert_procedural_memory(
+        ProceduralMemory(
+            id="proc-other",
+            name="Debug Loop",
+            description="Other scope procedure",
+            trigger="debug",
+            procedure_markdown="Other steps",
+            success_count=0,
+            failure_count=0,
+            confidence=0.8,
+            created_at=now,
+            updated_at=now,
+            scope=other_scope,
+        )
+    )
+    updated_default = store.upsert_procedural_memory(
+        ProceduralMemory(
+            id="proc-default-replacement",
+            name="Debug Loop",
+            description="Updated default scope procedure",
+            trigger="debug",
+            procedure_markdown="Updated default steps",
+            success_count=0,
+            failure_count=0,
+            confidence=0.9,
+            created_at=now,
+            updated_at=now,
+            scope=default_scope,
+        )
+    )
+
+    default_memories = store.list_procedural_memories(scopes=[default_scope])
+    other_memories = store.list_procedural_memories(scopes=[other_scope])
+    assert first.id == updated_default.id
+    assert first.id != second.id
+    assert [memory.description for memory in default_memories] == [
+        "Updated default scope procedure"
+    ]
+    assert [memory.description for memory in other_memories] == ["Other scope procedure"]
+
+
 def test_negative_preference_is_stored_as_dislike() -> None:
     from alpha_agent.memory.extractor import MemoryExtractor
 
@@ -223,3 +297,48 @@ def test_negative_preference_is_stored_as_dislike() -> None:
     semantic = [candidate for candidate in candidates if candidate.type == "semantic"]
     assert semantic[0].predicate == "dislikes"
     assert semantic[0].object == "verbose answers"
+
+
+def test_memory_candidates_and_decisions_are_auditable(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    now = utc_now_iso()
+    candidate = MemoryCandidate(
+        id="cand-1",
+        candidate_type="semantic",
+        proposed_layer="semantic",
+        content="User prefers tea",
+        weak_structure={"subject": "user", "predicate": "prefers", "object": "tea"},
+        salience=0.9,
+        confidence=0.8,
+        scope=MemoryScope.default(),
+        source_message_ids=["msg-1"],
+        status="pending",
+        created_at=now,
+        updated_at=now,
+    )
+
+    store.insert_memory_candidate(candidate)
+    updated = store.update_memory_candidate_status(
+        "cand-1",
+        "rejected",
+        reviewer_metadata={"reviewer": "cli"},
+    )
+    store.insert_memory_decision(
+        MemoryDecision(
+            id="decision-1",
+            candidate_id="cand-1",
+            action="reject",
+            memory_type=None,
+            memory_id=None,
+            reviewer="cli",
+            rationale="test rejection",
+            created_at=now,
+        )
+    )
+
+    assert updated.status == "rejected"
+    assert updated.reviewer_metadata == {"reviewer": "cli"}
+    assert store.list_memory_candidates(status="pending") == []
+    assert store.list_memory_candidates(status="rejected")[0].source_message_ids == ["msg-1"]
+    assert store.stats()["memory_decisions"] == 1

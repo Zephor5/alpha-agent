@@ -9,6 +9,7 @@ from typing import cast
 
 from alpha_agent.memory.models import (
     EpisodicMemory,
+    MemoryScope,
     ProceduralMemory,
     RetrievedContext,
     SemanticMemory,
@@ -39,13 +40,16 @@ class MemoryRetriever:
         session_id: str,
         limit: int = 8,
         *,
+        scopes: list[MemoryScope] | None = None,
         record_access: bool = True,
+        access_scope: MemoryScope | None = None,
     ) -> RetrievedContext:
         """Retrieve episodic, semantic, and procedural context for a turn."""
 
-        episodic = self._rank_episodic(query, limit)
-        semantic = self._rank_semantic(query, limit)
-        procedural = self._rank_procedural(query, max(3, limit // 2))
+        del session_id
+        episodic = self._rank_episodic(query, limit, scopes=scopes)
+        semantic = self._rank_semantic(query, limit, scopes=scopes)
+        procedural = self._rank_procedural(query, max(3, limit // 2), scopes=scopes)
 
         if record_access:
             for ranked in [*episodic, *semantic, *procedural]:
@@ -54,6 +58,7 @@ class MemoryRetriever:
                     ranked.memory_type,
                     query,
                     ranked.score,
+                    scope=access_scope,
                 )
 
         entity_hints = extract_lightweight_entities(query)
@@ -67,9 +72,15 @@ class MemoryRetriever:
             entity_hints=entity_hints,
         )
 
-    def _rank_episodic(self, query: str, limit: int) -> list[RankedMemory]:
-        searched = self.store.search_episodic(query, limit=limit * 3)
-        recent = self.store.list_episodic_memories(limit=limit * 3)
+    def _rank_episodic(
+        self,
+        query: str,
+        limit: int,
+        *,
+        scopes: list[MemoryScope] | None,
+    ) -> list[RankedMemory]:
+        searched = self.store.search_episodic(query, limit=limit * 3, scopes=scopes)
+        recent = self.store.list_episodic_memories(limit=limit * 3, scopes=scopes)
         candidates = self._dedupe([*searched, *recent])
         ranked = [
             RankedMemory(memory=m, memory_type="episodic", score=self._score(query, m, "episodic"))
@@ -78,9 +89,24 @@ class MemoryRetriever:
         ranked.sort(key=lambda item: item.score, reverse=True)
         return ranked[:limit]
 
-    def _rank_semantic(self, query: str, limit: int) -> list[RankedMemory]:
-        searched = self.store.search_semantic(query, limit=limit * 3)
-        recent = self.store.list_semantic_memories(limit=limit * 3)
+    def _rank_semantic(
+        self,
+        query: str,
+        limit: int,
+        *,
+        scopes: list[MemoryScope] | None,
+    ) -> list[RankedMemory]:
+        searched = self.store.search_semantic(
+            query,
+            limit=limit * 3,
+            scopes=scopes,
+            statuses=["active"],
+        )
+        recent = self.store.list_semantic_memories(
+            limit=limit * 3,
+            scopes=scopes,
+            statuses=["active"],
+        )
         candidates = self._dedupe([*searched, *recent])
         ranked = [
             RankedMemory(memory=m, memory_type="semantic", score=self._score(query, m, "semantic"))
@@ -89,9 +115,15 @@ class MemoryRetriever:
         ranked.sort(key=lambda item: item.score, reverse=True)
         return ranked[:limit]
 
-    def _rank_procedural(self, query: str, limit: int) -> list[RankedMemory]:
-        searched = self.store.search_procedural(query, limit=limit * 3)
-        recent = self.store.list_procedural_memories(limit=limit * 3)
+    def _rank_procedural(
+        self,
+        query: str,
+        limit: int,
+        *,
+        scopes: list[MemoryScope] | None,
+    ) -> list[RankedMemory]:
+        searched = self.store.search_procedural(query, limit=limit * 3, scopes=scopes)
+        recent = self.store.list_procedural_memories(limit=limit * 3, scopes=scopes)
         candidates = [
             memory
             for memory in self._dedupe([*searched, *recent])

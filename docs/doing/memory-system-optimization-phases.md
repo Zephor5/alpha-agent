@@ -52,19 +52,19 @@ Tasks:
 
 - [ ] Add a small memory behavior fixture set covering preferences, facts,
   corrections, project state, procedure hints, and "do not remember" cases.
-- [ ] Add retrieval evaluation helpers that report retrieved ids, scores, score
+- [x] Add retrieval evaluation helpers that report retrieved ids, scores, score
   components, and whether expected memories were selected.
-- [ ] Add extraction evaluation helpers that compare candidates against expected
+- [x] Add extraction evaluation helpers that compare candidates against expected
   type, content, scope, confidence, and source ids.
-- [ ] Add prompt inspection tests for memory source/status rendering.
+- [x] Add prompt inspection tests for memory source/status rendering.
 
 Acceptance criteria:
 
-- [ ] `uv run pytest tests/test_memory_store.py tests/test_retrieval.py
+- [x] `uv run pytest tests/test_memory_store.py tests/test_retrieval.py
   tests/test_prompt_builder.py tests/test_consolidation.py -q` passes.
-- [ ] A failing retrieval, extraction, or prompt-injection regression can be
+- [x] A failing retrieval, extraction, or prompt-injection regression can be
   explained from test output without manually inspecting SQLite.
-- [ ] The evaluation fixtures do not depend on external LLM calls.
+- [x] The evaluation fixtures do not depend on external LLM calls.
 
 Likely files:
 
@@ -81,25 +81,25 @@ global memory pollution before adding richer behavior.
 
 Tasks:
 
-- [ ] Add a `MemoryScope` domain model representing at least global user,
+- [x] Add a `MemoryScope` domain model representing at least global user,
   platform user, chat/thread session, and project scopes.
-- [ ] Add scope columns or a normalized scope table for episodic, semantic,
+- [x] Add scope columns or a normalized scope table for episodic, semantic,
   procedural, candidate, and access-log records.
-- [ ] Derive memory scope from CLI and gateway `source_metadata`.
-- [ ] Introduce a `MemoryController` or `MemoryPipeline` that owns capture,
+- [x] Derive memory scope from CLI and gateway `source_metadata`.
+- [x] Introduce a `MemoryController` or `MemoryPipeline` that owns capture,
   extraction, candidate persistence, promotion, retrieval policy, and trace
   emission.
-- [ ] Keep `AlphaAgent.respond()` as the readable orchestration path, but move
+- [x] Keep `AlphaAgent.respond()` as the readable orchestration path, but move
   memory policy decisions out of the runtime method body.
-- [ ] Update retrieval to filter by allowed scopes before ranking.
+- [x] Update retrieval to filter by allowed scopes before ranking.
 
 Acceptance criteria:
 
 - [ ] A group/channel turn cannot retrieve or write unrelated user memory.
-- [ ] CLI turns keep a deterministic default scope.
-- [ ] Gateway session `memory_scope` is connected to long-term memory storage.
-- [ ] Existing debug prompt output shows scope for retrieved memories.
-- [ ] Tests cover same-query retrieval under two different scopes.
+- [x] CLI turns keep a deterministic default scope.
+- [x] Gateway session `memory_scope` is connected to long-term memory storage.
+- [x] Existing debug prompt output shows scope for retrieved memories.
+- [x] Tests cover same-query retrieval under two different scopes.
 
 Likely files:
 
@@ -113,10 +113,10 @@ Likely files:
 
 Checkpoint:
 
-- [ ] Memory CRUD and retrieval tests pass.
-- [ ] `alpha debug prompt` still works for sessions with and without gateway
+- [x] Memory CRUD and retrieval tests pass.
+- [x] `alpha debug prompt` still works for sessions with and without gateway
   metadata.
-- [ ] Documentation in `README.md` and `docs/TODO.md` matches the new scope
+- [x] Documentation in `README.md` and `docs/TODO.md` matches the new scope
   behavior.
 
 ## Phase 2: Candidate Lifecycle And Review
@@ -126,26 +126,30 @@ context.
 
 Tasks:
 
-- [ ] Add `memory_candidates` with candidate type, proposed layer, content,
+- [x] Add `memory_candidates` with candidate type, proposed layer, content,
   weak structure, salience, confidence, scope, source message ids, status,
   reviewer metadata, and timestamps.
 - [ ] Add `memory_decisions` or decision metadata for approve, reject, edit,
   auto-approve, promote, supersede, and delete actions.
-- [ ] Change normal turn extraction to write candidates first.
-- [ ] Add policy-controlled auto-approval only for explicit high-confidence
+- [x] Change normal turn extraction to write candidates first.
+- [x] Add policy-controlled auto-approval only for explicit high-confidence
   cases, such as direct "remember" instructions in trusted scopes.
 - [ ] Extend CLI review commands from one-shot preview toward stored candidate
   workflows: list, approve, reject, edit, and inspect source.
-- [ ] Emit structured traces for candidate creation and decision outcomes.
+- [x] Emit structured traces for candidate creation and decision outcomes.
+
+Current status: `memory_decisions` exists for pending, approve, reject,
+auto-approve, promote, and skip paths. Edit/supersede/delete decision semantics
+are still Phase 2/3 follow-up work.
 
 Acceptance criteria:
 
-- [ ] No semantic or episodic long-term memory is written without an explicit
+- [x] No semantic or episodic long-term memory is written without an explicit
   decision path.
-- [ ] Rejected candidates remain auditable but never enter retrieval.
+- [x] Rejected candidates remain auditable but never enter retrieval.
 - [ ] Edited candidates preserve the original source message ids and decision
   history.
-- [ ] Review commands can recover from a previous session instead of requiring
+- [x] Review commands can recover from a previous session instead of requiring
   the original message argument again.
 
 Likely files:
@@ -163,8 +167,8 @@ Checkpoint:
 
 - [ ] Automatic extraction can be disabled, candidate-only, or auto-approve by
   config/policy.
-- [ ] CLI review works without corrupting source transcripts.
-- [ ] Prompt construction never sees pending or rejected candidates.
+- [x] CLI review works without corrupting source transcripts.
+- [x] Prompt construction never sees pending or rejected candidates.
 
 ## Phase 3: Atomic Memory Lifecycle, Dedup, And Forgetting
 

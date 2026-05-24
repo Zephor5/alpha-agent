@@ -13,6 +13,9 @@ from alpha_agent.memory.models import (
     ConversationMessage,
     ConversationRole,
     EpisodicMemory,
+    MemoryCandidate,
+    MemoryDecision,
+    MemoryScope,
     ProceduralMemory,
     RuntimeTrace,
     SemanticMemory,
@@ -51,6 +54,29 @@ def _loads_dict_list(value: str | None) -> list[dict[str, Any]]:
     if not isinstance(loaded, list):
         return []
     return [item for item in loaded if isinstance(item, dict)]
+
+
+def _scope_from_row(row: sqlite3.Row) -> MemoryScope:
+    record = _loads_dict(row["scope_metadata"])
+    record["kind"] = row["scope_kind"]
+    record["scope_key"] = row["scope_key"]
+    return MemoryScope.from_record(record)
+
+
+def _scope_params(scope: MemoryScope) -> tuple[str, str, str]:
+    return scope.kind, scope.scope_key, _dumps(scope.to_record())
+
+
+def _scope_filter(
+    scopes: list[MemoryScope] | None,
+    *,
+    column: str = "scope_key",
+) -> tuple[str, list[str]]:
+    if not scopes:
+        return "", []
+    keys = [scope.scope_key for scope in scopes]
+    placeholders = ",".join("?" for _ in keys)
+    return f" AND {column} IN ({placeholders})", keys
 
 
 class MemoryStore:
@@ -396,8 +422,9 @@ class MemoryStore:
                 """
                 INSERT INTO episodic_memories
                     (id, content, summary, source_event_ids, people, places, topics,
-                     salience, confidence, created_at, last_accessed_at, access_count, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     salience, confidence, created_at, last_accessed_at, access_count,
+                     scope_kind, scope_key, scope_metadata, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory.id,
@@ -412,6 +439,7 @@ class MemoryStore:
                     memory.created_at,
                     memory.last_accessed_at,
                     memory.access_count,
+                    *_scope_params(memory.scope),
                     _dumps(memory.metadata),
                 ),
             )
@@ -424,40 +452,60 @@ class MemoryStore:
 
         return self._with_conn(conn, op)
 
-    def list_episodic_memories(self, limit: int = 50) -> list[EpisodicMemory]:
+    def list_episodic_memories(
+        self,
+        limit: int = 50,
+        *,
+        scopes: list[MemoryScope] | None = None,
+    ) -> list[EpisodicMemory]:
         """List recent episodic memories."""
 
+        scope_sql, scope_params = _scope_filter(scopes)
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM episodic_memories ORDER BY created_at DESC LIMIT ?",
-                (limit,),
+                f"""
+                SELECT * FROM episodic_memories
+                WHERE 1 = 1{scope_sql}
+                ORDER BY created_at DESC LIMIT ?
+                """,
+                (*scope_params, limit),
             ).fetchall()
         return [self._episodic_from_row(row) for row in rows]
 
-    def search_episodic(self, query: str, limit: int = 20) -> list[EpisodicMemory]:
+    def search_episodic(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        scopes: list[MemoryScope] | None = None,
+    ) -> list[EpisodicMemory]:
         """Search episodic memories using FTS5 when available, otherwise LIKE."""
 
+        scope_sql, scope_params = _scope_filter(scopes, column="m.scope_key")
         with self.connect() as conn:
             if self._has_fts_table(conn, "episodic_fts") and query.strip():
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT m.* FROM episodic_fts f
                     JOIN episodic_memories m ON m.id = f.memory_id
                     WHERE episodic_fts MATCH ?
+                    {scope_sql}
                     ORDER BY bm25(episodic_fts), m.salience DESC
                     LIMIT ?
                     """,
-                    (self._fts_query(query), limit),
+                    (self._fts_query(query), *scope_params, limit),
                 ).fetchall()
             else:
+                scope_sql, scope_params = _scope_filter(scopes)
                 like = f"%{query}%"
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM episodic_memories
-                    WHERE content LIKE ? OR summary LIKE ?
+                    WHERE (content LIKE ? OR summary LIKE ?)
+                    {scope_sql}
                     ORDER BY salience DESC, created_at DESC LIMIT ?
                     """,
-                    (like, like, limit),
+                    (like, like, *scope_params, limit),
                 ).fetchall()
         return [self._episodic_from_row(row) for row in rows]
 
@@ -473,13 +521,15 @@ class MemoryStore:
                 """
                 INSERT INTO semantic_memories
                     (id, subject, predicate, object, content, confidence, salience,
-                     source_memory_ids, created_at, updated_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(subject, predicate, object) DO UPDATE SET
+                     source_memory_ids, status, scope_kind, scope_key, scope_metadata,
+                     created_at, updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(subject, predicate, object, scope_key) DO UPDATE SET
                     content = excluded.content,
                     confidence = max(semantic_memories.confidence, excluded.confidence),
                     salience = max(semantic_memories.salience, excluded.salience),
                     source_memory_ids = excluded.source_memory_ids,
+                    status = excluded.status,
                     updated_at = excluded.updated_at,
                     metadata = excluded.metadata
                 """,
@@ -492,6 +542,8 @@ class MemoryStore:
                     memory.confidence,
                     memory.salience,
                     _dumps(memory.source_memory_ids),
+                    memory.status,
+                    *_scope_params(memory.scope),
                     memory.created_at,
                     memory.updated_at,
                     _dumps(memory.metadata),
@@ -500,12 +552,13 @@ class MemoryStore:
             row = db.execute(
                 """
                 SELECT * FROM semantic_memories
-                WHERE subject = ? AND predicate = ? AND object = ?
+                WHERE subject = ? AND predicate = ? AND object = ? AND scope_key = ?
                 """,
                 (
                     memory.subject.lower().strip(),
                     memory.predicate.lower().strip(),
                     memory.object.lower().strip(),
+                    memory.scope.scope_key,
                 ),
             ).fetchone()
             saved = self._semantic_from_row(row)
@@ -523,40 +576,80 @@ class MemoryStore:
 
         return self._with_conn(conn, op)
 
-    def list_semantic_memories(self, limit: int = 50) -> list[SemanticMemory]:
+    def list_semantic_memories(
+        self,
+        limit: int = 50,
+        *,
+        scopes: list[MemoryScope] | None = None,
+        statuses: list[str] | None = None,
+    ) -> list[SemanticMemory]:
         """List semantic memories ordered by salience and recency."""
 
+        scope_sql, scope_params = _scope_filter(scopes)
+        status_sql = ""
+        status_params: list[str] = []
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            status_sql = f" AND status IN ({placeholders})"
+            status_params = list(statuses)
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM semantic_memories ORDER BY salience DESC, updated_at DESC LIMIT ?",
-                (limit,),
+                f"""
+                SELECT * FROM semantic_memories
+                WHERE 1 = 1{scope_sql}{status_sql}
+                ORDER BY salience DESC, updated_at DESC LIMIT ?
+                """,
+                (*scope_params, *status_params, limit),
             ).fetchall()
         return [self._semantic_from_row(row) for row in rows]
 
-    def search_semantic(self, query: str, limit: int = 20) -> list[SemanticMemory]:
+    def search_semantic(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        scopes: list[MemoryScope] | None = None,
+        statuses: list[str] | None = None,
+    ) -> list[SemanticMemory]:
         """Search semantic memories using FTS5 when available, otherwise LIKE."""
 
+        scope_sql, scope_params = _scope_filter(scopes, column="m.scope_key")
+        status_sql = ""
+        status_params: list[str] = []
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            status_sql = f" AND m.status IN ({placeholders})"
+            status_params = list(statuses)
         with self.connect() as conn:
             if self._has_fts_table(conn, "semantic_fts") and query.strip():
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT m.* FROM semantic_fts f
                     JOIN semantic_memories m ON m.id = f.memory_id
                     WHERE semantic_fts MATCH ?
+                    {scope_sql}{status_sql}
                     ORDER BY bm25(semantic_fts), m.salience DESC
                     LIMIT ?
                     """,
-                    (self._fts_query(query), limit),
+                    (self._fts_query(query), *scope_params, *status_params, limit),
                 ).fetchall()
             else:
+                scope_sql, scope_params = _scope_filter(scopes)
+                status_sql = ""
+                status_params = []
+                if statuses:
+                    placeholders = ",".join("?" for _ in statuses)
+                    status_sql = f" AND status IN ({placeholders})"
+                    status_params = list(statuses)
                 like = f"%{query}%"
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM semantic_memories
-                    WHERE subject LIKE ? OR predicate LIKE ? OR object LIKE ? OR content LIKE ?
+                    WHERE (subject LIKE ? OR predicate LIKE ? OR object LIKE ? OR content LIKE ?)
+                    {scope_sql}{status_sql}
                     ORDER BY salience DESC, updated_at DESC LIMIT ?
                     """,
-                    (like, like, like, like, limit),
+                    (like, like, like, like, *scope_params, *status_params, limit),
                 ).fetchall()
         return [self._semantic_from_row(row) for row in rows]
 
@@ -565,21 +658,23 @@ class MemoryStore:
         memory: ProceduralMemory,
         conn: sqlite3.Connection | None = None,
     ) -> ProceduralMemory:
-        """Insert or update a procedural memory keyed by name."""
+        """Insert or update a procedural memory keyed by name and scope."""
 
         def op(db: sqlite3.Connection) -> ProceduralMemory:
             db.execute(
                 """
                 INSERT INTO procedural_memories
                     (id, name, description, trigger, procedure_markdown, success_count,
-                     failure_count, confidence, created_at, updated_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(name) DO UPDATE SET
+                     failure_count, confidence, created_at, updated_at,
+                     scope_kind, scope_key, scope_metadata, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name, scope_key) DO UPDATE SET
                     description = excluded.description,
                     trigger = excluded.trigger,
                     procedure_markdown = excluded.procedure_markdown,
                     confidence = max(procedural_memories.confidence, excluded.confidence),
                     updated_at = excluded.updated_at,
+                    scope_metadata = excluded.scope_metadata,
                     metadata = excluded.metadata
                 """,
                 (
@@ -593,12 +688,13 @@ class MemoryStore:
                     memory.confidence,
                     memory.created_at,
                     memory.updated_at,
+                    *_scope_params(memory.scope),
                     _dumps(memory.metadata),
                 ),
             )
             row = db.execute(
-                "SELECT * FROM procedural_memories WHERE name = ?",
-                (memory.name,),
+                "SELECT * FROM procedural_memories WHERE name = ? AND scope_key = ?",
+                (memory.name, memory.scope.scope_key),
             ).fetchone()
             saved = self._procedural_from_row(row)
             if self._has_fts_table(db, "procedural_fts"):
@@ -621,46 +717,63 @@ class MemoryStore:
 
         return self._with_conn(conn, op)
 
-    def list_procedural_memories(self, limit: int = 50) -> list[ProceduralMemory]:
+    def list_procedural_memories(
+        self,
+        limit: int = 50,
+        *,
+        scopes: list[MemoryScope] | None = None,
+    ) -> list[ProceduralMemory]:
         """List procedural memories."""
 
+        scope_sql, scope_params = _scope_filter(scopes)
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM procedural_memories
+                WHERE 1 = 1{scope_sql}
                 ORDER BY confidence DESC, updated_at DESC LIMIT ?
                 """,
-                (limit,),
+                (*scope_params, limit),
             ).fetchall()
         return [self._procedural_from_row(row) for row in rows]
 
-    def search_procedural(self, query: str, limit: int = 20) -> list[ProceduralMemory]:
+    def search_procedural(
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        scopes: list[MemoryScope] | None = None,
+    ) -> list[ProceduralMemory]:
         """Search procedural memories using FTS5 when available, otherwise LIKE."""
 
+        scope_sql, scope_params = _scope_filter(scopes, column="m.scope_key")
         with self.connect() as conn:
             if self._has_fts_table(conn, "procedural_fts") and query.strip():
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT m.* FROM procedural_fts f
                     JOIN procedural_memories m ON m.id = f.memory_id
                     WHERE procedural_fts MATCH ?
+                    {scope_sql}
                     ORDER BY bm25(procedural_fts), m.confidence DESC
                     LIMIT ?
                     """,
-                    (self._fts_query(query), limit),
+                    (self._fts_query(query), *scope_params, limit),
                 ).fetchall()
             else:
+                scope_sql, scope_params = _scope_filter(scopes)
                 like = f"%{query}%"
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT * FROM procedural_memories
-                    WHERE name LIKE ?
+                    WHERE (name LIKE ?
                        OR description LIKE ?
                        OR trigger LIKE ?
-                       OR procedure_markdown LIKE ?
+                       OR procedure_markdown LIKE ?)
+                    {scope_sql}
                     ORDER BY confidence DESC, updated_at DESC LIMIT ?
                     """,
-                    (like, like, like, like, limit),
+                    (like, like, like, like, *scope_params, limit),
                 ).fetchall()
         return [self._procedural_from_row(row) for row in rows]
 
@@ -670,6 +783,8 @@ class MemoryStore:
         memory_type: str,
         query: str,
         score: float,
+        *,
+        scope: MemoryScope | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> None:
         """Record that a memory was retrieved and update access counters when applicable."""
@@ -678,10 +793,19 @@ class MemoryStore:
             db.execute(
                 """
                 INSERT INTO memory_access_log
-                    (id, memory_id, memory_type, query, accessed_at, score, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (id, memory_id, memory_type, query, accessed_at, score, scope_key, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (new_id("access"), memory_id, memory_type, query, utc_now_iso(), score, "{}"),
+                (
+                    new_id("access"),
+                    memory_id,
+                    memory_type,
+                    query,
+                    utc_now_iso(),
+                    score,
+                    (scope or MemoryScope.default()).scope_key,
+                    "{}",
+                ),
             )
             if memory_type == "episodic":
                 db.execute(
@@ -695,6 +819,148 @@ class MemoryStore:
 
         self._with_conn(conn, op)
 
+    def insert_memory_candidate(
+        self,
+        candidate: MemoryCandidate,
+        conn: sqlite3.Connection | None = None,
+    ) -> MemoryCandidate:
+        """Insert a stored memory candidate."""
+
+        def op(db: sqlite3.Connection) -> MemoryCandidate:
+            db.execute(
+                """
+                INSERT INTO memory_candidates
+                    (id, candidate_type, proposed_layer, content, weak_structure,
+                     salience, confidence, scope_kind, scope_key, scope_metadata,
+                     source_message_ids, status, reviewer_metadata,
+                     created_at, updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate.id,
+                    candidate.candidate_type,
+                    candidate.proposed_layer,
+                    candidate.content,
+                    _dumps(candidate.weak_structure),
+                    candidate.salience,
+                    candidate.confidence,
+                    *_scope_params(candidate.scope),
+                    _dumps(candidate.source_message_ids),
+                    candidate.status,
+                    _dumps(candidate.reviewer_metadata),
+                    candidate.created_at,
+                    candidate.updated_at,
+                    _dumps(candidate.metadata),
+                ),
+            )
+            return candidate
+
+        return self._with_conn(conn, op)
+
+    def list_memory_candidates(
+        self,
+        *,
+        status: str | None = None,
+        scopes: list[MemoryScope] | None = None,
+        limit: int = 50,
+    ) -> list[MemoryCandidate]:
+        """List stored memory candidates for review or audit."""
+
+        conditions = ["1 = 1"]
+        params: list[Any] = []
+        if status is not None:
+            conditions.append("status = ?")
+            params.append(status)
+        scope_sql, scope_params = _scope_filter(scopes)
+        query = f"""
+            SELECT * FROM memory_candidates
+            WHERE {' AND '.join(conditions)}{scope_sql}
+            ORDER BY updated_at DESC, id DESC
+            LIMIT ?
+        """
+        params.extend(scope_params)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._memory_candidate_from_row(row) for row in rows]
+
+    def get_memory_candidate(self, candidate_id: str) -> MemoryCandidate | None:
+        """Return one stored memory candidate by id."""
+
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM memory_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+        return self._memory_candidate_from_row(row) if row is not None else None
+
+    def update_memory_candidate_status(
+        self,
+        candidate_id: str,
+        status: str,
+        *,
+        reviewer_metadata: dict[str, Any] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> MemoryCandidate:
+        """Update candidate status and return the stored row."""
+
+        def op(db: sqlite3.Connection) -> MemoryCandidate:
+            db.execute(
+                """
+                UPDATE memory_candidates
+                SET status = ?,
+                    reviewer_metadata = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    _dumps(reviewer_metadata or {}),
+                    utc_now_iso(),
+                    candidate_id,
+                ),
+            )
+            row = db.execute(
+                "SELECT * FROM memory_candidates WHERE id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"memory candidate not found: {candidate_id}")
+            return self._memory_candidate_from_row(row)
+
+        return self._with_conn(conn, op)
+
+    def insert_memory_decision(
+        self,
+        decision: MemoryDecision,
+        conn: sqlite3.Connection | None = None,
+    ) -> MemoryDecision:
+        """Insert an auditable memory decision."""
+
+        def op(db: sqlite3.Connection) -> MemoryDecision:
+            db.execute(
+                """
+                INSERT INTO memory_decisions
+                    (id, candidate_id, action, memory_type, memory_id, reviewer,
+                     rationale, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision.id,
+                    decision.candidate_id,
+                    decision.action,
+                    decision.memory_type,
+                    decision.memory_id,
+                    decision.reviewer,
+                    decision.rationale,
+                    decision.created_at,
+                    _dumps(decision.metadata),
+                ),
+            )
+            return decision
+
+        return self._with_conn(conn, op)
+
     def stats(self) -> dict[str, int]:
         """Return counts by memory table."""
 
@@ -705,6 +971,8 @@ class MemoryStore:
             "episodic": "episodic_memories",
             "semantic": "semantic_memories",
             "procedural": "procedural_memories",
+            "memory_candidates": "memory_candidates",
+            "memory_decisions": "memory_decisions",
             "entity_nodes": "entity_nodes",
             "relation_edges": "relation_edges",
         }
@@ -817,6 +1085,7 @@ class MemoryStore:
             last_accessed_at=row["last_accessed_at"],
             access_count=int(row["access_count"]),
             metadata=_loads_dict(row["metadata"]),
+            scope=_scope_from_row(row),
         )
 
     def _semantic_from_row(self, row: sqlite3.Row) -> SemanticMemory:
@@ -832,6 +1101,8 @@ class MemoryStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=_loads_dict(row["metadata"]),
+            status=row["status"],
+            scope=_scope_from_row(row),
         )
 
     def _procedural_from_row(self, row: sqlite3.Row) -> ProceduralMemory:
@@ -844,6 +1115,25 @@ class MemoryStore:
             success_count=int(row["success_count"]),
             failure_count=int(row["failure_count"]),
             confidence=float(row["confidence"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            metadata=_loads_dict(row["metadata"]),
+            scope=_scope_from_row(row),
+        )
+
+    def _memory_candidate_from_row(self, row: sqlite3.Row) -> MemoryCandidate:
+        return MemoryCandidate(
+            id=row["id"],
+            candidate_type=row["candidate_type"],
+            proposed_layer=row["proposed_layer"],
+            content=row["content"],
+            weak_structure=_loads_dict(row["weak_structure"]),
+            salience=float(row["salience"]),
+            confidence=float(row["confidence"]),
+            scope=_scope_from_row(row),
+            source_message_ids=_loads_list(row["source_message_ids"]),
+            status=row["status"],
+            reviewer_metadata=_loads_dict(row["reviewer_metadata"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=_loads_dict(row["metadata"]),

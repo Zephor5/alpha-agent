@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from alpha_agent.memory.models import ProceduralMemory
+from alpha_agent.memory.models import MemoryScope, ProceduralMemory
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.skills.manager import SkillManager
 from alpha_agent.utils.ids import new_id
@@ -16,10 +16,11 @@ class ProceduralMemoryManager:
         self.store = store
         self.skill_manager = skill_manager or SkillManager()
 
-    def load_builtin_skills(self) -> list[ProceduralMemory]:
+    def load_builtin_skills(self, scope: MemoryScope | None = None) -> list[ProceduralMemory]:
         """Load bundled markdown skills into procedural memory."""
 
         memories: list[ProceduralMemory] = []
+        memory_scope = scope or MemoryScope.default()
         for skill in self.skill_manager.load_builtin_skills():
             now = utc_now_iso()
             memories.append(
@@ -36,6 +37,7 @@ class ProceduralMemoryManager:
                         created_at=now,
                         updated_at=now,
                         metadata={"builtin": True},
+                        scope=memory_scope,
                     )
                 )
             )

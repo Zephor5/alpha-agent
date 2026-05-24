@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from alpha_agent.memory.episodic import EpisodicMemoryManager
-from alpha_agent.memory.models import ExtractedMemoryCandidate
+from alpha_agent.memory.models import ExtractedMemoryCandidate, MemoryScope
 from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
 
@@ -22,11 +22,14 @@ class PersistedMemory:
 def persist_candidates(
     store: MemoryStore,
     candidates: list[ExtractedMemoryCandidate],
+    *,
+    scope: MemoryScope | None = None,
 ) -> list[PersistedMemory]:
     """Persist approved extracted candidates using the runtime memory mapping."""
 
     episodic = EpisodicMemoryManager(store)
     semantic = SemanticMemoryManager(store)
+    memory_scope = scope or MemoryScope.default()
     persisted: list[PersistedMemory] = []
     for candidate in candidates:
         if candidate.type == "episodic":
@@ -35,6 +38,7 @@ def persist_candidates(
                 source_event_ids=candidate.source_event_ids,
                 salience=candidate.salience,
                 confidence=candidate.confidence,
+                scope=memory_scope,
             )
             persisted.append(
                 PersistedMemory(
@@ -52,6 +56,7 @@ def persist_candidates(
                 confidence=candidate.confidence,
                 salience=candidate.salience,
                 source_memory_ids=candidate.source_event_ids,
+                scope=memory_scope,
             )
             persisted.append(
                 PersistedMemory(
@@ -66,6 +71,7 @@ def persist_candidates(
                 source_event_ids=candidate.source_event_ids,
                 salience=candidate.salience,
                 confidence=candidate.confidence,
+                scope=memory_scope,
             )
             persisted.append(
                 PersistedMemory(

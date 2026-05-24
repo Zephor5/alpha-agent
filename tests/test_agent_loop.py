@@ -50,6 +50,7 @@ def test_mock_agent_loop_stores_user_and_assistant_messages(tmp_path: Path) -> N
     messages = store.list_conversation_messages("s1")
     traces = store.list_runtime_traces(session_id="s1", limit=20)
     semantic = store.list_semantic_memories()
+    candidates = store.list_memory_candidates(status="auto_approved")
     assert "Mock response" in result.response
     assert [message.role for message in messages] == [
         "user",
@@ -66,6 +67,9 @@ def test_mock_agent_loop_stores_user_and_assistant_messages(tmp_path: Path) -> N
         "memory.extracted",
     }
     assert len(semantic) == 1
+    assert candidates
+    assert result.debug["persisted_memory_count"] >= 1
+    assert result.debug["memory_scope"]["scope_key"] == "user:default"
     assert result.debug["extracted_memory_count"] >= 1
 
 
@@ -100,9 +104,10 @@ def test_agent_honors_configured_retrieval_limit(tmp_path: Path) -> None:
             query: str,
             session_id: str,
             limit: int = 8,
+            **kwargs: Any,
         ) -> RetrievedContext:
             self.seen_limit = limit
-            return super().retrieve_context(query, session_id, limit)
+            return super().retrieve_context(query, session_id, limit, **kwargs)
 
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()
@@ -752,7 +757,9 @@ def test_agent_records_transcript_and_runtime_trace_sequence(tmp_path: Path) -> 
         "context_compression.skipped",
         "llm.started",
         "llm.completed",
+        "memory.candidates.created",
         "memory.extracted",
+        "memory.decisions",
     ]
     messages = store.list_conversation_messages("s1")
     assert [message.role for message in messages] == ["user", "assistant"]

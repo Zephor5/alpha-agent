@@ -84,6 +84,9 @@ def test_prompt_includes_memory_sections() -> None:
     assert "### Runtime Reminders" in context_prompt
     assert "Tool lookup: current build status is green" in context_prompt
     assert "### User Facts" in context_prompt
+    assert "status=active" in context_prompt
+    assert "scope=user:default" in context_prompt
+    assert "source=" in context_prompt
     assert "### Prior Episodes" in context_prompt
     assert "### Relevant Procedures" in context_prompt
     assert "### Entity Hints" in context_prompt
