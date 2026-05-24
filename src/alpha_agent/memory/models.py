@@ -11,6 +11,15 @@ CandidateStatus = Literal["pending", "approved", "auto_approved", "rejected", "e
 ConversationRole = Literal["user", "assistant", "tool"]
 MemoryCaptureMode = Literal["disabled", "candidate_only", "auto_approve_explicit"]
 ScopeKind = Literal["global_user", "platform_user", "chat_thread", "project"]
+SemanticMemoryStatus = Literal["active", "superseded", "deleted", "conflict_review"]
+SemanticDecisionAction = Literal[
+    "store",
+    "skip",
+    "update",
+    "merge",
+    "supersede",
+    "conflict-review",
+]
 
 
 @dataclass(frozen=True)
@@ -27,7 +36,7 @@ class MemoryScope:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def default(cls) -> "MemoryScope":
+    def default(cls) -> MemoryScope:
         """Return the deterministic local CLI scope."""
 
         return cls(kind="global_user", scope_key="user:default", user_id="default")
@@ -38,7 +47,7 @@ class MemoryScope:
         *,
         session_id: str,
         source_metadata: dict[str, Any] | None,
-    ) -> "MemoryScope":
+    ) -> MemoryScope:
         """Derive a normalized memory scope from CLI/gateway source metadata."""
 
         metadata = dict(source_metadata or {})
@@ -89,7 +98,7 @@ class MemoryScope:
         return cls.default()
 
     @classmethod
-    def from_record(cls, record: dict[str, Any] | None) -> "MemoryScope":
+    def from_record(cls, record: dict[str, Any] | None) -> MemoryScope:
         """Load a memory scope from stored JSON metadata."""
 
         if not record:
@@ -124,7 +133,7 @@ class MemoryScope:
             "metadata": self.metadata,
         }
 
-    def allowed_read_scopes(self) -> list["MemoryScope"]:
+    def allowed_read_scopes(self) -> list[MemoryScope]:
         """Return scopes visible to the current turn, most-specific first."""
 
         scopes = [self]
@@ -215,21 +224,39 @@ class EpisodicMemory:
 
 @dataclass(frozen=True)
 class SemanticMemory:
-    """Stable fact, preference, concept, or user-specific knowledge."""
+    """Atomic semantic memory with weak structure and lifecycle status."""
 
     id: str
-    subject: str
-    predicate: str
-    object: str
     content: str
+    memory_type: str
+    subject: str | None
+    predicate: str | None
+    object: str | None
+    entities: list[str]
     confidence: float
     salience: float
+    stability: float
     source_memory_ids: list[str]
     created_at: str
     updated_at: str
     metadata: dict[str, Any] = field(default_factory=dict)
-    status: str = "active"
+    status: SemanticMemoryStatus = "active"
+    valid_from: str | None = None
+    valid_until: str | None = None
+    supersedes_id: str | None = None
+    superseded_by_id: str | None = None
+    deleted_at: str | None = None
     scope: MemoryScope = field(default_factory=MemoryScope.default)
+
+
+@dataclass(frozen=True)
+class SemanticMemoryDecision:
+    """Result of applying lifecycle policy to an atomic semantic memory."""
+
+    action: SemanticDecisionAction
+    memory: SemanticMemory
+    matched_memory_ids: list[str] = field(default_factory=list)
+    rationale: str = ""
 
 
 @dataclass(frozen=True)

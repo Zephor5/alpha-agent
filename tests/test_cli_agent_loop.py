@@ -298,6 +298,82 @@ def test_memory_list_filters_default_scope_and_active_semantic_status(tmp_path: 
     assert "Other scoped episode" not in result.output
 
 
+def test_memory_forget_marks_semantic_memory_deleted_and_hides_it(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["memory", "forget", memory.id], env=_env(tmp_path))
+    list_result = runner.invoke(app, ["memory", "list"], env=_env(tmp_path))
+
+    assert result.exit_code == 0
+    assert "deleted" in result.output
+    assert memory.id in result.output
+    assert list_result.exit_code == 0
+    assert "User prefers tea" not in list_result.output
+    assert store.list_semantic_memories(statuses=["deleted"])[0].id == memory.id
+
+
+def test_memory_forget_rejects_out_of_scope_semantic_memory(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    other_scope = MemoryScope(
+        kind="platform_user",
+        scope_key="platform:telegram:user:other",
+        platform="telegram",
+        user_id="other",
+    )
+    memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "coffee",
+        "Other scope active memory",
+        scope=other_scope,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["memory", "forget", memory.id], env=_env(tmp_path))
+
+    assert result.exit_code != 0
+    assert "outside visible scope" in result.output
+    assert store.get_semantic_memory(memory.id).status == "active"
+
+
+def test_memory_audit_shows_supersession_chain_and_sources(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    semantic = SemanticMemoryManager(store)
+    old = semantic.upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+        source_memory_ids=["msg-old"],
+    )
+    new = semantic.upsert_fact(
+        "user",
+        "prefers",
+        "coffee",
+        "User prefers coffee",
+        source_memory_ids=["msg-new"],
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["memory", "audit", new.id], env=_env(tmp_path))
+
+    assert result.exit_code == 0
+    assert new.id in result.output
+    assert old.id in result.output
+    assert "msg-new" in result.output
+    assert "msg-old" in result.output
+    assert "superseded" in result.output
+
+
 def test_memory_review_reject_all_does_not_store_candidates(tmp_path: Path) -> None:
     runner = CliRunner()
 

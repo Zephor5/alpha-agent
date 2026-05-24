@@ -308,6 +308,66 @@ def _render_candidate_audit(audit: Any) -> None:
         )
 
 
+def _render_memory_audit(audit: Any) -> None:
+    memory = audit.memory
+    console.print(
+        f"Memory: id={memory.id} status={memory.status} type={memory.memory_type} "
+        f"scope={memory.scope.scope_key} source_ids={','.join(audit.source_message_ids)} "
+        f"content={memory.content}"
+    )
+    memory_table = Table(title="Semantic Memory")
+    memory_table.add_column("Field")
+    memory_table.add_column("Value")
+    memory_table.add_row("ID", memory.id)
+    memory_table.add_row("Status", memory.status)
+    memory_table.add_row("Type", memory.memory_type)
+    memory_table.add_row("Scope", memory.scope.scope_key)
+    memory_table.add_row("Subject", memory.subject or "")
+    memory_table.add_row("Predicate", memory.predicate or "")
+    memory_table.add_row("Object", memory.object or "")
+    memory_table.add_row("Sources", ", ".join(audit.source_message_ids))
+    memory_table.add_row("Supersedes", memory.supersedes_id or "")
+    memory_table.add_row("Superseded By", memory.superseded_by_id or "")
+    memory_table.add_row("Content", memory.content)
+    console.print(memory_table)
+
+    chain_table = Table(title="Supersession Chain")
+    chain_table.add_column("ID")
+    chain_table.add_column("Status")
+    chain_table.add_column("Object")
+    chain_table.add_column("Sources")
+    chain_table.add_column("Content")
+    for item in audit.supersession_chain:
+        chain_table.add_row(
+            item.id,
+            item.status,
+            item.object or "",
+            ", ".join(item.source_memory_ids),
+            item.content,
+        )
+        console.print(
+            f"Supersession: id={item.id} status={item.status} "
+            f"source_ids={','.join(item.source_memory_ids)} content={item.content}"
+        )
+    console.print(chain_table)
+
+    source_table = Table(title="Source Transcript Evidence")
+    source_table.add_column("ID")
+    source_table.add_column("Session")
+    source_table.add_column("Ordinal", justify="right")
+    source_table.add_column("Role")
+    source_table.add_column("Content")
+    for message in audit.source_messages:
+        source_table.add_row(
+            message.id,
+            message.session_id,
+            str(message.ordinal),
+            message.role,
+            message.raw_content,
+        )
+    console.print(source_table)
+
+
 def _memory_access_rows(
     store: MemoryStore,
     *,
@@ -861,6 +921,41 @@ def search(
     for procedural_memory in context.procedural_memories:
         table.add_row("procedural", procedural_memory.id, procedural_memory.name)
     console.print(table)
+
+
+@memory_app.command()
+def forget(
+    memory_id: Annotated[str, typer.Argument(help="Semantic memory id to forget.")],
+    reason: Annotated[
+        str,
+        typer.Option("--reason", help="Audit reason recorded on the deleted memory."),
+    ] = "user requested forget",
+) -> None:
+    """Mark a semantic memory deleted without physically removing evidence."""
+
+    config = load_config()
+    store = _store(config)
+    service = MemoryReviewService(store)
+    try:
+        service.inspect_memory(memory_id)
+    except (KeyError, PermissionError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    forgotten = store.forget_semantic_memory(memory_id, reason=reason)
+    console.print(
+        f"Memory {forgotten.id} marked {forgotten.status}; "
+        "it is excluded from retrieval and prompts."
+    )
+
+
+@memory_app.command()
+def audit(
+    memory_id: Annotated[str, typer.Argument(help="Semantic memory id to inspect.")],
+) -> None:
+    """Inspect semantic memory source evidence and supersession lineage."""
+
+    config = load_config()
+    service = MemoryReviewService(_store(config))
+    _render_memory_audit(service.inspect_memory(memory_id))
 
 
 @memory_app.command()

@@ -9,6 +9,7 @@ from alpha_agent.memory.controller import MemoryController
 from alpha_agent.memory.models import MemoryCandidate, MemoryScope
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.review import MemoryReviewService
+from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.utils.time import utc_now_iso
 
@@ -232,11 +233,7 @@ def test_stored_candidate_edit_preserves_sources_and_records_decision(
     assert [message.raw_content for message in audit.source_messages] == [
         "Remember that I prefer coffee"
     ]
-    assert [decision.action for decision in audit.decisions] == [
-        "edit",
-        "approve",
-        "promote",
-    ]
+    assert [decision.action for decision in audit.decisions] == ["edit", "approve", "store"]
     edit_decision = audit.decisions[0]
     assert edit_decision.metadata["original_content"] == "User prefers coffee"
     assert edit_decision.metadata["edited_content"] == "User prefers tea"
@@ -244,6 +241,84 @@ def test_stored_candidate_edit_preserves_sources_and_records_decision(
     semantic = store.list_semantic_memories()[0]
     assert semantic.content == "User prefers tea"
     assert semantic.source_memory_ids == [source.id]
+
+
+def test_candidate_correction_supersedes_active_memory_and_audit_links_sources(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    new_source = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="Actually I prefer coffee",
+    )
+    service = MemoryReviewService(store)
+    first = service.approve(
+        message="Remember that I prefer tea",
+        session_id="review-1",
+        candidates=service.preview("remember that I prefer tea")[:1],
+    )
+    assert first[0].memory_type == "semantic"
+    now = utc_now_iso()
+    store.insert_memory_candidate(
+        MemoryCandidate(
+            id="cand-correction",
+            candidate_type="semantic",
+            proposed_layer="semantic",
+            content="User prefers coffee",
+            weak_structure={"subject": "user", "predicate": "prefers", "object": "coffee"},
+            salience=0.9,
+            confidence=0.8,
+            scope=MemoryScope.default(),
+            source_message_ids=[new_source.id],
+            status="pending",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    persisted = service.approve_stored("cand-correction", reviewer="cli")
+    audit = service.inspect_memory(persisted[0].memory_id)
+
+    active = store.list_semantic_memories(statuses=["active"])
+    superseded = store.list_semantic_memories(statuses=["superseded"])
+    assert persisted[0].action == "supersede"
+    assert [memory.object for memory in active] == ["coffee"]
+    assert [memory.object for memory in superseded] == ["tea"]
+    assert audit.memory.id == active[0].id
+    assert [memory.id for memory in audit.supersession_chain] == [superseded[0].id]
+    assert new_source.id in audit.source_message_ids
+
+
+def test_audit_old_superseded_memory_shows_active_replacement(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+    old = semantic.upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+        source_memory_ids=["msg-old"],
+    )
+    new = semantic.upsert_fact(
+        "user",
+        "prefers",
+        "coffee",
+        "User prefers coffee",
+        source_memory_ids=["msg-new"],
+    )
+    service = MemoryReviewService(store)
+
+    audit = service.inspect_memory(old.id)
+
+    assert audit.memory.id == old.id
+    assert audit.memory.status == "superseded"
+    assert [memory.id for memory in audit.supersession_chain] == [new.id]
+    assert audit.source_message_ids == ["msg-old", "msg-new"]
 
 
 def test_reject_edited_candidate_keeps_edit_audit_without_promotion(

@@ -333,7 +333,7 @@ These items make Alpha Agent feel different from a generic chat bot.
   memory pipeline.
 - [ ] Add confidence/source display to channel replies when memory is used.
 - [ ] Add "what do you remember about me?" command.
-- [ ] Add "forget this" / "forget memory id" support.
+- [x] Add "forget this" / "forget memory id" support.
 - [ ] Add per-channel memory policy:
   - DM can write semantic memory by default.
   - group chats may require explicit "remember".
@@ -342,10 +342,10 @@ These items make Alpha Agent feel different from a generic chat bot.
   - manual.
   - after N turns.
   - scheduled only after gateway scheduler exists.
-- [ ] Add duplicate/contradiction handling:
+- [x] Add duplicate/contradiction handling:
   - detect conflicting semantic facts by subject/predicate.
   - mark older fact superseded instead of deleting immediately.
-  - expose conflict review in CLI.
+  - expose lifecycle audit through `alpha memory audit <memory-id>`.
 
 ## P2: Engineering And Operations
 

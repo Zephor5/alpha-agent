@@ -210,13 +210,227 @@ def test_semantic_upsert_merges_same_fact(tmp_path: Path) -> None:
         "prefers",
         "concise answers",
         "User prefers concise answers",
+        source_memory_ids=["msg-1"],
     )
-    second = semantic.upsert_fact("User", "Prefers", "Concise Answers", "Updated content")
+    second = semantic.upsert_fact(
+        "User",
+        "Prefers",
+        "Concise Answers",
+        "Updated content",
+        source_memory_ids=["msg-2"],
+    )
 
     memories = store.list_semantic_memories()
     assert len(memories) == 1
     assert first.id == second.id
     assert memories[0].content == "Updated content"
+    assert memories[0].source_memory_ids == ["msg-1", "msg-2"]
+
+
+def test_semantic_lifecycle_reports_update_and_skip_actions(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+
+    first = semantic.remember_atomic(
+        content="User prefers tea",
+        memory_type="preference",
+        subject="user",
+        predicate="prefers",
+        object_value="tea",
+        source_memory_ids=["msg-1"],
+    )
+    updated = semantic.remember_atomic(
+        content="User strongly prefers tea",
+        memory_type="preference",
+        subject="user",
+        predicate="prefers",
+        object_value="tea",
+        source_memory_ids=["msg-2"],
+    )
+    skipped = semantic.remember_atomic(
+        content="User strongly prefers tea",
+        memory_type="preference",
+        subject="user",
+        predicate="prefers",
+        object_value="tea",
+        source_memory_ids=["msg-1", "msg-2"],
+    )
+
+    assert first.action == "store"
+    assert updated.action == "update"
+    assert skipped.action == "skip"
+    assert updated.memory.id == skipped.memory.id
+
+
+def test_semantic_normalized_content_duplicate_merges_sources(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+
+    first = semantic.remember_atomic(
+        content="User prefers green tea.",
+        memory_type="preference",
+        confidence=0.8,
+        salience=0.9,
+        source_memory_ids=["msg-1"],
+    )
+    second = semantic.remember_atomic(
+        content=" user prefers GREEN tea ",
+        memory_type="preference",
+        confidence=0.7,
+        salience=0.6,
+        source_memory_ids=["msg-2"],
+    )
+
+    memories = store.list_semantic_memories(statuses=["active"])
+    assert len(memories) == 1
+    assert second.action == "merge"
+    assert first.memory.id == second.memory.id
+    assert memories[0].source_memory_ids == ["msg-1", "msg-2"]
+
+
+def test_semantic_changed_object_supersedes_old_active_memory(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+
+    old = semantic.upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+        source_memory_ids=["msg-old"],
+    )
+    new = semantic.upsert_fact(
+        "user",
+        "prefers",
+        "coffee",
+        "User now prefers coffee",
+        source_memory_ids=["msg-new"],
+    )
+
+    active = store.list_semantic_memories(statuses=["active"])
+    superseded = store.list_semantic_memories(statuses=["superseded"])
+
+    assert [memory.id for memory in active] == [new.id]
+    assert [memory.id for memory in superseded] == [old.id]
+    assert active[0].supersedes_id == old.id
+    assert superseded[0].superseded_by_id == new.id
+    assert active[0].source_memory_ids == ["msg-new", "msg-old"]
+
+
+def test_semantic_similar_changed_object_supersedes_instead_of_merging_stale_object(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+
+    old = semantic.remember_atomic(
+        content="User strongly prefers dark roast tea every morning",
+        memory_type="preference",
+        subject="user",
+        predicate="prefers",
+        object_value="dark roast tea",
+        confidence=0.8,
+        salience=0.9,
+        source_memory_ids=["msg-old"],
+    )
+    new = semantic.remember_atomic(
+        content="User strongly prefers dark roast coffee every morning",
+        memory_type="preference",
+        subject="user",
+        predicate="prefers",
+        object_value="dark roast coffee",
+        confidence=0.8,
+        salience=0.9,
+        source_memory_ids=["msg-new"],
+    )
+
+    active = store.list_semantic_memories(statuses=["active"])
+    superseded = store.list_semantic_memories(statuses=["superseded"])
+
+    assert new.action == "supersede"
+    assert [memory.object for memory in active] == ["dark roast coffee"]
+    assert [memory.id for memory in superseded] == [old.memory.id]
+    assert active[0].id == new.memory.id
+
+
+def test_semantic_low_confidence_changed_object_queues_conflict_review(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+
+    old = semantic.upsert_fact("user", "prefers", "tea", "User prefers tea")
+    review = semantic.remember_atomic(
+        content="User might prefer coffee",
+        memory_type="preference",
+        subject="user",
+        predicate="prefers",
+        object_value="coffee",
+        confidence=0.4,
+        salience=0.8,
+        source_memory_ids=["msg-review"],
+    )
+
+    active = store.list_semantic_memories(statuses=["active"])
+    conflicts = store.list_semantic_memories(statuses=["conflict_review"])
+
+    assert review.action == "conflict-review"
+    assert [memory.id for memory in active] == [old.id]
+    assert [memory.id for memory in conflicts] == [review.memory.id]
+    assert conflicts[0].metadata["conflicts_with"] == [old.id]
+
+
+def test_semantic_same_transaction_similarity_duplicate_merges(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+
+    with store.immediate_transaction() as conn:
+        first = semantic.remember_atomic(
+            content="Alpha Project uses SQLite memory storage for local runtime",
+            memory_type="fact",
+            entities=["Alpha Project"],
+            confidence=0.8,
+            salience=0.7,
+            source_memory_ids=["msg-1"],
+            conn=conn,
+        )
+        second = semantic.remember_atomic(
+            content="Alpha Project uses SQLite memory store for local runtime",
+            memory_type="fact",
+            entities=["Alpha Project"],
+            confidence=0.8,
+            salience=0.7,
+            source_memory_ids=["msg-2"],
+            conn=conn,
+        )
+
+    memories = store.list_semantic_memories(statuses=["active"])
+    assert first.action == "store"
+    assert second.action == "merge"
+    assert len(memories) == 1
+    assert memories[0].source_memory_ids == ["msg-1", "msg-2"]
+
+
+def test_forget_semantic_memory_marks_deleted_without_physical_delete(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+    memory = semantic.upsert_fact("user", "prefers", "tea", "User prefers tea")
+
+    deleted = store.forget_semantic_memory(memory.id, reason="test forget")
+
+    assert deleted.status == "deleted"
+    assert deleted.metadata["forget_reason"] == "test forget"
+    assert store.list_semantic_memories(statuses=["active"]) == []
+    assert store.list_semantic_memories(statuses=["deleted"])[0].id == memory.id
 
 
 def test_procedural_upsert_is_scope_aware(tmp_path: Path) -> None:

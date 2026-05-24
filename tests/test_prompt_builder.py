@@ -24,12 +24,15 @@ def test_prompt_includes_memory_sections() -> None:
         semantic_memories=[
             SemanticMemory(
                 id="sem1",
+                content="User prefers concise answers",
+                memory_type="preference",
                 subject="user",
                 predicate="prefers",
                 object="concise answers",
-                content="User prefers concise answers",
+                entities=["user", "concise answers"],
                 confidence=0.9,
                 salience=0.8,
+                stability=0.8,
                 source_memory_ids=[],
                 created_at="2026-01-01T00:00:00+00:00",
                 updated_at="2026-01-01T00:00:00+00:00",

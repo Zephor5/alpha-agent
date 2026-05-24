@@ -18,6 +18,7 @@ from alpha_agent.memory.models import (
 )
 from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
+from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.runtime.agent import (
     AgentCanceledError,
@@ -72,11 +73,111 @@ def test_mock_agent_loop_stores_user_and_assistant_messages(tmp_path: Path) -> N
     for candidate in candidates:
         assert [decision.action for decision in store.list_memory_decisions(candidate.id)] == [
             "auto_approve",
-            "promote",
+            "store",
         ]
     assert result.debug["persisted_memory_count"] >= 1
     assert result.debug["memory_scope"]["scope_key"] == "user:default"
     assert result.debug["extracted_memory_count"] >= 1
+
+
+def test_agent_forget_this_deletes_most_recent_retrieved_semantic_memory(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+    )
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+    )
+
+    result = agent.respond("forget this", session_id="s1")
+
+    assert result.debug["forgotten_memory_ids"] == [memory.id]
+    assert store.list_semantic_memories(statuses=["active"]) == []
+    assert store.list_semantic_memories(statuses=["deleted"])[0].id == memory.id
+
+
+def test_agent_forget_memory_id_deletes_same_scope_memory(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    scope = MemoryScope(
+        kind="platform_user",
+        scope_key="platform:telegram:user:alice",
+        platform="telegram",
+        user_id="alice",
+    )
+    memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+        scope=scope,
+    )
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+    )
+
+    result = agent.respond(
+        f"forget memory {memory.id}",
+        session_id="s1",
+        source_metadata={"memory_scope": scope.to_record()},
+    )
+
+    assert result.debug["forgotten_memory_ids"] == [memory.id]
+    assert result.debug["skipped_forget_memory_ids"] == []
+    assert store.get_semantic_memory(memory.id).status == "deleted"
+
+
+def test_agent_forget_memory_id_skips_out_of_scope_memory(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    alice_scope = MemoryScope(
+        kind="platform_user",
+        scope_key="platform:telegram:user:alice",
+        platform="telegram",
+        user_id="alice",
+    )
+    bob_scope = MemoryScope(
+        kind="platform_user",
+        scope_key="platform:telegram:user:bob",
+        platform="telegram",
+        user_id="bob",
+    )
+    alice_memory = SemanticMemoryManager(store).upsert_fact(
+        "user",
+        "prefers",
+        "tea",
+        "User prefers tea",
+        scope=alice_scope,
+    )
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+    )
+
+    result = agent.respond(
+        f"forget memory {alice_memory.id}",
+        session_id="s1",
+        source_metadata={"memory_scope": bob_scope.to_record()},
+    )
+
+    traces = store.list_runtime_traces(session_id="s1", event_type="memory.forget.skipped")
+    assert result.debug["forgotten_memory_ids"] == []
+    assert result.debug["skipped_forget_memory_ids"] == [alice_memory.id]
+    assert store.get_semantic_memory(alice_memory.id).status == "active"
+    assert len(traces) == 1
+    assert traces[0].metadata["memory_ids"] == [alice_memory.id]
+    assert traces[0].metadata["scope"]["scope_key"] == bob_scope.scope_key
 
 
 def test_agent_memory_capture_mode_disabled_skips_candidates_and_persistence(

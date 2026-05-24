@@ -18,6 +18,7 @@ class PersistedMemory:
     candidate_type: str
     memory_type: str
     memory_id: str
+    action: str = "store"
 
 
 def persist_candidates(
@@ -48,25 +49,31 @@ def persist_candidates(
                     candidate_type=candidate.type,
                     memory_type="episodic",
                     memory_id=episodic_memory.id,
+                    action="store",
                 )
             )
         elif candidate.type == "semantic" and candidate.subject and candidate.predicate:
-            semantic_memory = semantic.upsert_fact(
+            decision = semantic.remember_atomic(
+                content=candidate.content,
+                memory_type="preference"
+                if candidate.predicate in {"prefers", "likes", "dislikes"}
+                else "fact",
                 subject=candidate.subject,
                 predicate=candidate.predicate,
                 object_value=candidate.object or "",
-                content=candidate.content,
                 confidence=candidate.confidence,
                 salience=candidate.salience,
                 source_memory_ids=candidate.source_event_ids,
                 scope=memory_scope,
+                metadata=dict(candidate.metadata),
                 conn=conn,
             )
             persisted.append(
                 PersistedMemory(
                     candidate_type=candidate.type,
                     memory_type="semantic",
-                    memory_id=semantic_memory.id,
+                    memory_id=decision.memory.id,
+                    action=decision.action,
                 )
             )
         elif candidate.type == "procedural_candidate":
@@ -83,6 +90,7 @@ def persist_candidates(
                     candidate_type=candidate.type,
                     memory_type="episodic",
                     memory_id=procedural_episode.id,
+                    action="store",
                 )
             )
     return persisted

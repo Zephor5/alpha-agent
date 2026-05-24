@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import replace
 from typing import Any
@@ -13,6 +14,7 @@ from alpha_agent.memory.models import (
     MemoryDecision,
     MemoryScope,
     RetrievedContext,
+    SemanticMemory,
     proposed_layer_for_candidate,
 )
 from alpha_agent.memory.persistence import PersistedMemory, persist_candidates
@@ -68,6 +70,53 @@ class MemoryController:
             record_access=record_access,
             access_scope=scope,
         )
+
+    def apply_forget_request(
+        self,
+        *,
+        session_id: str,
+        user_message: str,
+        context: RetrievedContext,
+        scope: MemoryScope,
+    ) -> tuple[RetrievedContext, list[str], list[str]]:
+        """Apply explicit forget commands and remove forgotten memories from context."""
+
+        forget_ids = self._forget_targets(user_message, context.semantic_memories)
+        if not forget_ids:
+            return context, [], []
+        forgotten: list[str] = []
+        skipped: list[str] = []
+        visible_ids = {memory.id for memory in context.semantic_memories}
+        allowed_scope_keys = {item.scope_key for item in scope.allowed_read_scopes()}
+        for memory_id in forget_ids:
+            memory = self.store.get_semantic_memory(memory_id)
+            if memory is None or (
+                memory_id not in visible_ids and memory.scope.scope_key not in allowed_scope_keys
+            ):
+                skipped.append(memory_id)
+                continue
+            self.store.forget_semantic_memory(memory_id, reason=user_message)
+            forgotten.append(memory_id)
+        if skipped:
+            self.store.append_runtime_trace(
+                session_id=session_id,
+                event_type="memory.forget.skipped",
+                content=str(len(skipped)),
+                metadata={
+                    "memory_ids": skipped,
+                    "scope": scope.to_record(),
+                    "reason": "memory id is outside visible memory scope",
+                },
+            )
+        filtered = RetrievedContext(
+            episodic_memories=list(context.episodic_memories),
+            semantic_memories=[
+                memory for memory in context.semantic_memories if memory.id not in forgotten
+            ],
+            procedural_memories=list(context.procedural_memories),
+            entity_hints=list(context.entity_hints),
+        )
+        return filtered, forgotten, skipped
 
     def extract_candidates(
         self,
@@ -242,13 +291,16 @@ class MemoryController:
                 MemoryDecision(
                     id=new_id("decision"),
                     candidate_id=candidate.id,
-                    action=action,
+                    action=item.action,
                     memory_type=item.memory_type,
                     memory_id=item.memory_id,
                     reviewer=reviewer,
                     rationale=rationale,
                     created_at=utc_now_iso(),
-                    metadata={"candidate_type": item.candidate_type},
+                    metadata={
+                        "candidate_type": item.candidate_type,
+                        "requested_action": action,
+                    },
                 ),
                 conn=conn,
             )
@@ -268,6 +320,24 @@ class MemoryController:
         source_text = candidate.content.casefold()
         explicit = "remember" in source_text or "user said:" in source_text
         return explicit and candidate.confidence >= 0.65 and candidate.salience >= 0.75
+
+    def _forget_targets(
+        self,
+        user_message: str,
+        semantic_memories: list[SemanticMemory],
+    ) -> list[str]:
+        normalized = " ".join(user_message.casefold().split())
+        if not normalized.startswith("forget"):
+            return []
+        explicit_ids = re.findall(r"\bsem_[a-zA-Z0-9_-]+\b", user_message)
+        if explicit_ids:
+            return list(dict.fromkeys(explicit_ids))
+        if normalized in {"forget this", "forget that"} and semantic_memories:
+            return [semantic_memories[0].id]
+        if normalized.startswith("forget memory "):
+            candidate_id = user_message.split("forget memory ", 1)[-1].strip()
+            return [candidate_id] if candidate_id else []
+        return []
 
 
 def _candidate_weak_structure(candidate: ExtractedMemoryCandidate) -> dict[str, Any]:

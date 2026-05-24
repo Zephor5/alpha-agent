@@ -58,21 +58,30 @@ CREATE TABLE IF NOT EXISTS episodic_memories (
 
 CREATE TABLE IF NOT EXISTS semantic_memories (
     id TEXT PRIMARY KEY,
-    subject TEXT NOT NULL,
-    predicate TEXT NOT NULL,
-    object TEXT NOT NULL,
     content TEXT NOT NULL,
+    normalized_content TEXT NOT NULL,
+    memory_type TEXT NOT NULL DEFAULT 'fact',
+    subject TEXT,
+    predicate TEXT,
+    object TEXT,
+    entities TEXT NOT NULL DEFAULT '[]',
     confidence REAL NOT NULL DEFAULT 0.5,
     salience REAL NOT NULL DEFAULT 0.5,
+    stability REAL NOT NULL DEFAULT 0.5,
     source_memory_ids TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'active',
+    valid_from TEXT,
+    valid_until TEXT,
+    supersedes_id TEXT,
+    superseded_by_id TEXT,
+    deleted_at TEXT,
     scope_kind TEXT NOT NULL DEFAULT 'global_user',
     scope_key TEXT NOT NULL DEFAULT 'user:default',
     scope_metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     metadata TEXT NOT NULL DEFAULT '{}',
-    UNIQUE(subject, predicate, object, scope_key)
+    CHECK (status IN ('active', 'superseded', 'deleted', 'conflict_review'))
 );
 
 CREATE TABLE IF NOT EXISTS procedural_memories (
@@ -202,6 +211,10 @@ CREATE INDEX IF NOT EXISTS idx_semantic_subject ON semantic_memories(subject);
 CREATE INDEX IF NOT EXISTS idx_semantic_predicate ON semantic_memories(predicate);
 CREATE INDEX IF NOT EXISTS idx_semantic_salience ON semantic_memories(salience);
 CREATE INDEX IF NOT EXISTS idx_semantic_scope_status ON semantic_memories(scope_key, status);
+CREATE INDEX IF NOT EXISTS idx_semantic_scope_structure
+    ON semantic_memories(scope_key, subject, predicate, object, status);
+CREATE INDEX IF NOT EXISTS idx_semantic_scope_content
+    ON semantic_memories(scope_key, normalized_content, status);
 CREATE INDEX IF NOT EXISTS idx_procedural_name_scope ON procedural_memories(name, scope_key);
 CREATE INDEX IF NOT EXISTS idx_procedural_scope ON procedural_memories(scope_key);
 CREATE INDEX IF NOT EXISTS idx_memory_candidates_status

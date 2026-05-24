@@ -217,3 +217,26 @@ def test_retrieval_filters_inactive_semantic_status(tmp_path: Path) -> None:
     )
 
     assert [memory.id for memory in context.semantic_memories] == [active.id]
+
+
+def test_retrieval_uses_corrected_active_memory_only(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+    semantic.upsert_fact("user", "prefers", "tea", "User prefers tea")
+    corrected = semantic.upsert_fact(
+        "user",
+        "prefers",
+        "coffee",
+        "User now prefers coffee",
+    )
+
+    context = MemoryRetriever(store).retrieve_context(
+        "what does the user prefer",
+        "session-1",
+        scopes=MemoryScope.default().allowed_read_scopes(),
+        record_access=False,
+    )
+
+    assert [memory.id for memory in context.semantic_memories] == [corrected.id]
+    assert "tea" not in [memory.object for memory in context.semantic_memories]

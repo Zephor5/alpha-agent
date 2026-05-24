@@ -19,8 +19,8 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
-from alpha_agent.memory.episodic import EpisodicMemoryManager
 from alpha_agent.memory.controller import MemoryController
+from alpha_agent.memory.episodic import EpisodicMemoryManager
 from alpha_agent.memory.extractor import MemoryExtractor
 from alpha_agent.memory.models import (
     ConversationMessage,
@@ -287,8 +287,20 @@ class AlphaAgent:
 
             self._check_canceled(session_id, "before_retrieval")
             context = self._retrieve_memory(user_message, session_id, memory_scope)
+            (
+                context,
+                forgotten_memory_ids,
+                skipped_forget_memory_ids,
+            ) = self.memory_controller.apply_forget_request(
+                session_id=session_id,
+                user_message=user_message,
+                context=context,
+                scope=memory_scope,
+            )
             retrieved_ids = self._retrieved_ids(context)
             debug["retrieved_memory_ids"] = retrieved_ids
+            debug["forgotten_memory_ids"] = forgotten_memory_ids
+            debug["skipped_forget_memory_ids"] = skipped_forget_memory_ids
 
             session_context = self.session_context.load(
                 session_id,

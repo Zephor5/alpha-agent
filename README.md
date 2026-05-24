@@ -99,6 +99,8 @@ uv run alpha memory list
 uv run alpha memory search "sqlite preferences"
 uv run alpha memory stats
 uv run alpha memory consolidate
+uv run alpha memory audit <memory-id>
+uv run alpha memory forget <memory-id>
 uv run alpha memory review "remember that I prefer concise answers"
 uv run alpha memory review --list-pending
 uv run alpha memory review --list-stored
@@ -106,6 +108,15 @@ uv run alpha memory review --candidate-id <candidate-id> --inspect-stored
 uv run alpha memory review --candidate-id <candidate-id> --edit-stored --edit-content "User prefers concise answers"
 uv run alpha memory review --candidate-id <candidate-id> --approve-stored
 ```
+
+Semantic memories use an auditable lifecycle. Duplicate facts merge source ids,
+corrected facts supersede stale active facts, and forgotten facts are marked
+`deleted` instead of being physically removed. Retrieval and prompt context only
+use active semantic memories. `alpha memory audit <memory-id>` shows source ids
+and the supersession chain; `alpha memory forget <memory-id>` removes the memory
+from retrieval immediately while preserving evidence for audit. CLI forget uses
+the default local CLI memory scope visibility rules and refuses ids outside that
+scope.
 
 Inspect procedural skills:
 

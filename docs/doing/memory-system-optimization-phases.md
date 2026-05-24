@@ -178,26 +178,26 @@ contradictory facts.
 
 Tasks:
 
-- [ ] Replace the current semantic triple-only lifecycle with atomic memory
+- [x] Replace the current semantic triple-only lifecycle with atomic memory
   records that include content, type, optional subject/predicate/object,
   entities, confidence, salience, stability, status, valid window, scope, and
   source ids.
-- [ ] Preserve source ids on update or merge instead of replacing them.
-- [ ] Add duplicate detection using exact weak-structure match, normalized
+- [x] Preserve source ids on update or merge instead of replacing them.
+- [x] Add duplicate detection using exact weak-structure match, normalized
   content match, entity overlap, and retriever similarity.
-- [ ] Add conflict detection for same subject/predicate under the same scope.
-- [ ] Implement decision actions: store, skip, update, merge, supersede, and
+- [x] Add conflict detection for same subject/predicate under the same scope.
+- [x] Implement decision actions: store, skip, update, merge, supersede, and
   conflict-review.
-- [ ] Add `forget this` and `forget memory id` support that marks memory deleted
+- [x] Add `forget this` and `forget memory id` support that marks memory deleted
   or superseded instead of physically removing it by default.
-- [ ] Ensure retrieval filters inactive statuses.
+- [x] Ensure retrieval filters inactive statuses.
 
 Acceptance criteria:
 
-- [ ] A corrected preference supersedes the old preference in retrieval.
-- [ ] Audit output can show both the active memory and the old source evidence.
-- [ ] Forgetting a memory removes it from prompt context immediately.
-- [ ] Duplicate extraction does not create repeated prompt bullets.
+- [x] A corrected preference supersedes the old preference in retrieval.
+- [x] Audit output can show both the active memory and the old source evidence.
+- [x] Forgetting a memory removes it from prompt context immediately.
+- [x] Duplicate extraction does not create repeated prompt bullets.
 
 Likely files:
 
@@ -211,10 +211,10 @@ Likely files:
 
 Checkpoint:
 
-- [ ] Status-aware retrieval tests pass.
-- [ ] Conflict and supersession tests cover both same-object duplicates and
+- [x] Status-aware retrieval tests pass.
+- [x] Conflict and supersession tests cover both same-object duplicates and
   changed-object corrections.
-- [ ] README memory inspection docs include forget and audit behavior.
+- [x] README memory inspection docs include forget and audit behavior.
 
 ## Phase 4: Extraction And Consolidation Quality
 

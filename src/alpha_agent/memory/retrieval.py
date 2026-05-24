@@ -170,7 +170,15 @@ class MemoryRetriever:
         if isinstance(memory, EpisodicMemory):
             return " ".join([memory.content, memory.summary, *memory.people, *memory.topics])
         if isinstance(memory, SemanticMemory):
-            return " ".join([memory.subject, memory.predicate, memory.object, memory.content])
+            return " ".join(
+                [
+                    memory.subject or "",
+                    memory.predicate or "",
+                    memory.object or "",
+                    memory.content,
+                    *memory.entities,
+                ]
+            )
         return " ".join(
             [memory.name, memory.description, memory.trigger, memory.procedure_markdown]
         )

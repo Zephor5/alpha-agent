@@ -13,6 +13,7 @@ from alpha_agent.memory.models import (
     MemoryCandidate,
     MemoryDecision,
     MemoryScope,
+    SemanticMemory,
     proposed_layer_for_candidate,
 )
 from alpha_agent.memory.persistence import PersistedMemory
@@ -29,6 +30,16 @@ class MemoryCandidateAudit:
     candidate: MemoryCandidate
     source_messages: list[ConversationMessage]
     decisions: list[MemoryDecision]
+
+
+@dataclass(frozen=True)
+class SemanticMemoryAudit:
+    """Active or inactive semantic memory with source and supersession evidence."""
+
+    memory: SemanticMemory
+    source_message_ids: list[str]
+    source_messages: list[ConversationMessage]
+    supersession_chain: list[SemanticMemory]
 
 
 class MemoryReviewService:
@@ -328,6 +339,50 @@ class MemoryReviewService:
             decisions=self.store.list_memory_decisions(candidate.id),
         )
 
+    def inspect_memory(self, memory_id: str) -> SemanticMemoryAudit:
+        """Inspect semantic memory evidence and supersession lineage."""
+
+        memory = self.store.get_semantic_memory(memory_id)
+        if memory is None:
+            raise KeyError(f"semantic memory not found: {memory_id}")
+        _require_memory_visible(memory, scope=MemoryScope.default())
+        chain = self._supersession_chain(memory)
+        source_ids = _dedupe(
+            [
+                *memory.source_memory_ids,
+                *(source for item in chain for source in item.source_memory_ids),
+            ]
+        )
+        return SemanticMemoryAudit(
+            memory=memory,
+            source_message_ids=source_ids,
+            source_messages=self.store.list_conversation_messages_by_ids(source_ids),
+            supersession_chain=chain,
+        )
+
+    def _supersession_chain(self, memory: SemanticMemory) -> list[SemanticMemory]:
+        chain: list[SemanticMemory] = []
+        seen = {memory.id}
+
+        next_id = memory.superseded_by_id
+        while next_id and next_id not in seen:
+            seen.add(next_id)
+            item = self.store.get_semantic_memory(next_id)
+            if item is None:
+                break
+            chain.append(item)
+            next_id = item.superseded_by_id
+
+        next_id = memory.supersedes_id
+        while next_id and next_id not in seen:
+            seen.add(next_id)
+            item = self.store.get_semantic_memory(next_id)
+            if item is None:
+                break
+            chain.append(item)
+            next_id = item.supersedes_id
+        return chain
+
 
 def edit_candidate(
     candidate: ExtractedMemoryCandidate,
@@ -412,3 +467,20 @@ def _require_reviewable_visible(candidate: MemoryCandidate, *, scope: MemoryScop
         raise ValueError(
             f"memory candidate {candidate.id} must be pending or edited, got {candidate.status}"
         )
+
+
+def _require_memory_visible(memory: SemanticMemory, *, scope: MemoryScope) -> None:
+    visible_scope_keys = {item.scope_key for item in scope.allowed_read_scopes()}
+    if memory.scope.scope_key not in visible_scope_keys:
+        raise PermissionError(f"semantic memory is outside visible scope: {memory.id}")
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result

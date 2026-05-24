@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -77,6 +78,17 @@ def _scope_filter(
     keys = [scope.scope_key for scope in scopes]
     placeholders = ",".join("?" for _ in keys)
     return f" AND {column} IN ({placeholders})", keys
+
+
+def _normalize_content(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", value.casefold())).strip()
+
+
+def _normalize_optional(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.casefold().split()).strip()
+    return normalized or None
 
 
 class MemoryStore:
@@ -534,35 +546,61 @@ class MemoryStore:
         memory: SemanticMemory,
         conn: sqlite3.Connection | None = None,
     ) -> SemanticMemory:
-        """Insert or update a semantic fact keyed by subject, predicate, and object."""
+        """Insert or update one atomic semantic memory by id."""
 
         def op(db: sqlite3.Connection) -> SemanticMemory:
             db.execute(
                 """
                 INSERT INTO semantic_memories
-                    (id, subject, predicate, object, content, confidence, salience,
-                     source_memory_ids, status, scope_kind, scope_key, scope_metadata,
-                     created_at, updated_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(subject, predicate, object, scope_key) DO UPDATE SET
+                    (id, content, normalized_content, memory_type, subject, predicate,
+                     object, entities, confidence, salience, stability, source_memory_ids,
+                     status, valid_from, valid_until, supersedes_id, superseded_by_id,
+                     deleted_at, scope_kind, scope_key, scope_metadata, created_at,
+                     updated_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
                     content = excluded.content,
-                    confidence = max(semantic_memories.confidence, excluded.confidence),
-                    salience = max(semantic_memories.salience, excluded.salience),
+                    normalized_content = excluded.normalized_content,
+                    memory_type = excluded.memory_type,
+                    subject = excluded.subject,
+                    predicate = excluded.predicate,
+                    object = excluded.object,
+                    entities = excluded.entities,
+                    confidence = excluded.confidence,
+                    salience = excluded.salience,
+                    stability = excluded.stability,
                     source_memory_ids = excluded.source_memory_ids,
                     status = excluded.status,
+                    valid_from = excluded.valid_from,
+                    valid_until = excluded.valid_until,
+                    supersedes_id = excluded.supersedes_id,
+                    superseded_by_id = excluded.superseded_by_id,
+                    deleted_at = excluded.deleted_at,
+                    scope_kind = excluded.scope_kind,
+                    scope_key = excluded.scope_key,
+                    scope_metadata = excluded.scope_metadata,
                     updated_at = excluded.updated_at,
                     metadata = excluded.metadata
                 """,
                 (
                     memory.id,
-                    memory.subject.lower().strip(),
-                    memory.predicate.lower().strip(),
-                    memory.object.lower().strip(),
                     memory.content,
+                    _normalize_content(memory.content),
+                    memory.memory_type,
+                    _normalize_optional(memory.subject),
+                    _normalize_optional(memory.predicate),
+                    _normalize_optional(memory.object),
+                    _dumps(memory.entities),
                     memory.confidence,
                     memory.salience,
+                    memory.stability,
                     _dumps(memory.source_memory_ids),
                     memory.status,
+                    memory.valid_from,
+                    memory.valid_until,
+                    memory.supersedes_id,
+                    memory.superseded_by_id,
+                    memory.deleted_at,
                     *_scope_params(memory.scope),
                     memory.created_at,
                     memory.updated_at,
@@ -570,16 +608,8 @@ class MemoryStore:
                 ),
             )
             row = db.execute(
-                """
-                SELECT * FROM semantic_memories
-                WHERE subject = ? AND predicate = ? AND object = ? AND scope_key = ?
-                """,
-                (
-                    memory.subject.lower().strip(),
-                    memory.predicate.lower().strip(),
-                    memory.object.lower().strip(),
-                    memory.scope.scope_key,
-                ),
+                "SELECT * FROM semantic_memories WHERE id = ?",
+                (memory.id,),
             ).fetchone()
             saved = self._semantic_from_row(row)
             if self._has_fts_table(db, "semantic_fts"):
@@ -590,9 +620,182 @@ class MemoryStore:
                         (memory_id, subject, predicate, object, content)
                     VALUES (?, ?, ?, ?, ?)
                     """,
-                    (saved.id, saved.subject, saved.predicate, saved.object, saved.content),
+                    (
+                        saved.id,
+                        saved.subject or "",
+                        saved.predicate or "",
+                        saved.object or "",
+                        saved.content,
+                    ),
                 )
             return saved
+
+        return self._with_conn(conn, op)
+
+    def get_semantic_memory(
+        self,
+        memory_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> SemanticMemory | None:
+        """Return one semantic memory by id."""
+
+        def op(db: sqlite3.Connection) -> SemanticMemory | None:
+            row = db.execute(
+                "SELECT * FROM semantic_memories WHERE id = ?",
+                (memory_id,),
+            ).fetchone()
+            return self._semantic_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def find_semantic_by_structure(
+        self,
+        *,
+        subject: str | None,
+        predicate: str | None,
+        object_value: str | None,
+        scope: MemoryScope,
+        statuses: list[str] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[SemanticMemory]:
+        """Find semantic memories with the same weak structure in one scope."""
+
+        def op(db: sqlite3.Connection) -> list[SemanticMemory]:
+            status_sql = ""
+            params: list[Any] = [
+                scope.scope_key,
+                _normalize_optional(subject),
+                _normalize_optional(predicate),
+                _normalize_optional(object_value),
+            ]
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                status_sql = f" AND status IN ({placeholders})"
+                params.extend(statuses)
+            rows = db.execute(
+                f"""
+                SELECT * FROM semantic_memories
+                WHERE scope_key = ?
+                  AND subject IS ?
+                  AND predicate IS ?
+                  AND object IS ?
+                  {status_sql}
+                ORDER BY updated_at DESC, id DESC
+                """,
+                params,
+            ).fetchall()
+            return [self._semantic_from_row(row) for row in rows]
+
+        return self._with_conn(conn, op)
+
+    def find_semantic_by_subject_predicate(
+        self,
+        *,
+        subject: str,
+        predicate: str,
+        scope: MemoryScope,
+        statuses: list[str] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[SemanticMemory]:
+        """Find semantic memories sharing subject and predicate in one scope."""
+
+        def op(db: sqlite3.Connection) -> list[SemanticMemory]:
+            status_sql = ""
+            params: list[Any] = [
+                scope.scope_key,
+                _normalize_optional(subject),
+                _normalize_optional(predicate),
+            ]
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                status_sql = f" AND status IN ({placeholders})"
+                params.extend(statuses)
+            rows = db.execute(
+                f"""
+                SELECT * FROM semantic_memories
+                WHERE scope_key = ?
+                  AND subject IS ?
+                  AND predicate IS ?
+                  {status_sql}
+                ORDER BY updated_at DESC, id DESC
+                """,
+                params,
+            ).fetchall()
+            return [self._semantic_from_row(row) for row in rows]
+
+        return self._with_conn(conn, op)
+
+    def find_semantic_by_normalized_content(
+        self,
+        *,
+        content: str,
+        scope: MemoryScope,
+        statuses: list[str] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[SemanticMemory]:
+        """Find semantic memories with equivalent normalized content in one scope."""
+
+        def op(db: sqlite3.Connection) -> list[SemanticMemory]:
+            status_sql = ""
+            params: list[Any] = [scope.scope_key, _normalize_content(content)]
+            if statuses:
+                placeholders = ",".join("?" for _ in statuses)
+                status_sql = f" AND status IN ({placeholders})"
+                params.extend(statuses)
+            rows = db.execute(
+                f"""
+                SELECT * FROM semantic_memories
+                WHERE scope_key = ? AND normalized_content = ?{status_sql}
+                ORDER BY updated_at DESC, id DESC
+                """,
+                params,
+            ).fetchall()
+            return [self._semantic_from_row(row) for row in rows]
+
+        return self._with_conn(conn, op)
+
+    def forget_semantic_memory(
+        self,
+        memory_id: str,
+        *,
+        reason: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> SemanticMemory:
+        """Mark a semantic memory deleted without removing audit evidence."""
+
+        def op(db: sqlite3.Connection) -> SemanticMemory:
+            existing = self.get_semantic_memory(memory_id, conn=db)
+            if existing is None:
+                raise KeyError(f"semantic memory not found: {memory_id}")
+            now = utc_now_iso()
+            metadata = dict(existing.metadata)
+            if reason:
+                metadata["forget_reason"] = reason
+            deleted = SemanticMemory(
+                id=existing.id,
+                content=existing.content,
+                memory_type=existing.memory_type,
+                subject=existing.subject,
+                predicate=existing.predicate,
+                object=existing.object,
+                entities=list(existing.entities),
+                confidence=existing.confidence,
+                salience=existing.salience,
+                stability=existing.stability,
+                source_memory_ids=list(existing.source_memory_ids),
+                created_at=existing.created_at,
+                updated_at=now,
+                metadata=metadata,
+                status="deleted",
+                valid_from=existing.valid_from,
+                valid_until=existing.valid_until,
+                supersedes_id=existing.supersedes_id,
+                superseded_by_id=existing.superseded_by_id,
+                deleted_at=now,
+                scope=existing.scope,
+            )
+            return self.upsert_semantic_memory(deleted, conn=db)
 
         return self._with_conn(conn, op)
 
@@ -602,6 +805,7 @@ class MemoryStore:
         *,
         scopes: list[MemoryScope] | None = None,
         statuses: list[str] | None = None,
+        conn: sqlite3.Connection | None = None,
     ) -> list[SemanticMemory]:
         """List semantic memories ordered by salience and recency."""
 
@@ -612,8 +816,9 @@ class MemoryStore:
             placeholders = ",".join("?" for _ in statuses)
             status_sql = f" AND status IN ({placeholders})"
             status_params = list(statuses)
-        with self.connect() as conn:
-            rows = conn.execute(
+
+        def op(db: sqlite3.Connection) -> list[SemanticMemory]:
+            rows = db.execute(
                 f"""
                 SELECT * FROM semantic_memories
                 WHERE 1 = 1{scope_sql}{status_sql}
@@ -621,7 +826,9 @@ class MemoryStore:
                 """,
                 (*scope_params, *status_params, limit),
             ).fetchall()
-        return [self._semantic_from_row(row) for row in rows]
+            return [self._semantic_from_row(row) for row in rows]
+
+        return self._with_conn(conn, op)
 
     def search_semantic(
         self,
@@ -1178,17 +1385,25 @@ class MemoryStore:
     def _semantic_from_row(self, row: sqlite3.Row) -> SemanticMemory:
         return SemanticMemory(
             id=row["id"],
+            content=row["content"],
+            memory_type=row["memory_type"],
             subject=row["subject"],
             predicate=row["predicate"],
             object=row["object"],
-            content=row["content"],
+            entities=_loads_list(row["entities"]),
             confidence=float(row["confidence"]),
             salience=float(row["salience"]),
+            stability=float(row["stability"]),
             source_memory_ids=_loads_list(row["source_memory_ids"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=_loads_dict(row["metadata"]),
             status=row["status"],
+            valid_from=row["valid_from"],
+            valid_until=row["valid_until"],
+            supersedes_id=row["supersedes_id"],
+            superseded_by_id=row["superseded_by_id"],
+            deleted_at=row["deleted_at"],
             scope=_scope_from_row(row),
         )
 
