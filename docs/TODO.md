@@ -196,7 +196,8 @@ P1 Agent Loop implementation notes:
   are recorded in turn debug metadata and runtime traces.
 - `alpha debug prompt MESSAGE` remains supported. `alpha debug prompt
   --session ...` can include gateway source fields and prints the built prompt,
-  retrieved memory ids, and retrieval scores from `memory_access_log`.
+  retrieved memory ids, retrieval score components, and selection reasons without
+  writing debug access rows.
 - Prompt construction keeps only the stable identity as a `system` message.
   Optional reference-only retrieved memory and runtime reminders are sent as a
   `user` message wrapped in `<system-reminder>...</system-reminder>`, followed
@@ -214,6 +215,11 @@ P1 Agent Loop implementation notes:
 - Long-term memory now carries an explicit scope. CLI turns use the deterministic
   `user:default` scope, gateway session metadata can derive chat/thread scopes,
   and retrieval filters by the allowed scope set before ranking.
+- Retrieval now separates candidate generation from ranking. Selected memories
+  carry score components for keyword, FTS, recency, salience, stability, access,
+  scope priority, active status, and source confidence, and prompt construction
+  applies independent semantic, episodic, procedural, and session context
+  budgets.
 - Runtime extraction now persists `memory_candidates` first and records
   `memory_decisions` for pending, auto-approve, approve, reject, edit, and
   promotion outcomes. Stored candidate review is available through

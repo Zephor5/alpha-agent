@@ -41,6 +41,10 @@ compression_threshold_ratio = 0.85
 recent_tail_messages = 8
 min_summary_tokens = 256
 max_summary_tokens = 1024
+semantic_memory_tokens = 512
+episodic_memory_tokens = 512
+procedural_memory_tokens = 512
+session_context_tokens = 2048
 
 [deepseek]
 api_key = ""
@@ -71,6 +75,10 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "context.recent_tail_messages": int,
     "context.min_summary_tokens": int,
     "context.max_summary_tokens": int,
+    "context.semantic_memory_tokens": int,
+    "context.episodic_memory_tokens": int,
+    "context.procedural_memory_tokens": int,
+    "context.session_context_tokens": int,
     "deepseek.api_key": str,
     "deepseek.reasoning_enabled": bool,
     "deepseek.reasoning_effort": str,
@@ -100,6 +108,10 @@ POSITIVE_INT_CONFIG_KEYS = {
     "context.recent_tail_messages",
     "context.min_summary_tokens",
     "context.max_summary_tokens",
+    "context.semantic_memory_tokens",
+    "context.episodic_memory_tokens",
+    "context.procedural_memory_tokens",
+    "context.session_context_tokens",
 }
 
 RATIO_CONFIG_KEYS = {
@@ -136,6 +148,10 @@ class AlphaConfig:
     context_recent_tail_messages: int = 8
     context_min_summary_tokens: int = 256
     context_max_summary_tokens: int = 1024
+    context_semantic_memory_tokens: int = 512
+    context_episodic_memory_tokens: int = 512
+    context_procedural_memory_tokens: int = 512
+    context_session_context_tokens: int = 2048
     deepseek_api_key: str | None = None
     deepseek_reasoning_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
@@ -285,19 +301,21 @@ def _int_env(name: str, default: int) -> int:
         return default
     try:
         return int(raw)
-    except ValueError:
-        return default
+    except ValueError as exc:
+        raise ValueError(f"Expected integer value for {name}, got: {raw}") from exc
 
 
 def _int_value(value: Any, default: int) -> int:
-    if isinstance(value, int):
+    if value is None:
+        return default
+    if type(value) is int:
         return value
-    if isinstance(value, str) and value.strip():
+    if isinstance(value, str):
         try:
             return int(value)
-        except ValueError:
-            return default
-    return default
+        except ValueError as exc:
+            raise ValueError(f"Expected integer value, got: {value}") from exc
+    raise ValueError(f"Expected integer value, got: {value}")
 
 
 def _float_env(name: str, default: float) -> float:
@@ -306,19 +324,21 @@ def _float_env(name: str, default: float) -> float:
         return default
     try:
         return float(raw)
-    except ValueError:
-        return default
+    except ValueError as exc:
+        raise ValueError(f"Expected decimal value for {name}, got: {raw}") from exc
 
 
 def _float_value(value: Any, default: float) -> float:
-    if isinstance(value, int | float):
+    if value is None:
+        return default
+    if type(value) in {int, float}:
         return float(value)
-    if isinstance(value, str) and value.strip():
+    if isinstance(value, str):
         try:
             return float(value)
-        except ValueError:
-            return default
-    return default
+        except ValueError as exc:
+            raise ValueError(f"Expected decimal value, got: {value}") from exc
+    raise ValueError(f"Expected decimal value, got: {value}")
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -357,6 +377,29 @@ def _memory_consolidation_mode_value(value: str | None) -> str:
             f"Allowed values: {options}"
         )
     return normalized
+
+
+def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
+    values = {
+        "llm.provider": config.llm_provider,
+        "deepseek.reasoning_effort": config.deepseek_reasoning_effort or "",
+        "memory.retrieval_limit": config.retrieval_limit,
+        "memory.capture_mode": config.memory_capture_mode,
+        "memory.consolidation_mode": config.memory_consolidation_mode,
+        "memory.consolidation_after_turns": config.memory_consolidation_after_turns,
+        "context.max_prompt_tokens": config.context_max_prompt_tokens,
+        "context.compression_threshold_ratio": config.context_compression_threshold_ratio,
+        "context.recent_tail_messages": config.context_recent_tail_messages,
+        "context.min_summary_tokens": config.context_min_summary_tokens,
+        "context.max_summary_tokens": config.context_max_summary_tokens,
+        "context.semantic_memory_tokens": config.context_semantic_memory_tokens,
+        "context.episodic_memory_tokens": config.context_episodic_memory_tokens,
+        "context.procedural_memory_tokens": config.context_procedural_memory_tokens,
+        "context.session_context_tokens": config.context_session_context_tokens,
+    }
+    for key, value in values.items():
+        _validate_config_value(key, value)
+    return config
 
 
 def _load_toml_config(config_file: str | Path | None) -> dict[str, Any]:
@@ -457,7 +500,7 @@ def load_config(
         )
         or "~/.alpha-agent/daemon-status.json"
     ).expanduser()
-    return AlphaConfig(
+    return _validate_loaded_config(AlphaConfig(
         db_path=db_path,
         log_dir=log_dir,
         gateway_status_path=gateway_status_path,
@@ -529,6 +572,22 @@ def load_config(
             "ALPHA_CONTEXT_MAX_SUMMARY_TOKENS",
             _int_value(context.get("max_summary_tokens"), 1024),
         ),
+        context_semantic_memory_tokens=_int_env(
+            "ALPHA_CONTEXT_SEMANTIC_MEMORY_TOKENS",
+            _int_value(context.get("semantic_memory_tokens"), 512),
+        ),
+        context_episodic_memory_tokens=_int_env(
+            "ALPHA_CONTEXT_EPISODIC_MEMORY_TOKENS",
+            _int_value(context.get("episodic_memory_tokens"), 512),
+        ),
+        context_procedural_memory_tokens=_int_env(
+            "ALPHA_CONTEXT_PROCEDURAL_MEMORY_TOKENS",
+            _int_value(context.get("procedural_memory_tokens"), 512),
+        ),
+        context_session_context_tokens=_int_env(
+            "ALPHA_CONTEXT_SESSION_CONTEXT_TOKENS",
+            _int_value(context.get("session_context_tokens"), 2048),
+        ),
         deepseek_api_key=_env_or_config(
             "ALPHA_DEEPSEEK_API_KEY",
             config_data,
@@ -552,4 +611,4 @@ def load_config(
             or os.getenv("ALPHA_CODEX_API_KEY")
             or _string_setting(config_data, "codex", "access_token")
         ),
-    )
+    ))

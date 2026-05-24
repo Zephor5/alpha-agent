@@ -278,6 +278,17 @@ class ProceduralMemory:
 
 
 @dataclass(frozen=True)
+class MemoryRetrievalExplanation:
+    """Inspectable score and rationale for one selected memory."""
+
+    memory_type: MemoryType
+    memory_id: str
+    total: float
+    components: dict[str, float]
+    reasons: list[str]
+
+
+@dataclass(frozen=True)
 class RetrievedContext:
     """Memory context selected for a turn."""
 
@@ -285,6 +296,9 @@ class RetrievedContext:
     semantic_memories: list[SemanticMemory]
     procedural_memories: list[ProceduralMemory]
     entity_hints: list[str] = field(default_factory=list)
+    retrieval_explanations: dict[str, MemoryRetrievalExplanation] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)

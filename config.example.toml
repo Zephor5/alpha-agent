@@ -28,6 +28,11 @@ compression_threshold_ratio = 0.85
 recent_tail_messages = 8
 min_summary_tokens = 256
 max_summary_tokens = 1024
+# Per-layer prompt budgets are token estimates and must be positive.
+semantic_memory_tokens = 512
+episodic_memory_tokens = 512
+procedural_memory_tokens = 512
+session_context_tokens = 2048
 
 [deepseek]
 api_key = ""

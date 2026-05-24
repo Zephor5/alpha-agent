@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from typing import Any, cast
 
 from alpha_agent.llm.base import ChatCompletionToolCall, ChatMessage, LLMToolDefinitionInput
@@ -22,6 +22,19 @@ def wrap_system_reminder(content: str) -> str:
 
 class PromptBuilder:
     """Build transparent OpenAI-style chat prompts from runtime context."""
+
+    def __init__(
+        self,
+        *,
+        semantic_memory_tokens: int = 512,
+        episodic_memory_tokens: int = 512,
+        procedural_memory_tokens: int = 512,
+        session_context_tokens: int = 2048,
+    ):
+        self.semantic_memory_chars = _token_budget_to_chars(semantic_memory_tokens)
+        self.episodic_memory_chars = _token_budget_to_chars(episodic_memory_tokens)
+        self.procedural_memory_chars = _token_budget_to_chars(procedural_memory_tokens)
+        self.session_context_chars = _token_budget_to_chars(session_context_tokens)
 
     system_prompt = """Identity: Alpha Agent.
 
@@ -56,12 +69,17 @@ background context; the original transcript remains the source of truth."""
         if context_content:
             messages.append({"role": "user", "content": wrap_system_reminder(context_content)})
         if session_context is not None:
-            summary = self._session_summary_message(session_context)
+            session_budget = self.session_context_chars
+            summary = self._session_summary_message(session_context, session_budget)
             if summary:
                 messages.append({"role": "user", "content": summary})
+                session_budget = max(0, session_budget - len(summary))
             messages.extend(
                 self.conversation_message_to_chat(message)
-                for message in session_context.uncompressed_messages
+                for message in self._budget_session_messages(
+                    session_context.uncompressed_messages,
+                    session_budget,
+                )
             )
         messages.append({"role": "user", "content": user_message})
         return messages
@@ -147,12 +165,13 @@ background context; the original transcript remains the source of truth."""
         lines = [
             (
                 f"- ({memory.confidence:.2f}; status={memory.status}; "
-                f"scope={memory.scope.scope_key}; source={','.join(memory.source_memory_ids)}) "
+                f"scope={memory.scope.scope_key}; source={','.join(memory.source_memory_ids)}"
+                f"{self._explanation_suffix(context, 'semantic', memory.id)}) "
                 f"{memory.content}"
             )
             for memory in context.semantic_memories
         ]
-        return "### User Facts\n" + "\n".join(lines)
+        return self._budget_section("### User Facts", lines, self.semantic_memory_chars)
 
     def _episodic_section(self, context: RetrievedContext) -> str:
         if not context.episodic_memories:
@@ -160,33 +179,139 @@ background context; the original transcript remains the source of truth."""
         lines = [
             (
                 f"- ({memory.salience:.2f}; scope={memory.scope.scope_key}; "
-                f"source={','.join(memory.source_event_ids)}) {memory.summary}"
+                f"source={','.join(memory.source_event_ids)}"
+                f"{self._explanation_suffix(context, 'episodic', memory.id)}) "
+                f"{memory.summary}"
             )
             for memory in context.episodic_memories
         ]
-        return "### Prior Episodes\n" + "\n".join(lines)
+        return self._budget_section("### Prior Episodes", lines, self.episodic_memory_chars)
 
     def _procedural_section(self, user_message: str, context: RetrievedContext) -> str:
         if not context.procedural_memories:
             return ""
         lines = []
         for memory in context.procedural_memories:
-            line = f"- (scope={memory.scope.scope_key}) {memory.name}: {memory.description}"
+            line = (
+                f"- (confidence={memory.confidence:.2f}; scope={memory.scope.scope_key}"
+                f"{self._explanation_suffix(context, 'procedural', memory.id)}) "
+                f"{memory.name}: {memory.description}"
+            )
             if self._procedure_matches_user_message(user_message, memory):
                 line += f"\n{memory.procedure_markdown}"
             lines.append(line)
-        return "### Relevant Procedures\n" + "\n".join(lines)
+        return self._budget_section(
+            "### Relevant Procedures",
+            lines,
+            self.procedural_memory_chars,
+        )
 
     def _entity_hints_section(self, context: RetrievedContext) -> str:
         if not context.entity_hints:
             return ""
         return "### Entity Hints\n" + "\n".join(f"- {item}" for item in context.entity_hints)
 
-    def _session_summary_message(self, session_context: SessionContextProjection) -> str:
+    def _session_summary_message(
+        self,
+        session_context: SessionContextProjection,
+        budget_chars: int,
+    ) -> str:
         summary = session_context.summary
         if not summary:
             return ""
-        return "\n\n".join([self.session_summary_preamble, summary])
+        return _truncate_text(
+            "\n\n".join([self.session_summary_preamble, summary]),
+            budget_chars,
+        )
+
+    def _budget_session_messages(
+        self,
+        messages: Sequence[ConversationMessage],
+        budget_chars: int,
+    ) -> list[ConversationMessage]:
+        result: list[ConversationMessage] = []
+        remaining = max(0, budget_chars)
+        index = 0
+        while index < len(messages) and remaining > 0:
+            group = self._session_replay_group(messages, index)
+            group_overhead = sum(
+                _message_character_count(
+                    self.conversation_message_to_chat(_message_with_content(message, ""))
+                )
+                for message in group
+            )
+            if group_overhead > remaining:
+                break
+            future_overhead = group_overhead
+            for message in group:
+                empty_message = _message_with_content(message, "")
+                overhead = _message_character_count(
+                    self.conversation_message_to_chat(empty_message)
+                )
+                future_overhead -= overhead
+                content = (
+                    message.model_content
+                    if message.model_content is not None
+                    else message.raw_content
+                )
+                content_budget = max(0, remaining - overhead - future_overhead)
+                budgeted_message = _message_with_content(
+                    message,
+                    _truncate_text(content, content_budget),
+                )
+                cost = _message_character_count(
+                    self.conversation_message_to_chat(budgeted_message)
+                )
+                if cost > remaining:
+                    return result
+                result.append(budgeted_message)
+                remaining -= cost
+            index += len(group)
+        return result
+
+    def _session_replay_group(
+        self,
+        messages: Sequence[ConversationMessage],
+        start_index: int,
+    ) -> list[ConversationMessage]:
+        first = messages[start_index]
+        group = [first]
+        if first.role != "assistant" or not first.tool_calls:
+            return group
+        index = start_index + 1
+        while index < len(messages) and messages[index].role == "tool":
+            group.append(messages[index])
+            index += 1
+        return group
+
+    def _budget_section(self, title: str, lines: list[str], budget_chars: int) -> str:
+        if not lines:
+            return ""
+        return title + "\n" + "\n".join(_budget_lines(lines, budget_chars))
+
+    def _explanation_suffix(
+        self,
+        context: RetrievedContext,
+        memory_type: str,
+        memory_id: str,
+    ) -> str:
+        explanation = context.retrieval_explanations.get(f"{memory_type}:{memory_id}")
+        if explanation is None:
+            return ""
+        components = explanation.components
+        why = ",".join(explanation.reasons[:3])
+        return (
+            f"; score={explanation.total:.3f}; "
+            f"keyword={components.get('keyword', 0):.2f}; "
+            f"fts={components.get('fts', 0):.2f}; "
+            f"recency={components.get('recency', 0):.2f}; "
+            f"salience={components.get('salience', 0):.2f}; "
+            f"stability={components.get('stability', 0):.2f}; "
+            f"access={components.get('access', 0):.2f}; "
+            f"scope_priority={components.get('scope_priority', 0):.2f}; "
+            f"source_confidence={components.get('source_confidence', 0):.2f}; "
+            f"why={why}"
+        )
 
     def _conversation_tool_call(self, tool_call: dict[str, Any]) -> ChatCompletionToolCall:
         if tool_call.get("type") == "function" and isinstance(tool_call.get("function"), dict):
@@ -250,12 +375,44 @@ def _message_character_count(message: ChatMessage) -> int:
     return count
 
 
+def _message_with_content(message: ConversationMessage, content: str) -> ConversationMessage:
+    if message.model_content is not None:
+        return replace(message, model_content=content)
+    return replace(message, raw_content=content)
+
+
 def _tool_payload(tool: LLMToolDefinitionInput) -> Any:
     if is_dataclass(tool) and not isinstance(tool, type):
         return asdict(tool)
     if isinstance(tool, Mapping):
         return dict(tool)
     return str(tool)
+
+
+def _token_budget_to_chars(tokens: int) -> int:
+    return max(0, int(tokens)) * 4
+
+
+def _budget_lines(lines: list[str], budget_chars: int) -> list[str]:
+    remaining = max(0, budget_chars)
+    result: list[str] = []
+    for line in lines:
+        if remaining <= 0:
+            break
+        budgeted = _truncate_text(line, remaining)
+        result.append(budgeted)
+        remaining -= len(budgeted)
+    return result
+
+
+def _truncate_text(text: str, budget_chars: int) -> str:
+    if budget_chars <= 0:
+        return ""
+    if len(text) <= budget_chars:
+        return text
+    if budget_chars <= 3:
+        return text[:budget_chars]
+    return text[: budget_chars - 3].rstrip() + "..."
 
 
 def _stable_json(value: Any) -> str:

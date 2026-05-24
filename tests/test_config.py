@@ -41,6 +41,10 @@ compression_threshold_ratio = 0.75
 recent_tail_messages = 6
 min_summary_tokens = 128
 max_summary_tokens = 512
+semantic_memory_tokens = 300
+episodic_memory_tokens = 220
+procedural_memory_tokens = 180
+session_context_tokens = 1600
 
 [deepseek]
 api_key = "deepseek-key"
@@ -67,6 +71,10 @@ reasoning_effort = "high"
     assert config.context_recent_tail_messages == 6
     assert config.context_min_summary_tokens == 128
     assert config.context_max_summary_tokens == 512
+    assert config.context_semantic_memory_tokens == 300
+    assert config.context_episodic_memory_tokens == 220
+    assert config.context_procedural_memory_tokens == 180
+    assert config.context_session_context_tokens == 1600
     assert config.deepseek_api_key == "deepseek-key"
     assert config.llm_model == "deepseek-v4-pro"
     assert config.compatible_base_url == "https://compatible.example/v1"
@@ -174,6 +182,10 @@ def test_config_cli_set_and_get(
         ["config", "set", "memory.consolidation_mode", "after_n_turns"],
     )
     set_context = runner.invoke(app, ["config", "set", "context.max_prompt_tokens", "4096"])
+    set_semantic_budget = runner.invoke(
+        app,
+        ["config", "set", "context.semantic_memory_tokens", "256"],
+    )
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
 
     assert set_provider.exit_code == 0
@@ -182,6 +194,7 @@ def test_config_cli_set_and_get(
     assert set_capture.exit_code == 0
     assert set_consolidation.exit_code == 0
     assert set_context.exit_code == 0
+    assert set_semantic_budget.exit_code == 0
     assert get_provider.exit_code == 0
     assert "codex" in get_provider.output
     config = load_config(env_file=None, config_file=config_path)
@@ -191,6 +204,7 @@ def test_config_cli_set_and_get(
     assert config.memory_capture_mode == "disabled"
     assert config.memory_consolidation_mode == "after_n_turns"
     assert config.context_max_prompt_tokens == 4096
+    assert config.context_semantic_memory_tokens == 256
 
 
 def test_config_set_rejects_unknown_key(
@@ -332,6 +346,75 @@ consolidation_mode = "always"
     )
 
     with pytest.raises(ValueError, match="Invalid value for memory.consolidation_mode"):
+        load_config(env_file=None, config_file=config_path)
+
+
+@pytest.mark.parametrize(
+    ("toml", "match"),
+    [
+        ("[memory]\nretrieval_limit = 0\n", "memory.retrieval_limit must be greater than 0"),
+        (
+            "[context]\ncompression_threshold_ratio = 1.5\n",
+            "context.compression_threshold_ratio must be greater than 0",
+        ),
+        (
+            "[context]\nsession_context_tokens = 0\n",
+            "context.session_context_tokens must be greater than 0",
+        ),
+        (
+            '[context]\nsession_context_tokens = "abc"\n',
+            "Expected integer value",
+        ),
+        (
+            '[memory]\nretrieval_limit = "abc"\n',
+            "Expected integer value",
+        ),
+        (
+            '[context]\ncompression_threshold_ratio = "abc"\n',
+            "Expected decimal value",
+        ),
+    ],
+)
+def test_load_config_rejects_invalid_toml_values(
+    tmp_path: Path,
+    toml: str,
+    match: str,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(toml, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        load_config(env_file=None, config_file=config_path)
+
+
+@pytest.mark.parametrize(
+    ("env_name", "env_value", "match"),
+    [
+        ("ALPHA_RETRIEVAL_LIMIT", "0", "memory.retrieval_limit must be greater than 0"),
+        (
+            "ALPHA_CONTEXT_COMPRESSION_THRESHOLD_RATIO",
+            "1.5",
+            "context.compression_threshold_ratio must be greater than 0",
+        ),
+        (
+            "ALPHA_CONTEXT_SESSION_CONTEXT_TOKENS",
+            "0",
+            "context.session_context_tokens must be greater than 0",
+        ),
+    ],
+)
+def test_load_config_rejects_invalid_env_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_name: str,
+    env_value: str,
+    match: str,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv(env_name, env_value)
+
+    with pytest.raises(ValueError, match=match):
         load_config(env_file=None, config_file=config_path)
 
 

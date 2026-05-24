@@ -194,6 +194,10 @@ class AlphaAgent:
         context_recent_tail_messages: int = 8,
         context_min_summary_tokens: int = 128,
         context_max_summary_tokens: int = 512,
+        context_semantic_memory_tokens: int = 512,
+        context_episodic_memory_tokens: int = 512,
+        context_procedural_memory_tokens: int = 512,
+        context_session_context_tokens: int = 2048,
         memory_consolidation_mode: str = "manual",
         memory_consolidation_after_turns: int = 20,
     ):
@@ -201,7 +205,12 @@ class AlphaAgent:
         self.llm_provider = llm_provider
         self.retriever = retriever
         self.retrieval_limit = retrieval_limit
-        self.prompt_builder = prompt_builder or PromptBuilder()
+        self.prompt_builder = prompt_builder or PromptBuilder(
+            semantic_memory_tokens=context_semantic_memory_tokens,
+            episodic_memory_tokens=context_episodic_memory_tokens,
+            procedural_memory_tokens=context_procedural_memory_tokens,
+            session_context_tokens=context_session_context_tokens,
+        )
         self.session_context = SessionContextManager(store)
         self.context_compressor = context_compressor or DeterministicContextCompressor()
         self.context_compression_budget = CompressionBudget(

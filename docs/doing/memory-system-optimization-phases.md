@@ -286,25 +286,26 @@ are safe.
 
 Tasks:
 
-- [ ] Split retrieval into candidate generation and ranking stages.
-- [ ] Add score breakdowns for keyword, FTS, recency, salience, stability,
+- [x] Split retrieval into candidate generation and ranking stages.
+- [x] Add score breakdowns for keyword, FTS, recency, salience, stability,
   access, scope priority, status, and source confidence.
-- [ ] Add per-layer prompt budgets so semantic, episodic, procedural, and
+- [x] Add per-layer prompt budgets so semantic, episodic, procedural, and
   session context do not crowd each other out.
-- [ ] Add source/status/confidence rendering to debug prompt and optional
+- [x] Add source/status/confidence rendering to debug prompt and optional
   user-facing memory-use explanations.
-- [ ] Add query expansion from active entities, current session task state, and
+- [x] Add query expansion from active entities, current session task state, and
   high-confidence profile preferences.
-- [ ] Add optional vector retrieval only after the non-vector retriever is
-  scope/status aware and testable.
+- [x] Add optional vector retrieval only after the non-vector retriever is
+  scope/status aware and testable. No vector retriever was added in this phase;
+  non-vector retrieval remains the only active path.
 
 Acceptance criteria:
 
-- [ ] Retrieval output explains why each memory was selected.
-- [ ] Prompt context is bounded by configured budgets.
-- [ ] Inactive, rejected, forgotten, and out-of-scope memories never reach the
+- [x] Retrieval output explains why each memory was selected.
+- [x] Prompt context is bounded by configured budgets.
+- [x] Inactive, rejected, forgotten, and out-of-scope memories never reach the
   prompt.
-- [ ] Vector retrieval can be disabled without changing memory semantics.
+- [x] Vector retrieval can be disabled without changing memory semantics.
 
 Likely files:
 
@@ -318,9 +319,9 @@ Likely files:
 
 Checkpoint:
 
-- [ ] Retrieval regression fixtures show improved expected-memory selection.
-- [ ] Prompt snapshots remain readable and source-aware.
-- [ ] README retrieval section documents the new ranking model.
+- [x] Retrieval regression fixtures show improved expected-memory selection.
+- [x] Prompt snapshots remain readable and source-aware.
+- [x] README retrieval section documents the new ranking model.
 
 ## Phase 6: Session State, Scene, Persona, And Graph
 

@@ -164,6 +164,12 @@ class MemoryStore:
         ).fetchone()
         return row is not None
 
+    def has_fts_index(self, name: str) -> bool:
+        """Return whether an FTS index table is available."""
+
+        with self.connect() as conn:
+            return self._has_fts_table(conn, name)
+
     def _with_conn(
         self,
         conn: sqlite3.Connection | None,
@@ -1012,6 +1018,7 @@ class MemoryStore:
         score: float,
         *,
         scope: MemoryScope | None = None,
+        metadata: dict[str, Any] | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> None:
         """Record that a memory was retrieved and update access counters when applicable."""
@@ -1031,7 +1038,7 @@ class MemoryStore:
                     utc_now_iso(),
                     score,
                     (scope or MemoryScope.default()).scope_key,
-                    "{}",
+                    _dumps(metadata or {}),
                 ),
             )
             if memory_type == "episodic":
@@ -1045,6 +1052,28 @@ class MemoryStore:
                 )
 
         self._with_conn(conn, op)
+
+    def count_memory_access(
+        self,
+        memory_id: str,
+        memory_type: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> int:
+        """Count access-log rows for one memory."""
+
+        def op(db: sqlite3.Connection) -> int:
+            row = db.execute(
+                """
+                SELECT count(*) AS count
+                FROM memory_access_log
+                WHERE memory_id = ? AND memory_type = ?
+                """,
+                (memory_id, memory_type),
+            ).fetchone()
+            return int(row["count"]) if row else 0
+
+        return self._with_conn(conn, op)
 
     def insert_memory_candidate(
         self,

@@ -124,6 +124,11 @@ class MemoryController:
             ],
             procedural_memories=list(context.procedural_memories),
             entity_hints=list(context.entity_hints),
+            retrieval_explanations={
+                key: value
+                for key, value in context.retrieval_explanations.items()
+                if not key.startswith("semantic:") or key.split(":", 1)[1] not in forgotten
+            },
         )
         return filtered, forgotten, skipped
 

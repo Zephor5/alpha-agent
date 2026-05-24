@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from alpha_agent.memory.episodic import EpisodicMemoryManager
-from alpha_agent.memory.models import MemoryScope
+from alpha_agent.memory.models import MemoryScope, SessionContextState
 from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.semantic import SemanticMemoryManager
@@ -240,3 +242,105 @@ def test_retrieval_uses_corrected_active_memory_only(tmp_path: Path) -> None:
 
     assert [memory.id for memory in context.semantic_memories] == [corrected.id]
     assert "tea" not in [memory.object for memory in context.semantic_memories]
+
+
+def test_retrieval_splits_candidates_from_ranking_with_score_breakdown(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+    memory = semantic.remember_atomic(
+        subject="user",
+        predicate="prefers",
+        object_value="concise retrieval explanations",
+        content="User prefers concise retrieval explanations with source confidence",
+        memory_type="preference",
+        confidence=0.91,
+        salience=0.86,
+        stability=0.82,
+        source_memory_ids=["msg-source"],
+        metadata={"source_confidence": 0.77},
+    ).memory
+    retriever = MemoryRetriever(store)
+
+    candidates = retriever.generate_candidates(
+        "retrieval explanations",
+        "session-1",
+        limit=5,
+        scopes=MemoryScope.default().allowed_read_scopes(),
+    )
+    ranked = retriever.rank_candidates(
+        candidates,
+        "retrieval explanations",
+        scopes=MemoryScope.default().allowed_read_scopes(),
+    )
+    context = retriever.retrieve_context(
+        "retrieval explanations",
+        "session-1",
+        limit=5,
+        scopes=MemoryScope.default().allowed_read_scopes(),
+        record_access=True,
+    )
+
+    assert candidates.semantic
+    assert ranked[0].memory.id == memory.id
+    assert ranked[0].breakdown.keyword > 0
+    assert ranked[0].breakdown.fts >= 0
+    assert ranked[0].breakdown.recency > 0
+    assert ranked[0].breakdown.salience == memory.salience
+    assert ranked[0].breakdown.stability == memory.stability
+    assert ranked[0].breakdown.access == 0
+    assert ranked[0].breakdown.scope_priority == 1
+    assert ranked[0].breakdown.status == 1
+    assert ranked[0].breakdown.source_confidence == 0.77
+    assert any("keyword" in reason for reason in ranked[0].reasons)
+    explanation = context.retrieval_explanations[f"semantic:{memory.id}"]
+    assert explanation.total == pytest.approx(ranked[0].score)
+    assert explanation.components["source_confidence"] == 0.77
+    assert explanation.reasons
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT metadata FROM memory_access_log WHERE memory_id = ?",
+            (memory.id,),
+        ).fetchone()
+    assert "source_confidence" in row["metadata"]
+
+
+def test_query_expansion_uses_session_state_entities_and_profile_preferences(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+    semantic.remember_atomic(
+        subject="user",
+        predicate="prefers",
+        object_value="SQLite",
+        content="User prefers SQLite for local memory storage",
+        memory_type="preference",
+        confidence=0.95,
+        stability=0.9,
+    )
+    store.upsert_session_context_state(
+        SessionContextState(
+            session_id="session-1",
+            compressed_until_ordinal=1,
+            summary="Current task: Project Atlas retrieval cleanup.",
+            summary_source_message_ids=["msg-1"],
+            compression_version="test",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+
+    expansion = MemoryRetriever(store).expand_query(
+        "what should we use?",
+        "session-1",
+        scopes=MemoryScope.default().allowed_read_scopes(),
+    )
+
+    assert any("Atlas" in term for term in expansion.terms)
+    assert "SQLite" in expansion.terms
+    assert "session_state" in expansion.sources
+    assert "profile_preference" in expansion.sources

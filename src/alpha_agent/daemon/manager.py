@@ -83,6 +83,10 @@ class AgentFactory:
             context_recent_tail_messages=self.config.context_recent_tail_messages,
             context_min_summary_tokens=self.config.context_min_summary_tokens,
             context_max_summary_tokens=self.config.context_max_summary_tokens,
+            context_semantic_memory_tokens=self.config.context_semantic_memory_tokens,
+            context_episodic_memory_tokens=self.config.context_episodic_memory_tokens,
+            context_procedural_memory_tokens=self.config.context_procedural_memory_tokens,
+            context_session_context_tokens=self.config.context_session_context_tokens,
         )
 
 

@@ -166,6 +166,231 @@ def test_prompt_includes_matching_procedure_body() -> None:
     assert "1. Reproduce" in context_prompt
 
 
+def test_prompt_applies_independent_layer_budgets() -> None:
+    context = RetrievedContext(
+        semantic_memories=[
+            SemanticMemory(
+                id="sem1",
+                content="User prefers " + "very detailed " * 20 + "answers",
+                memory_type="preference",
+                subject="user",
+                predicate="prefers",
+                object="detailed answers",
+                entities=["user"],
+                confidence=0.92,
+                salience=0.9,
+                stability=0.8,
+                source_memory_ids=["msg-sem"],
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                metadata={},
+            )
+        ],
+        episodic_memories=[
+            EpisodicMemory(
+                id="epi1",
+                content="",
+                summary="Prior decision " + "with extensive detail " * 20,
+                source_event_ids=["msg-epi"],
+                people=[],
+                places=[],
+                topics=[],
+                salience=0.7,
+                confidence=0.8,
+                created_at="2026-01-01T00:00:00+00:00",
+                metadata={},
+            )
+        ],
+        procedural_memories=[
+            ProceduralMemory(
+                id="proc1",
+                name="Debug Loop",
+                description="Debug " + "complicated failures " * 20,
+                trigger="debug",
+                procedure_markdown="1. Reproduce\n2. Inspect\n3. Fix",
+                success_count=0,
+                failure_count=0,
+                confidence=0.8,
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+                metadata={},
+            )
+        ],
+    )
+    builder = PromptBuilder(
+        semantic_memory_tokens=18,
+        episodic_memory_tokens=16,
+        procedural_memory_tokens=16,
+        session_context_tokens=12,
+    )
+
+    messages = builder.build("Debug this", context)
+    context_prompt = cast(str, messages[1].get("content"))
+
+    assert "### User Facts" in context_prompt
+    assert "### Prior Episodes" in context_prompt
+    assert "### Relevant Procedures" in context_prompt
+    assert "..." in context_prompt
+    assert context_prompt.count("very detailed") < 5
+    assert context_prompt.count("extensive detail") < 5
+    assert context_prompt.count("complicated failures") < 5
+
+
+def test_prompt_applies_session_context_budget() -> None:
+    context = RetrievedContext(
+        semantic_memories=[],
+        episodic_memories=[],
+        procedural_memories=[],
+    )
+    projection = SessionContextProjection(
+        state=SessionContextState(
+            session_id="s1",
+            compressed_until_ordinal=1,
+            summary="Summary " + "long detail " * 30,
+            summary_source_message_ids=["msg_1"],
+            compression_version="test",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        ),
+        uncompressed_messages=[
+            ConversationMessage(
+                id="msg_2",
+                session_id="s1",
+                ordinal=2,
+                role="user",
+                raw_content="Prior " + "message detail " * 30,
+                model_content=None,
+                tool_call_id=None,
+                tool_calls=[],
+                tool_result_id=None,
+                provider_metadata={},
+                source_metadata={},
+                created_at="2026-01-01T00:00:01+00:00",
+            )
+        ],
+        before_ordinal=3,
+    )
+
+    messages = PromptBuilder(session_context_tokens=16).build(
+        "current question",
+        context,
+        session_context=projection,
+    )
+    rendered = "\n".join(str(message.get("content", "")) for message in messages)
+
+    assert "## Compressed Session Context" in rendered
+    assert "..." in rendered
+    assert rendered.count("long detail") < 5
+    assert rendered.count("message detail") < 5
+
+
+def test_session_context_budget_includes_preamble_and_omits_overflow_messages() -> None:
+    context = RetrievedContext(
+        semantic_memories=[],
+        episodic_memories=[],
+        procedural_memories=[],
+    )
+    projection = SessionContextProjection(
+        state=SessionContextState(
+            session_id="s1",
+            compressed_until_ordinal=1,
+            summary="Summary " + "long detail " * 30,
+            summary_source_message_ids=["msg_1"],
+            compression_version="test",
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        ),
+        uncompressed_messages=[
+            ConversationMessage(
+                id="msg_2",
+                session_id="s1",
+                ordinal=2,
+                role="user",
+                raw_content="Prior message that must not fit tiny session budget.",
+                model_content=None,
+                tool_call_id=None,
+                tool_calls=[],
+                tool_result_id=None,
+                provider_metadata={},
+                source_metadata={},
+                created_at="2026-01-01T00:00:01+00:00",
+            )
+        ],
+        before_ordinal=3,
+    )
+
+    messages = PromptBuilder(session_context_tokens=8).build(
+        "current question",
+        context,
+        session_context=projection,
+    )
+    session_messages = messages[1:-1]
+    rendered_session = "\n".join(str(message.get("content", "")) for message in session_messages)
+
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    assert len(rendered_session) <= 8 * 4
+    assert "Prior message" not in rendered_session
+
+
+def test_session_context_budget_counts_tool_call_metadata() -> None:
+    context = RetrievedContext(
+        semantic_memories=[],
+        episodic_memories=[],
+        procedural_memories=[],
+    )
+    projection = SessionContextProjection(
+        state=None,
+        uncompressed_messages=[
+            ConversationMessage(
+                id="msg_2",
+                session_id="s1",
+                ordinal=2,
+                role="assistant",
+                raw_content="",
+                model_content=None,
+                tool_call_id=None,
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": '{"query":"' + ("large " * 200) + '"}',
+                        },
+                    }
+                ],
+                tool_result_id=None,
+                provider_metadata={},
+                source_metadata={},
+                created_at="2026-01-01T00:00:01+00:00",
+            ),
+            ConversationMessage(
+                id="msg_3",
+                session_id="s1",
+                ordinal=3,
+                role="tool",
+                raw_content="large result",
+                model_content=None,
+                tool_call_id="call_1" + ("x" * 200),
+                tool_calls=[],
+                tool_result_id="trace_1",
+                provider_metadata={},
+                source_metadata={},
+                created_at="2026-01-01T00:00:02+00:00",
+            ),
+        ],
+        before_ordinal=4,
+    )
+
+    messages = PromptBuilder(session_context_tokens=8).build(
+        "current question",
+        context,
+        session_context=projection,
+    )
+
+    assert [message["role"] for message in messages] == ["system", "user"]
+
+
 def test_prompt_projects_session_summary_and_prior_messages_before_current_user() -> None:
     context = RetrievedContext(
         semantic_memories=[],

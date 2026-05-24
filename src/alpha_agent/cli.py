@@ -368,67 +368,70 @@ def _render_memory_audit(audit: Any) -> None:
     console.print(source_table)
 
 
-def _memory_access_rows(
-    store: MemoryStore,
+def _retrieved_memory_metadata(memory_type: str, memory: Any) -> dict[str, str]:
+    if memory_type == "semantic":
+        source_ids = getattr(memory, "source_memory_ids", [])
+        status = str(getattr(memory, "status", "active"))
+    elif memory_type == "episodic":
+        source_ids = getattr(memory, "source_event_ids", [])
+        status = "active"
+    else:
+        metadata = getattr(memory, "metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        source_ids = (
+            metadata.get("source_ids")
+            or metadata.get("source_memory_ids")
+            or metadata.get("source_event_ids")
+            or []
+        )
+        status = str(metadata.get("status") or "active")
+    if isinstance(source_ids, str):
+        rendered_sources = source_ids
+    else:
+        rendered_sources = ",".join(str(item) for item in source_ids)
+    confidence = getattr(memory, "confidence", None)
+    if isinstance(confidence, int | float):
+        rendered_confidence = f"{confidence:.2f}"
+    else:
+        rendered_confidence = ""
+    return {
+        "source_ids": rendered_sources,
+        "status": status,
+        "confidence": rendered_confidence,
+    }
+
+
+def _print_retrieved_memory_line(
+    prefix: str,
+    memory_type: str,
+    memory_id: str,
+    metadata: dict[str, str],
+    explanation: Any,
     *,
-    query: str,
-    retrieved_ids: dict[str, list[str]],
-) -> list[dict[str, Any]]:
-    ids_by_type = {
-        memory_type: ids
-        for memory_type, ids in retrieved_ids.items()
-        if memory_type != "working" and ids
-    }
-    if not ids_by_type:
-        return []
-    rows: list[dict[str, Any]] = []
-    with store.connect() as conn:
-        for memory_type, memory_ids in ids_by_type.items():
-            placeholders = ",".join("?" for _ in memory_ids)
-            query_rows = conn.execute(
-                f"""
-                SELECT memory_id, memory_type, score, accessed_at
-                FROM memory_access_log
-                WHERE query = ?
-                  AND memory_type = ?
-                  AND memory_id IN ({placeholders})
-                ORDER BY accessed_at DESC
-                """,
-                (query, memory_type, *memory_ids),
-            ).fetchall()
-            seen: set[str] = set()
-            for row in query_rows:
-                memory_id = str(row["memory_id"])
-                if memory_id in seen:
-                    continue
-                seen.add(memory_id)
-                access_count = _memory_access_count(conn, str(row["memory_type"]), memory_id)
-                rows.append(
-                    {
-                        "memory_id": memory_id,
-                        "memory_type": str(row["memory_type"]),
-                        "retrieval_score": float(row["score"]),
-                        "access_count": access_count,
-                        "accessed_at": str(row["accessed_at"]),
-                    }
-                )
-    order = {
-        (memory_type, memory_id): index
-        for memory_type, ids in ids_by_type.items()
-        for index, memory_id in enumerate(ids)
-    }
-    rows.sort(key=lambda row: order.get((row["memory_type"], row["memory_id"]), 0))
-    return rows
-
-
-def _memory_access_count(conn: Any, memory_type: str, memory_id: str) -> int:
-    if memory_type == "episodic":
-        row = conn.execute(
-            "SELECT access_count FROM episodic_memories WHERE id = ?",
-            (memory_id,),
-        ).fetchone()
-        return int(row["access_count"]) if row else 0
-    return 0
+    access_count: str = "",
+) -> None:
+    components = explanation.components if explanation is not None else {}
+    retrieval_score = f"{explanation.total:.4f}" if explanation else ""
+    reason = ",".join(explanation.reasons) if explanation else ""
+    access_part = f" access_count={access_count}" if access_count else ""
+    console.print(
+        f"{prefix}: type={memory_type} id={memory_id} "
+        f"source_ids={metadata['source_ids']} "
+        f"memory_status={metadata['status']} "
+        f"memory_confidence={metadata['confidence']} "
+        f"retrieval_score={retrieval_score} "
+        f"keyword={components.get('keyword', 0):.2f} "
+        f"fts={components.get('fts', 0):.2f} "
+        f"recency={components.get('recency', 0):.2f} "
+        f"salience={components.get('salience', 0):.2f} "
+        f"stability={components.get('stability', 0):.2f} "
+        f"access={components.get('access', 0):.2f} "
+        f"scope_priority={components.get('scope_priority', 0):.2f} "
+        f"status={components.get('status', 0):.2f} "
+        f"source_confidence={components.get('source_confidence', 0):.2f}"
+        f"{access_part} accessed_at= reason={reason}"
+    )
 
 
 def _source_from_gateway_session(store: MemoryStore, session_id: str) -> ConversationSource | None:
@@ -614,6 +617,22 @@ def config_show() -> None:
     table.add_row("context_recent_tail_messages", str(config.context_recent_tail_messages))
     table.add_row("context_min_summary_tokens", str(config.context_min_summary_tokens))
     table.add_row("context_max_summary_tokens", str(config.context_max_summary_tokens))
+    table.add_row(
+        "context_semantic_memory_tokens",
+        str(config.context_semantic_memory_tokens),
+    )
+    table.add_row(
+        "context_episodic_memory_tokens",
+        str(config.context_episodic_memory_tokens),
+    )
+    table.add_row(
+        "context_procedural_memory_tokens",
+        str(config.context_procedural_memory_tokens),
+    )
+    table.add_row(
+        "context_session_context_tokens",
+        str(config.context_session_context_tokens),
+    )
     console.print(table)
     typer.echo(f"Config path: {default_config_path()}")
 
@@ -918,13 +937,74 @@ def search(
     table = Table(title=f"Memory search: {query}")
     table.add_column("Type")
     table.add_column("ID")
+    table.add_column("Score", justify="right")
+    table.add_column("Why")
+    table.add_column("Status")
+    table.add_column("Confidence", justify="right")
+    table.add_column("Source IDs")
     table.add_column("Content")
     for semantic_memory in context.semantic_memories:
-        table.add_row("semantic", semantic_memory.id, semantic_memory.content)
+        explanation = context.retrieval_explanations.get(f"semantic:{semantic_memory.id}")
+        metadata = _retrieved_memory_metadata("semantic", semantic_memory)
+        table.add_row(
+            "semantic",
+            semantic_memory.id,
+            f"{explanation.total:.3f}" if explanation else "",
+            ", ".join(explanation.reasons) if explanation else "",
+            metadata["status"],
+            metadata["confidence"],
+            metadata["source_ids"],
+            semantic_memory.content,
+        )
+        _print_retrieved_memory_line(
+            "MemorySearch",
+            "semantic",
+            semantic_memory.id,
+            metadata,
+            explanation,
+        )
     for episodic_memory in context.episodic_memories:
-        table.add_row("episodic", episodic_memory.id, episodic_memory.summary)
+        explanation = context.retrieval_explanations.get(f"episodic:{episodic_memory.id}")
+        metadata = _retrieved_memory_metadata("episodic", episodic_memory)
+        table.add_row(
+            "episodic",
+            episodic_memory.id,
+            f"{explanation.total:.3f}" if explanation else "",
+            ", ".join(explanation.reasons) if explanation else "",
+            metadata["status"],
+            metadata["confidence"],
+            metadata["source_ids"],
+            episodic_memory.summary,
+        )
+        _print_retrieved_memory_line(
+            "MemorySearch",
+            "episodic",
+            episodic_memory.id,
+            metadata,
+            explanation,
+        )
     for procedural_memory in context.procedural_memories:
-        table.add_row("procedural", procedural_memory.id, procedural_memory.name)
+        explanation = context.retrieval_explanations.get(
+            f"procedural:{procedural_memory.id}"
+        )
+        metadata = _retrieved_memory_metadata("procedural", procedural_memory)
+        table.add_row(
+            "procedural",
+            procedural_memory.id,
+            f"{explanation.total:.3f}" if explanation else "",
+            ", ".join(explanation.reasons) if explanation else "",
+            metadata["status"],
+            metadata["confidence"],
+            metadata["source_ids"],
+            procedural_memory.name,
+        )
+        _print_retrieved_memory_line(
+            "MemorySearch",
+            "procedural",
+            procedural_memory.id,
+            metadata,
+            explanation,
+        )
     console.print(table)
 
 
@@ -1311,13 +1391,17 @@ def prompt(
         "semantic": [memory.id for memory in context.semantic_memories],
         "procedural": [memory.id for memory in context.procedural_memories],
     }
-    access_rows = _memory_access_rows(store, query=message, retrieved_ids=retrieved_ids)
     latest_ordinal = store.latest_conversation_ordinal(session)
     session_context = SessionContextManager(store).load(
         session,
         before_ordinal=latest_ordinal + 1 if latest_ordinal else None,
     )
-    messages = PromptBuilder().build(
+    messages = PromptBuilder(
+        semantic_memory_tokens=config.context_semantic_memory_tokens,
+        episodic_memory_tokens=config.context_episodic_memory_tokens,
+        procedural_memory_tokens=config.context_procedural_memory_tokens,
+        session_context_tokens=config.context_session_context_tokens,
+    ).build(
         message,
         context,
         session_context=session_context,
@@ -1345,30 +1429,55 @@ def prompt(
     retrieved_table.add_column("Type")
     retrieved_table.add_column("ID")
     retrieved_table.add_column("Retrieval Score", justify="right")
+    retrieved_table.add_column("Keyword", justify="right")
+    retrieved_table.add_column("Scope", justify="right")
+    retrieved_table.add_column("Status")
+    retrieved_table.add_column("Confidence", justify="right")
+    retrieved_table.add_column("Source IDs")
+    retrieved_table.add_column("Reasons")
     retrieved_table.add_column("Access Count", justify="right")
     retrieved_table.add_column("Accessed At")
-    scored = {(row["memory_type"], row["memory_id"]): row for row in access_rows}
+    retrieved_memory_map = {
+        **{("semantic", memory.id): memory for memory in context.semantic_memories},
+        **{("episodic", memory.id): memory for memory in context.episodic_memories},
+        **{("procedural", memory.id): memory for memory in context.procedural_memories},
+    }
     for memory_type, memory_ids in retrieved_ids.items():
         for memory_id in memory_ids:
-            row = scored.get((memory_type, memory_id))
+            explanation = context.retrieval_explanations.get(f"{memory_type}:{memory_id}")
+            components = explanation.components if explanation is not None else {}
+            metadata = _retrieved_memory_metadata(
+                memory_type,
+                retrieved_memory_map[(memory_type, memory_id)],
+            )
             retrieved_table.add_row(
                 memory_type,
                 memory_id,
-                f"{row['retrieval_score']:.4f}" if row else "",
-                str(row["access_count"]) if row else "",
-                row["accessed_at"] if row else "",
+                f"{explanation.total:.4f}" if explanation else "",
+                f"{components.get('keyword', 0):.2f}" if explanation else "",
+                f"{components.get('scope_priority', 0):.2f}" if explanation else "",
+                metadata["status"],
+                metadata["confidence"],
+                metadata["source_ids"],
+                ", ".join(explanation.reasons) if explanation else "",
+                str(store.count_memory_access(memory_id, memory_type)),
+                "",
             )
     console.print(retrieved_table)
     for memory_type, memory_ids in retrieved_ids.items():
         for memory_id in memory_ids:
-            row = scored.get((memory_type, memory_id))
-            retrieval_score = f"{row['retrieval_score']:.4f}" if row else ""
-            access_count = str(row["access_count"]) if row else ""
-            accessed_at = row["accessed_at"] if row else ""
-            console.print(
-                f"Retrieved: type={memory_type} id={memory_id} "
-                f"retrieval_score={retrieval_score} access_count={access_count} "
-                f"accessed_at={accessed_at}"
+            explanation = context.retrieval_explanations.get(f"{memory_type}:{memory_id}")
+            access_count = str(store.count_memory_access(memory_id, memory_type))
+            _print_retrieved_memory_line(
+                "Retrieved",
+                memory_type,
+                memory_id,
+                _retrieved_memory_metadata(
+                    memory_type,
+                    retrieved_memory_map[(memory_type, memory_id)],
+                ),
+                explanation,
+                access_count=access_count,
             )
     for chat_message in messages:
         console.rule(chat_message["role"])

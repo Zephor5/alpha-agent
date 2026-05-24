@@ -165,9 +165,14 @@ with `ALPHA_CONFIG_PATH`.
 
 Use `alpha config set <section.key> <value>` for supported keys such as
 `llm.provider`, `llm.model`, `llm.debug_logging`, `deepseek.api_key`,
-`codex.access_token`, `memory.retrieval_limit`, and `context.max_prompt_tokens`.
+`codex.access_token`, `memory.retrieval_limit`, `context.max_prompt_tokens`,
+and the per-layer context budgets such as `context.semantic_memory_tokens`.
 Secret values are masked by `alpha config get` unless you pass
 `--reveal-secret`.
+Config loading applies the same validation as `alpha config set`: token and
+count limits must be positive integers, and
+`context.compression_threshold_ratio` must be greater than `0` and no more than
+`1`.
 
 Environment variables and `.env` still work as overrides for one-off runs,
 deployment, and secrets. Precedence is:
@@ -213,6 +218,10 @@ compression_threshold_ratio = 0.85
 recent_tail_messages = 8
 min_summary_tokens = 256
 max_summary_tokens = 1024
+semantic_memory_tokens = 512
+episodic_memory_tokens = 512
+procedural_memory_tokens = 512
+session_context_tokens = 2048
 ```
 
 Useful environment overrides:
@@ -250,6 +259,11 @@ Useful environment overrides:
 - `ALPHA_CONTEXT_RECENT_TAIL_MESSAGES`: Uncompressed transcript tail to preserve.
 - `ALPHA_CONTEXT_MIN_SUMMARY_TOKENS`: Lower target for compressed summaries.
 - `ALPHA_CONTEXT_MAX_SUMMARY_TOKENS`: Upper target for compressed summaries.
+- `ALPHA_CONTEXT_SEMANTIC_MEMORY_TOKENS`: Prompt budget for semantic facts.
+- `ALPHA_CONTEXT_EPISODIC_MEMORY_TOKENS`: Prompt budget for prior episodes.
+- `ALPHA_CONTEXT_PROCEDURAL_MEMORY_TOKENS`: Prompt budget for procedures.
+- `ALPHA_CONTEXT_SESSION_CONTEXT_TOKENS`: Prompt budget for compressed summary
+  and uncompressed session context.
 
 The mock provider works without an API key:
 
@@ -270,31 +284,52 @@ only an override.
 
 ## Retrieval
 
-This version deliberately avoids embeddings. Retrieval uses:
+This version deliberately avoids embeddings. Retrieval has two explicit stages:
+
+1. Candidate generation from FTS/LIKE search plus recent memories, filtered by
+   allowed scope and active lifecycle status before prompt injection.
+2. Ranking with a score breakdown attached to each selected memory.
+
+Retrieval uses:
 
 - SQLite FTS5 when available.
 - LIKE-based fallback search when FTS5 is unavailable.
 - Keyword overlap.
 - Recency.
 - Salience.
+- Stability.
 - Access count.
-- Memory type boost.
+- Scope priority.
+- Active status.
+- Source confidence.
 - Lightweight entity hints from title-cased names.
+- Query expansion from current query entities, compressed session task text, and
+  high-confidence profile/preference memories.
 
 The ranking formula is explicit:
 
 ```text
 score =
-  keyword_score * 0.40
-  + salience * 0.25
-  + recency_score * 0.20
-  + access_score * 0.10
-  + type_boost * 0.05
+  keyword_score * 0.30
+  + fts_match * 0.12
+  + recency_score * 0.16
+  + salience * 0.14
+  + stability * 0.10
+  + access_score * 0.08
+  + scope_priority * 0.08
+  + active_status * 0.06
+  + source_confidence * 0.06
 ```
+
+`alpha memory search QUERY` and `alpha debug prompt QUERY` show retrieval scores
+and selection reasons. Prompt construction applies independent budgets for
+semantic, episodic, procedural, and session context so one layer cannot consume
+the full context message.
 
 ## Current Limitations
 
-- No vector retrieval yet.
+- No vector retrieval yet; non-vector retrieval remains the only active
+  retriever.
 - No web UI.
 - No background scheduler; scheduled consolidation is only a config placeholder.
 - No multi-agent system.

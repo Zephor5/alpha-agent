@@ -46,6 +46,7 @@ def test_debug_prompt_loads_gateway_source_from_session_and_prints_retrieval_tra
         content="SQLite memory retrieval decision",
         source_event_ids=[],
         salience=0.9,
+        confidence=0.9,
         scope=MemoryScope.from_record(mapping.memory_scope),
     )
     runner = CliRunner()
@@ -70,6 +71,12 @@ def test_debug_prompt_loads_gateway_source_from_session_and_prints_retrieval_tra
     assert "thread-9" in result.output
     assert episode.id in result.output
     assert "retrieval_score=" in result.output
+    assert "source_ids=" in result.output
+    assert "memory_status=active" in result.output
+    assert "memory_confidence=0.90" in result.output
+    assert "keyword=" in result.output
+    assert "scope_priority=" in result.output
+    assert "reason=" in result.output
     assert "access_count=" in result.output
     assert "access_count=1" not in result.output
     assert store.list_episodic_memories(limit=1)[0].access_count == 0
@@ -153,6 +160,43 @@ def test_memory_search_does_not_record_memory_access(tmp_path: Path) -> None:
     with store.connect() as conn:
         access_logs = conn.execute("SELECT count(*) FROM memory_access_log").fetchone()[0]
     assert access_logs == 0
+
+
+def test_memory_search_prints_memory_source_status_and_confidence(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    semantic = SemanticMemoryManager(store).remember_atomic(
+        content="User prefers source-aware retrieval",
+        memory_type="preference",
+        subject="user",
+        predicate="prefers",
+        object_value="source-aware retrieval",
+        confidence=0.93,
+        source_memory_ids=["msg-semantic-source"],
+    ).memory
+    episode = EpisodicMemoryManager(store).create(
+        content="Source-aware retrieval decision",
+        source_event_ids=["msg-episodic-source"],
+        salience=0.9,
+        confidence=0.81,
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["memory", "search", "source-aware retrieval"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert semantic.id in result.output
+    assert episode.id in result.output
+    assert "source_ids=msg-semantic-source" in result.output
+    assert "source_ids=msg-episodic-source" in result.output
+    assert "memory_status=active" in result.output
+    assert "memory_confidence=0.93" in result.output
+    assert "memory_confidence=0.81" in result.output
 
 
 def test_skills_list_does_not_load_builtin_skills(tmp_path: Path) -> None:
