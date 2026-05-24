@@ -11,10 +11,10 @@ README.md             Project overview, install steps, CLI usage, configuration,
 pyproject.toml        Package metadata, Python version, dependencies, console script entry point, and lint/type-check settings.
 config.example.toml   Example runtime configuration.
 docs/
+  cognition/          Reference docs for cognition related model.
   develop_record/     Archived working notes and completed refactor records, no need to read this unless required.
   doing/              Execution ledger for active tasks only; record during execution, then clear after self-check on completion
-  memory_design.md    Memory architecture and design notes.
-  TODO.md             Current roadmap and integration-oriented follow-up work.
+  TODO.md             Integration-oriented follow-up work.
 src/
   alpha_agent/
     cli.py            Typer CLI entry point for chat, ask, memory, config, skills, debug, and gateway commands.
