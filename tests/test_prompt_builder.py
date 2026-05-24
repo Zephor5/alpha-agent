@@ -14,6 +14,7 @@ from alpha_agent.memory.models import (
     SemanticMemory,
     SessionContextState,
 )
+from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.runtime.context_compression import (
     CompressionBudget,
@@ -22,6 +23,7 @@ from alpha_agent.runtime.context_compression import (
 )
 from alpha_agent.runtime.prompt_builder import PromptBuilder
 from alpha_agent.runtime.session_context import SessionContextManager, SessionContextProjection
+from tests.memory_eval import seed_memory_behavior_fixture
 
 
 def test_prompt_includes_memory_sections() -> None:
@@ -100,6 +102,33 @@ def test_prompt_includes_memory_sections() -> None:
     assert "### Entity Hints" in context_prompt
     assert "## Current User Message" not in context_prompt
     assert sum(1 for message in messages if message["role"] == "system") == 1
+
+
+def test_memory_behavior_fixture_renders_prompt_context(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    fixture = seed_memory_behavior_fixture(store)
+    context = MemoryRetriever(store).retrieve_context(
+        fixture.prompt_query,
+        fixture.session_id,
+        scopes=fixture.scope.allowed_read_scopes(),
+        record_access=False,
+    )
+
+    messages = PromptBuilder().build(fixture.prompt_query, context)
+    context_prompt = cast(str, messages[1].get("content"))
+
+    assert "### User Facts" in context_prompt
+    assert "User prefers concise answers for routine replies" in context_prompt
+    assert "Project Alpha Agent is finishing memory behavior fixture coverage" in context_prompt
+    semantic_ids = [memory.id for memory in context.semantic_memories]
+    assert fixture.semantic_ids["correction"] in semantic_ids
+    assert fixture.semantic_ids["correction_old"] not in semantic_ids
+    assert "uv run pytest" in context_prompt
+    assert "### Relevant Procedures" in context_prompt
+    assert "Debug tests fixture" in context_prompt
+    assert "Reproduce the failing test" in context_prompt
+    assert "do not remember that I prefer tea" not in context_prompt
 
 
 def test_prompt_keeps_scene_and_persona_reference_only_below_current_request() -> None:

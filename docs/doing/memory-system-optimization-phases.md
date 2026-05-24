@@ -53,7 +53,7 @@ Goal: make memory behavior measurable before changing storage semantics.
 
 Tasks:
 
-- [ ] Add a small memory behavior fixture set covering preferences, facts,
+- [x] Add a small memory behavior fixture set covering preferences, facts,
   corrections, project state, procedure hints, and "do not remember" cases.
 - [x] Add retrieval evaluation helpers that report retrieved ids, scores, score
   components, and whether expected memories were selected.

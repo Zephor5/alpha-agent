@@ -16,7 +16,11 @@ from alpha_agent.memory.models import MemoryScope
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
-from tests.memory_eval import ExpectedCandidate, assert_extraction_candidates
+from tests.memory_eval import (
+    ExpectedCandidate,
+    assert_extraction_candidates,
+    assert_memory_behavior_extraction_cases,
+)
 
 
 def test_extraction_eval_covers_preference_fact_and_procedure() -> None:
@@ -57,6 +61,10 @@ def test_extraction_eval_covers_preference_fact_and_procedure() -> None:
             )
         ],
     )
+
+
+def test_memory_behavior_fixture_covers_extraction_cases() -> None:
+    assert_memory_behavior_extraction_cases()
 
 
 def test_extraction_eval_documents_do_not_remember_gap() -> None:

@@ -10,7 +10,7 @@ from alpha_agent.memory.procedural import ProceduralMemoryManager
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.semantic import SemanticMemoryManager
 from alpha_agent.memory.store import MemoryStore
-from tests.memory_eval import assert_retrieves_ids
+from tests.memory_eval import assert_retrieves_ids, seed_memory_behavior_fixture
 
 
 def test_insert_and_search_episodic_memories(tmp_path: Path) -> None:
@@ -305,6 +305,51 @@ def test_retrieval_splits_candidates_from_ranking_with_score_breakdown(
             (memory.id,),
         ).fetchone()
     assert "source_confidence" in row["metadata"]
+
+
+def test_memory_behavior_fixture_explains_retrieval_cases(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    fixture = seed_memory_behavior_fixture(store)
+
+    assert_retrieves_ids(
+        store,
+        query=fixture.retrieval_queries["preference"],
+        scope=fixture.scope,
+        expected_semantic_ids=[fixture.semantic_ids["preference"]],
+    )
+    assert_retrieves_ids(
+        store,
+        query=fixture.retrieval_queries["fact"],
+        scope=fixture.scope,
+        expected_semantic_ids=[fixture.semantic_ids["fact"]],
+    )
+    assert_retrieves_ids(
+        store,
+        query=fixture.retrieval_queries["correction"],
+        scope=fixture.scope,
+        expected_semantic_ids=[fixture.semantic_ids["correction"]],
+    )
+    assert_retrieves_ids(
+        store,
+        query=fixture.retrieval_queries["project_state"],
+        scope=fixture.scope,
+        expected_semantic_ids=[fixture.semantic_ids["project_state"]],
+    )
+
+    context = MemoryRetriever(store).retrieve_context(
+        fixture.retrieval_queries["procedure_hint"],
+        fixture.session_id,
+        scopes=fixture.scope.allowed_read_scopes(),
+        record_access=False,
+    )
+
+    assert [memory.id for memory in context.procedural_memories] == [
+        fixture.procedural_ids["procedure_hint"]
+    ]
+    assert fixture.semantic_ids["correction_old"] not in [
+        memory.id for memory in context.semantic_memories
+    ]
 
 
 def test_query_expansion_uses_session_state_entities_and_profile_preferences(
