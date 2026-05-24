@@ -601,6 +601,11 @@ def config_show() -> None:
     table.add_row("llm_debug_logging", str(config.llm_debug_logging).lower())
     table.add_row("retrieval_limit", str(config.retrieval_limit))
     table.add_row("memory_capture_mode", config.memory_capture_mode)
+    table.add_row("memory_consolidation_mode", config.memory_consolidation_mode)
+    table.add_row(
+        "memory_consolidation_after_turns",
+        str(config.memory_consolidation_after_turns),
+    )
     table.add_row("context_max_prompt_tokens", str(config.context_max_prompt_tokens))
     table.add_row(
         "context_compression_threshold_ratio",

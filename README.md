@@ -18,8 +18,9 @@ usability parity where it matters for daily use, not internal design parity.
 
 The core agent runtime remains Alpha's own design: explicit turn execution,
 SQLite-backed memory layers, deterministic retrieval, salience scoring, and
-manual consolidation. Hermes' plugin/provider/gateway implementation is treated
-as reference material for integration decisions, not as code to copy wholesale.
+policy-gated consolidation. Hermes' plugin/provider/gateway implementation is
+treated as reference material for integration decisions, not as code to copy
+wholesale.
 See `docs/TODO.md` for the current Hermes-informed roadmap.
 
 ## What Human-Like Memory Means Here
@@ -36,8 +37,15 @@ putting everything into one transcript:
   platform-user, chat/thread, or project scopes.
 - Candidate lifecycle: extracted candidates are stored before promotion, with
   auditable approve, reject, and auto-approve decisions.
+- Extraction policy: deterministic extraction remains the default offline path;
+  optional LLM-assisted extraction is locally schema-validated and must be
+  injected with a provider. The current provider interface does not enforce
+  structured output itself. Explicit do-not-remember requests, secrets, platform/system
+  messages, and ambient group-chat chatter are blocked before candidate writes.
 - Salience scoring: deterministic importance estimates for what should persist.
-- Consolidation: a manual pass that promotes stable facts from episodes.
+- Consolidation: a manual or after-N-turn pass that promotes stable facts,
+  merges duplicates, supersedes corrections, and queues low-confidence conflicts
+  for review.
 
 The implementation is transparent and basic. It is designed to be inspected,
 changed, and extended.
@@ -195,6 +203,9 @@ access_token = ""
 
 [memory]
 retrieval_limit = 8
+capture_mode = "auto_approve_explicit"
+consolidation_mode = "manual"
+consolidation_after_turns = 20
 
 [context]
 max_prompt_tokens = 6000
@@ -228,6 +239,11 @@ Useful environment overrides:
 - `ALPHA_CODEX_ACCESS_TOKEN`: Optional Codex OAuth bearer token. If omitted,
   Alpha tries `CODEX_HOME/auth.json` or `~/.codex/auth.json`.
 - `ALPHA_RETRIEVAL_LIMIT`: Retrieval limit per memory layer. Defaults to `8`.
+- `ALPHA_MEMORY_CAPTURE_MODE`: `disabled`, `candidate_only`, or
+  `auto_approve_explicit`.
+- `ALPHA_MEMORY_CONSOLIDATION_MODE`: `manual`, `after_n_turns`, or `scheduled`.
+  Scheduled mode is a placeholder until a scheduler exists.
+- `ALPHA_MEMORY_CONSOLIDATION_AFTER_TURNS`: Turn interval for `after_n_turns`.
 - `ALPHA_CONTEXT_MAX_PROMPT_TOKENS`: Prompt budget before compression.
 - `ALPHA_CONTEXT_COMPRESSION_THRESHOLD_RATIO`: Ratio of the prompt budget that
   triggers compression.
@@ -280,18 +296,20 @@ score =
 
 - No vector retrieval yet.
 - No web UI.
-- No background scheduler.
+- No background scheduler; scheduled consolidation is only a config placeholder.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
-- Memory extraction is deterministic and basic.
+- Memory extraction defaults to deterministic heuristics; LLM-assisted
+  extraction is available as an injected component with local JSON schema
+  validation.
 - Graph memory is minimal.
 
 ## Roadmap
 
-1. LLM-assisted memory extraction with review.
-2. Vector retrieval as an optional module.
-3. Richer graph consolidation.
-4. Background dreaming/consolidation.
+1. Vector retrieval as an optional module.
+2. Richer graph consolidation.
+3. Background scheduler for scheduled consolidation.
+4. Broader LLM extraction UX and review controls.
 5. Tool execution system.
 6. Local files / notes ingestion.
 7. API server.

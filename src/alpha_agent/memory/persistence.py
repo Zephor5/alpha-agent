@@ -55,14 +55,14 @@ def persist_candidates(
         elif candidate.type == "semantic" and candidate.subject and candidate.predicate:
             decision = semantic.remember_atomic(
                 content=candidate.content,
-                memory_type="preference"
-                if candidate.predicate in {"prefers", "likes", "dislikes"}
-                else "fact",
+                memory_type=_semantic_memory_type(candidate),
                 subject=candidate.subject,
                 predicate=candidate.predicate,
                 object_value=candidate.object or "",
+                entities=list(candidate.entities),
                 confidence=candidate.confidence,
                 salience=candidate.salience,
+                stability=candidate.stability,
                 source_memory_ids=candidate.source_event_ids,
                 scope=memory_scope,
                 metadata=dict(candidate.metadata),
@@ -94,3 +94,12 @@ def persist_candidates(
                 )
             )
     return persisted
+
+
+def _semantic_memory_type(candidate: ExtractedMemoryCandidate) -> str:
+    metadata_type = candidate.metadata.get("memory_type")
+    if isinstance(metadata_type, str) and metadata_type.strip():
+        return metadata_type.strip()
+    if candidate.predicate in {"prefers", "likes", "dislikes"}:
+        return "preference"
+    return "fact"

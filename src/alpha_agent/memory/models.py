@@ -295,6 +295,8 @@ class ExtractedMemoryCandidate:
     content: str
     salience: float
     confidence: float
+    stability: float = 0.6
+    entities: list[str] = field(default_factory=list)
     subject: str | None = None
     predicate: str | None = None
     object: str | None = None

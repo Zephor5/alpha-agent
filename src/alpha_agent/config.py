@@ -32,6 +32,8 @@ api_key = ""
 [memory]
 retrieval_limit = 8
 capture_mode = "auto_approve_explicit"
+consolidation_mode = "manual"
+consolidation_after_turns = 20
 
 [context]
 max_prompt_tokens = 6000
@@ -62,6 +64,8 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "compatible.api_key": str,
     "memory.retrieval_limit": int,
     "memory.capture_mode": str,
+    "memory.consolidation_mode": str,
+    "memory.consolidation_after_turns": int,
     "context.max_prompt_tokens": int,
     "context.compression_threshold_ratio": float,
     "context.recent_tail_messages": int,
@@ -86,10 +90,12 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
     },
     "deepseek.reasoning_effort": {"", "low", "medium", "high", "max", "xhigh"},
     "memory.capture_mode": {"disabled", "candidate_only", "auto_approve_explicit"},
+    "memory.consolidation_mode": {"manual", "after_n_turns", "scheduled"},
 }
 
 POSITIVE_INT_CONFIG_KEYS = {
     "memory.retrieval_limit",
+    "memory.consolidation_after_turns",
     "context.max_prompt_tokens",
     "context.recent_tail_messages",
     "context.min_summary_tokens",
@@ -123,6 +129,8 @@ class AlphaConfig:
     compatible_api_key: str | None = None
     retrieval_limit: int = 8
     memory_capture_mode: str = "auto_approve_explicit"
+    memory_consolidation_mode: str = "manual"
+    memory_consolidation_after_turns: int = 20
     context_max_prompt_tokens: int = 6000
     context_compression_threshold_ratio: float = 0.85
     context_recent_tail_messages: int = 8
@@ -339,6 +347,18 @@ def _memory_capture_mode_value(value: str | None) -> str:
     return normalized
 
 
+def _memory_consolidation_mode_value(value: str | None) -> str:
+    normalized = (value or "manual").strip().lower()
+    allowed = CONFIG_KEY_ALLOWED_VALUES["memory.consolidation_mode"]
+    if normalized not in allowed:
+        options = ", ".join(sorted(allowed))
+        raise ValueError(
+            f"Invalid value for memory.consolidation_mode: {value}. "
+            f"Allowed values: {options}"
+        )
+    return normalized
+
+
 def _load_toml_config(config_file: str | Path | None) -> dict[str, Any]:
     path = Path(config_file).expanduser() if config_file is not None else default_config_path()
     if not path.exists():
@@ -475,6 +495,19 @@ def load_config(
                 "capture_mode",
                 "auto_approve_explicit",
             )
+        ),
+        memory_consolidation_mode=_memory_consolidation_mode_value(
+            _env_or_config(
+                "ALPHA_MEMORY_CONSOLIDATION_MODE",
+                config_data,
+                "memory",
+                "consolidation_mode",
+                "manual",
+            )
+        ),
+        memory_consolidation_after_turns=_int_env(
+            "ALPHA_MEMORY_CONSOLIDATION_AFTER_TURNS",
+            _int_value(memory.get("consolidation_after_turns"), 20),
         ),
         context_max_prompt_tokens=_int_env(
             "ALPHA_CONTEXT_MAX_PROMPT_TOKENS",

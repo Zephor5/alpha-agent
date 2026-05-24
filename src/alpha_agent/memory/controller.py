@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import replace
 from typing import Any
 
-from alpha_agent.memory.extractor import MemoryExtractor
+from alpha_agent.memory.extractor import MemoryExtractionContext, MemoryExtractor
 from alpha_agent.memory.models import (
     ExtractedMemoryCandidate,
     MemoryCandidate,
@@ -22,6 +22,15 @@ from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
+
+
+class MemoryPromotionPolicyError(ValueError):
+    """Raised when a stored candidate is blocked before durable promotion."""
+
+    def __init__(self, candidate_id: str, reason: str):
+        super().__init__(f"memory candidate {candidate_id} blocked by policy: {reason}")
+        self.candidate_id = candidate_id
+        self.reason = reason
 
 
 class MemoryController:
@@ -126,13 +135,20 @@ class MemoryController:
         assistant_response: str,
         source_message_ids: list[str],
         scope: MemoryScope,
+        retrieved_context: RetrievedContext | None = None,
+        recent_messages: list[Any] | None = None,
     ) -> list[MemoryCandidate]:
         """Extract and store candidates before any durable promotion decision."""
 
-        extracted = self.extractor.extract(
+        extracted = self.preview_extracted_candidates(
+            session_id=session_id,
             user_message=user_message,
             assistant_response=assistant_response,
-            source_event_ids=source_message_ids,
+            source_message_ids=source_message_ids,
+            scope=scope,
+            retrieved_context=retrieved_context,
+            recent_messages=recent_messages,
+            record_policy_trace=True,
         )
         now = utc_now_iso()
         stored: list[MemoryCandidate] = []
@@ -163,6 +179,133 @@ class MemoryController:
             },
         )
         return stored
+
+    def preview_extracted_candidates(
+        self,
+        *,
+        session_id: str,
+        user_message: str,
+        assistant_response: str,
+        source_message_ids: list[str],
+        scope: MemoryScope,
+        retrieved_context: RetrievedContext | None = None,
+        recent_messages: list[Any] | None = None,
+        record_policy_trace: bool = False,
+    ) -> list[ExtractedMemoryCandidate]:
+        """Extract candidates after applying the shared extraction policy gate."""
+
+        source_messages = self.store.list_conversation_messages_by_ids(source_message_ids)
+        policy_denial = self.extraction_policy_denial(
+            user_message=user_message,
+            source_message_ids=source_message_ids,
+            scope=scope,
+            source_messages=source_messages,
+        )
+        if policy_denial is not None:
+            if record_policy_trace:
+                self._trace_extraction_skip(
+                    session_id=session_id,
+                    reason=policy_denial,
+                    source_message_ids=source_message_ids,
+                    scope=scope,
+                )
+            return []
+
+        extraction_context = MemoryExtractionContext(
+            session_id=session_id,
+            recent_messages=list(recent_messages or source_messages),
+            active_semantic_memories=(
+                list(retrieved_context.semantic_memories) if retrieved_context is not None else []
+            ),
+        )
+        extracted = self.extractor.extract(
+            user_message=user_message,
+            assistant_response=assistant_response,
+            source_event_ids=source_message_ids,
+            context=extraction_context,
+        )
+        allowed: list[ExtractedMemoryCandidate] = []
+        for candidate in extracted:
+            candidate_denial = self.extracted_candidate_policy_denial(candidate)
+            if candidate_denial is not None:
+                if record_policy_trace:
+                    self.store.append_runtime_trace(
+                        session_id=session_id,
+                        event_type="memory.extraction.skipped_candidate",
+                        content=candidate_denial,
+                        metadata={
+                            "scope": scope.to_record(),
+                            "sensitivity_flags": _sensitivity_flags(candidate),
+                        },
+                    )
+                continue
+            allowed.append(candidate)
+        return allowed
+
+    def extraction_policy_denial(
+        self,
+        *,
+        user_message: str,
+        source_message_ids: list[str],
+        scope: MemoryScope,
+        source_messages: list[Any] | None = None,
+    ) -> str | None:
+        """Return the shared request-level extraction policy denial reason."""
+
+        policy_denial = _extraction_policy_denial(user_message, scope=scope)
+        if policy_denial is not None:
+            return policy_denial
+        messages = source_messages
+        if messages is None:
+            messages = self.store.list_conversation_messages_by_ids(source_message_ids)
+        return _source_policy_denial(messages)
+
+    def extracted_candidate_policy_denial(
+        self,
+        candidate: ExtractedMemoryCandidate,
+    ) -> str | None:
+        """Return the shared candidate-level extraction policy denial reason."""
+
+        if _candidate_is_sensitive(candidate):
+            flags = _sensitivity_flags(candidate) or _detect_sensitivity(candidate.content)
+            return "sensitive candidate blocked: " + ",".join(flags)
+        return None
+
+    def candidate_promotion_policy_denial(
+        self,
+        candidate: MemoryCandidate,
+    ) -> str | None:
+        """Return why a stored candidate cannot be durably promoted, if blocked."""
+
+        source_messages = self.store.list_conversation_messages_by_ids(
+            candidate.source_message_ids
+        )
+        source_policy_denial = _stored_source_policy_denial(
+            source_messages=source_messages,
+            fallback_texts=[candidate.content],
+            scope=candidate.scope,
+        )
+        if source_policy_denial is not None:
+            return source_policy_denial
+        return self.extracted_candidate_policy_denial(_stored_candidate_to_extracted(candidate))
+
+    def _trace_extraction_skip(
+        self,
+        *,
+        session_id: str,
+        reason: str,
+        source_message_ids: list[str],
+        scope: MemoryScope,
+    ) -> None:
+        self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type="memory.extraction.skipped",
+            content=reason,
+            metadata={
+                "scope": scope.to_record(),
+                "source_message_ids": source_message_ids,
+            },
+        )
 
     def decide_runtime_candidates(
         self,
@@ -251,6 +394,9 @@ class MemoryController:
     ) -> list[PersistedMemory]:
         """Persist one approved candidate and record the decision."""
 
+        policy_denial = self.candidate_promotion_policy_denial(candidate)
+        if policy_denial is not None:
+            raise MemoryPromotionPolicyError(candidate.id, policy_denial)
         if conn is not None:
             return self._promote_candidate_in_conn(
                 candidate,
@@ -341,25 +487,32 @@ class MemoryController:
 
 
 def _candidate_weak_structure(candidate: ExtractedMemoryCandidate) -> dict[str, Any]:
-    return {
+    weak = {
         "subject": candidate.subject,
         "predicate": candidate.predicate,
         "object": candidate.object,
     }
+    if candidate.entities:
+        weak["entities"] = list(candidate.entities)
+    return weak
 
 
 def _stored_candidate_to_extracted(candidate: MemoryCandidate) -> ExtractedMemoryCandidate:
     weak = candidate.weak_structure
+    entities = weak.get("entities")
+    metadata = dict(candidate.metadata)
     return ExtractedMemoryCandidate(
         type=candidate.candidate_type,
         content=candidate.content,
         salience=candidate.salience,
         confidence=candidate.confidence,
+        stability=_float_metadata(metadata.get("stability"), 0.6),
+        entities=[str(item) for item in entities] if isinstance(entities, list) else [],
         subject=_optional_str(weak.get("subject")),
         predicate=_optional_str(weak.get("predicate")),
         object=_optional_str(weak.get("object")),
         source_event_ids=list(candidate.source_message_ids),
-        metadata=dict(candidate.metadata),
+        metadata=metadata,
     )
 
 
@@ -378,3 +531,128 @@ def _optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _extraction_policy_denial(user_message: str, *, scope: MemoryScope) -> str | None:
+    if _explicit_do_not_remember(user_message):
+        return "explicit do-not-remember request"
+    sensitivity = _detect_sensitivity(user_message)
+    if sensitivity:
+        return "sensitive data blocked: " + ",".join(sensitivity)
+    if _is_group_scope(scope) and not _explicit_remember(user_message):
+        return "group chat ambient memory write blocked"
+    return None
+
+
+def _source_policy_denial(source_messages: list[Any]) -> str | None:
+    return _stored_source_policy_denial(
+        source_messages=source_messages,
+        fallback_texts=[],
+        scope=None,
+    )
+
+
+def _stored_source_policy_denial(
+    *,
+    source_messages: list[Any],
+    fallback_texts: list[str],
+    scope: MemoryScope | None,
+) -> str | None:
+    source_texts = [
+        str(getattr(message, "raw_content", "") or "")
+        for message in source_messages
+        if str(getattr(message, "raw_content", "") or "").strip()
+    ]
+    texts = [*source_texts, *fallback_texts]
+    for message in source_messages:
+        metadata = getattr(message, "source_metadata", {}) or {}
+        if _is_platform_system_metadata(metadata):
+            return "platform/system source message blocked"
+    for text in texts:
+        if _explicit_do_not_remember(text):
+            return "explicit do-not-remember request"
+    for text in texts:
+        sensitivity = _detect_sensitivity(text)
+        if sensitivity:
+            return "sensitive data blocked: " + ",".join(sensitivity)
+    if scope is not None and _is_group_scope(scope):
+        explicit = any(_explicit_remember(text) for text in texts)
+        if not explicit:
+            return "group chat ambient memory write blocked"
+    return None
+
+
+def _explicit_do_not_remember(value: str) -> bool:
+    normalized = " ".join(value.casefold().split())
+    return any(
+        pattern in normalized
+        for pattern in (
+            "do not remember",
+            "don't remember",
+            "dont remember",
+            "do not store",
+            "don't store",
+            "dont store",
+            "do not save",
+            "don't save",
+            "dont save",
+        )
+    )
+
+
+def _explicit_remember(value: str) -> bool:
+    normalized = " ".join(value.casefold().split())
+    return "remember that" in normalized or normalized.startswith("remember ")
+
+
+def _detect_sensitivity(value: str) -> list[str]:
+    checks = {
+        "password": r"\b(password|passcode|pin)\b\s*(?:is|=|:)",
+        "api_key": r"\b(api[_ -]?key|secret[_ -]?key)\b\s*(?:is|=|:)",
+        "token": r"\b(access[_ -]?token|refresh[_ -]?token|bearer token)\b\s*(?:is|=|:)",
+        "private_key": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+        "credit_card": r"\b(?:\d[ -]*?){13,19}\b",
+    }
+    return [
+        name
+        for name, pattern in checks.items()
+        if re.search(pattern, value, flags=re.IGNORECASE)
+    ]
+
+
+def _candidate_is_sensitive(candidate: ExtractedMemoryCandidate) -> bool:
+    return bool(_sensitivity_flags(candidate) or _detect_sensitivity(candidate.content))
+
+
+def _sensitivity_flags(candidate: ExtractedMemoryCandidate) -> list[str]:
+    flags = candidate.metadata.get("sensitivity_flags")
+    if not isinstance(flags, list):
+        return []
+    return [str(flag) for flag in flags if str(flag).strip()]
+
+
+def _is_group_scope(scope: MemoryScope) -> bool:
+    chat_type = str(scope.metadata.get("chat_type") or "").strip().casefold()
+    return scope.kind == "chat_thread" and chat_type not in {"", "dm", "direct", "private"}
+
+
+def _is_platform_system_metadata(metadata: dict[str, Any]) -> bool:
+    if metadata.get("is_system_message") is True:
+        return True
+    for key in ("message_type", "sender_type", "event_type", "subtype"):
+        value = str(metadata.get(key) or "").strip().casefold()
+        if value in {"system", "platform", "bot", "control", "event"}:
+            return True
+    return False
+
+
+def _float_metadata(value: Any, default: float) -> float:
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default

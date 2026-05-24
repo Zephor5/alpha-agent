@@ -334,14 +334,20 @@ These items make Alpha Agent feel different from a generic chat bot.
 - [ ] Add confidence/source display to channel replies when memory is used.
 - [ ] Add "what do you remember about me?" command.
 - [x] Add "forget this" / "forget memory id" support.
-- [ ] Add per-channel memory policy:
+- [x] Add per-channel memory policy:
   - DM can write semantic memory by default.
   - group chats may require explicit "remember".
   - platform/system messages should never become semantic facts.
-- [ ] Add consolidation modes:
+- [x] Add consolidation modes:
   - manual.
   - after N turns.
   - scheduled only after gateway scheduler exists.
+- [x] Add extraction quality controls:
+  - deterministic extractor remains the offline default.
+  - LLM-assisted extractor validates returned JSON against a local strict
+    candidate schema with mock provider contract tests.
+  - recent session context and retrieved active memories are passed to the
+    extractor for update/contradiction detection.
 - [x] Add duplicate/contradiction handling:
   - detect conflicting semantic facts by subject/predicate.
   - mark older fact superseded instead of deleting immediately.

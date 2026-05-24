@@ -19,6 +19,7 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.memory.consolidation import ConsolidationService
 from alpha_agent.memory.controller import MemoryController
 from alpha_agent.memory.episodic import EpisodicMemoryManager
 from alpha_agent.memory.extractor import MemoryExtractor
@@ -193,6 +194,8 @@ class AlphaAgent:
         context_recent_tail_messages: int = 8,
         context_min_summary_tokens: int = 128,
         context_max_summary_tokens: int = 512,
+        memory_consolidation_mode: str = "manual",
+        memory_consolidation_after_turns: int = 20,
     ):
         self.store = store
         self.llm_provider = llm_provider
@@ -210,6 +213,10 @@ class AlphaAgent:
         )
         self.extractor = extractor or MemoryExtractor()
         self.memory_capture_mode = _normalize_memory_capture_mode(memory_capture_mode)
+        self.memory_consolidation_mode = _normalize_memory_consolidation_mode(
+            memory_consolidation_mode
+        )
+        self.memory_consolidation_after_turns = max(1, memory_consolidation_after_turns)
         self.memory_controller = MemoryController(
             store,
             retriever=retriever,
@@ -382,6 +389,8 @@ class AlphaAgent:
                     assistant_response=llm_response.content,
                     source_message_ids=extraction_source_message_ids,
                     scope=memory_scope,
+                    retrieved_context=context,
+                    recent_messages=session_context.uncompressed_messages,
                 )
                 persisted = self._persist_extracted_memories(
                     session_id,
@@ -393,7 +402,16 @@ class AlphaAgent:
             debug["extracted_memory_count"] = len(candidates)
             debug["persisted_memory_count"] = len(persisted)
             debug["memory_candidate_ids"] = [candidate.id for candidate in candidates]
-            debug["consolidation"] = self._decide_consolidation_trigger(candidates)
+            debug["consolidation"] = self._maybe_consolidate_memory(
+                session_id=session_id,
+                user_turn_count=len(
+                    [
+                        message
+                        for message in self.store.list_conversation_messages(session_id)
+                        if message.role == "user"
+                    ]
+                ),
+            )
 
             return AgentTurnResult(
                 response=llm_response.content,
@@ -1188,6 +1206,8 @@ class AlphaAgent:
         assistant_response: str,
         source_message_ids: list[str],
         scope: MemoryScope,
+        retrieved_context: RetrievedContext | None = None,
+        recent_messages: list[ConversationMessage] | None = None,
     ) -> list[MemoryCandidate]:
         candidates = self.memory_controller.extract_candidates(
             session_id=session_id,
@@ -1195,6 +1215,8 @@ class AlphaAgent:
             assistant_response=assistant_response,
             source_message_ids=source_message_ids,
             scope=scope,
+            retrieved_context=retrieved_context,
+            recent_messages=recent_messages,
         )
         type_counts: dict[str, int] = {}
         for candidate in candidates:
@@ -1249,16 +1271,59 @@ class AlphaAgent:
             auto_approve_explicit=auto_approve_explicit,
         )
 
-    def _decide_consolidation_trigger(
+    def _maybe_consolidate_memory(
         self,
-        candidates: list[MemoryCandidate],
+        *,
+        session_id: str,
+        user_turn_count: int,
     ) -> dict[str, Any]:
-        high_salience_count = sum(1 for candidate in candidates if candidate.salience >= 0.75)
-        should_consolidate = high_salience_count >= 3
+        if self.memory_consolidation_mode == "manual":
+            return {
+                "mode": self.memory_consolidation_mode,
+                "should_consolidate": False,
+                "reason": "manual",
+            }
+        if self.memory_consolidation_mode == "scheduled":
+            return {
+                "mode": self.memory_consolidation_mode,
+                "should_consolidate": False,
+                "reason": "scheduler_not_configured",
+            }
+        should_consolidate = user_turn_count % self.memory_consolidation_after_turns == 0
+        if not should_consolidate:
+            return {
+                "mode": self.memory_consolidation_mode,
+                "should_consolidate": False,
+                "reason": "below_after_turns_threshold",
+                "turn_count": user_turn_count,
+                "after_turns": self.memory_consolidation_after_turns,
+            }
+        report = ConsolidationService(self.store).consolidate()
+        self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type="memory.consolidated",
+            content=report.render(),
+            metadata={
+                "promoted": report.promoted_count,
+                "merged": report.merged_count,
+                "skipped": report.skipped_count,
+                "superseded": report.superseded_count,
+                "conflicts": report.conflict_count,
+            },
+        )
         return {
-            "should_consolidate": should_consolidate,
-            "reason": "high_salience_batch" if should_consolidate else "below_threshold",
-            "high_salience_count": high_salience_count,
+            "mode": self.memory_consolidation_mode,
+            "should_consolidate": True,
+            "reason": "after_turns",
+            "turn_count": user_turn_count,
+            "after_turns": self.memory_consolidation_after_turns,
+            "report": {
+                "promoted": report.promoted_count,
+                "merged": report.merged_count,
+                "skipped": report.skipped_count,
+                "superseded": report.superseded_count,
+                "conflicts": report.conflict_count,
+            },
         }
 
     def _emit_turn_failed(
@@ -1455,6 +1520,15 @@ def _normalize_memory_capture_mode(value: MemoryCaptureMode | str) -> MemoryCapt
             "memory_capture_mode must be disabled, candidate_only, or auto_approve_explicit"
         )
     return normalized  # type: ignore[return-value]
+
+
+def _normalize_memory_consolidation_mode(value: str) -> str:
+    normalized = str(value).strip().lower()
+    if normalized not in {"manual", "after_n_turns", "scheduled"}:
+        raise ValueError(
+            "memory_consolidation_mode must be manual, after_n_turns, or scheduled"
+        )
+    return normalized
 
 
 def _llm_response_log(response: LLMResponse) -> dict[str, Any]:

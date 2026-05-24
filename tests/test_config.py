@@ -32,6 +32,8 @@ api_key = "compatible-key"
 [memory]
 retrieval_limit = 3
 capture_mode = "candidate_only"
+consolidation_mode = "after_n_turns"
+consolidation_after_turns = 4
 
 [context]
 max_prompt_tokens = 4096
@@ -58,6 +60,8 @@ reasoning_effort = "high"
     assert config.llm_provider == "deepseek"
     assert config.retrieval_limit == 3
     assert config.memory_capture_mode == "candidate_only"
+    assert config.memory_consolidation_mode == "after_n_turns"
+    assert config.memory_consolidation_after_turns == 4
     assert config.context_max_prompt_tokens == 4096
     assert config.context_compression_threshold_ratio == 0.75
     assert config.context_recent_tail_messages == 6
@@ -165,6 +169,10 @@ def test_config_cli_set_and_get(
     set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
     set_limit = runner.invoke(app, ["config", "set", "memory.retrieval_limit", "5"])
     set_capture = runner.invoke(app, ["config", "set", "memory.capture_mode", "disabled"])
+    set_consolidation = runner.invoke(
+        app,
+        ["config", "set", "memory.consolidation_mode", "after_n_turns"],
+    )
     set_context = runner.invoke(app, ["config", "set", "context.max_prompt_tokens", "4096"])
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
 
@@ -172,6 +180,7 @@ def test_config_cli_set_and_get(
     assert set_debug.exit_code == 0
     assert set_limit.exit_code == 0
     assert set_capture.exit_code == 0
+    assert set_consolidation.exit_code == 0
     assert set_context.exit_code == 0
     assert get_provider.exit_code == 0
     assert "codex" in get_provider.output
@@ -180,6 +189,7 @@ def test_config_cli_set_and_get(
     assert config.llm_debug_logging is True
     assert config.retrieval_limit == 5
     assert config.memory_capture_mode == "disabled"
+    assert config.memory_consolidation_mode == "after_n_turns"
     assert config.context_max_prompt_tokens == 4096
 
 
@@ -308,6 +318,20 @@ capture_mode = "candidate_only"
     monkeypatch.setenv("ALPHA_MEMORY_CAPTURE_MODE", "always")
 
     with pytest.raises(ValueError, match="Invalid value for memory.capture_mode"):
+        load_config(env_file=None, config_file=config_path)
+
+
+def test_load_config_rejects_invalid_memory_consolidation_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[memory]
+consolidation_mode = "always"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid value for memory.consolidation_mode"):
         load_config(env_file=None, config_file=config_path)
 
 

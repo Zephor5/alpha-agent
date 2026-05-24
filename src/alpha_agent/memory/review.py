@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, replace
 
-from alpha_agent.memory.controller import MemoryController
+from alpha_agent.memory.controller import MemoryController, MemoryPromotionPolicyError
 from alpha_agent.memory.extractor import MemoryExtractor
 from alpha_agent.memory.models import (
     ConversationMessage,
@@ -54,13 +54,20 @@ class MemoryReviewService:
             extractor=self.extractor,
         )
 
-    def preview(self, message: str) -> list[ExtractedMemoryCandidate]:
+    def preview(
+        self,
+        message: str,
+        *,
+        scope: MemoryScope | None = None,
+    ) -> list[ExtractedMemoryCandidate]:
         """Extract candidates without writing events or durable memories."""
 
-        return self.extractor.extract(
+        return self.controller.preview_extracted_candidates(
+            session_id="memory-review-preview",
             user_message=message,
             assistant_response="",
-            source_event_ids=[],
+            source_message_ids=[],
+            scope=scope or MemoryScope.default(),
         )
 
     def approve(
@@ -85,6 +92,12 @@ class MemoryReviewService:
                 metadata={"review_mode": True},
                 conn=conn,
             )
+            request_denial = self.controller.extraction_policy_denial(
+                user_message=message,
+                source_message_ids=[source_message.id],
+                scope=memory_scope,
+                source_messages=[source_message],
+            )
             approved = [
                 candidate
                 if candidate.source_event_ids
@@ -96,6 +109,30 @@ class MemoryReviewService:
                     _stored_review_candidate(candidate, scope=memory_scope),
                     conn=conn,
                 )
+                candidate_denial = self.controller.candidate_promotion_policy_denial(
+                    stored
+                )
+                policy_denial = request_denial or candidate_denial
+                if policy_denial is not None:
+                    rejected_candidate = self.store.update_memory_candidate_status(
+                        stored.id,
+                        "rejected",
+                        reviewer_metadata={
+                            "reviewer": "cli",
+                            "policy_denial": policy_denial,
+                        },
+                        conn=conn,
+                    )
+                    _record_decision(
+                        self.store,
+                        candidate_id=rejected_candidate.id,
+                        action="reject",
+                        reviewer="cli",
+                        rationale=f"blocked by extraction policy: {policy_denial}",
+                        metadata={"policy_denial": policy_denial},
+                        conn=conn,
+                    )
+                    continue
                 approved_candidate = self.store.update_memory_candidate_status(
                     stored.id,
                     "approved",
@@ -110,15 +147,35 @@ class MemoryReviewService:
                     rationale="approved from one-shot review workflow",
                     conn=conn,
                 )
-                persisted.extend(
-                    self.controller.promote_candidate(
-                        approved_candidate,
-                        action="promote",
-                        reviewer="cli",
-                        rationale="promoted after one-shot review approval",
+                try:
+                    persisted.extend(
+                        self.controller.promote_candidate(
+                            approved_candidate,
+                            action="promote",
+                            reviewer="cli",
+                            rationale="promoted after one-shot review approval",
+                            conn=conn,
+                        )
+                    )
+                except MemoryPromotionPolicyError as exc:
+                    rejected_candidate = self.store.update_memory_candidate_status(
+                        approved_candidate.id,
+                        "rejected",
+                        reviewer_metadata={
+                            "reviewer": "cli",
+                            "policy_denial": exc.reason,
+                        },
                         conn=conn,
                     )
-                )
+                    _record_decision(
+                        self.store,
+                        candidate_id=rejected_candidate.id,
+                        action="reject",
+                        reviewer="cli",
+                        rationale=f"blocked by extraction policy: {exc.reason}",
+                        metadata={"policy_denial": exc.reason},
+                        conn=conn,
+                    )
         return persisted
 
     def reject(
@@ -212,6 +269,27 @@ class MemoryReviewService:
             if candidate is None:
                 raise KeyError(f"memory candidate not found: {candidate_id}")
             _require_reviewable_visible(candidate, scope=MemoryScope.default())
+            policy_denial = self.controller.candidate_promotion_policy_denial(candidate)
+            if policy_denial is not None:
+                rejected = self.store.update_memory_candidate_status(
+                    candidate_id,
+                    "rejected",
+                    reviewer_metadata={
+                        "reviewer": reviewer,
+                        "policy_denial": policy_denial,
+                    },
+                    conn=conn,
+                )
+                _record_decision(
+                    self.store,
+                    candidate_id=rejected.id,
+                    action="reject",
+                    reviewer=reviewer,
+                    rationale=f"blocked by extraction policy: {policy_denial}",
+                    metadata={"policy_denial": policy_denial},
+                    conn=conn,
+                )
+                return []
             approved = self.store.update_memory_candidate_status(
                 candidate_id,
                 "approved",
@@ -418,6 +496,7 @@ def _stored_review_candidate(
             "subject": candidate.subject,
             "predicate": candidate.predicate,
             "object": candidate.object,
+            "entities": list(candidate.entities),
         },
         salience=candidate.salience,
         confidence=candidate.confidence,
@@ -437,6 +516,7 @@ def _record_decision(
     action: str,
     reviewer: str,
     rationale: str,
+    metadata: dict[str, object] | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> None:
     store.insert_memory_decision(
@@ -449,7 +529,7 @@ def _record_decision(
             reviewer=reviewer,
             rationale=rationale,
             created_at=utc_now_iso(),
-            metadata={},
+            metadata=dict(metadata or {}),
         ),
         conn=conn,
     )

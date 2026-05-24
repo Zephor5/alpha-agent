@@ -6,6 +6,7 @@ import pytest
 
 import alpha_agent.memory.controller as controller_module
 from alpha_agent.memory.controller import MemoryController
+from alpha_agent.memory.extractor import MemoryExtractor
 from alpha_agent.memory.models import MemoryCandidate, MemoryScope
 from alpha_agent.memory.retrieval import MemoryRetriever
 from alpha_agent.memory.review import MemoryReviewService
@@ -37,6 +38,141 @@ def test_one_shot_reject_stores_auditable_candidates(tmp_path: Path) -> None:
         assert [message.raw_content for message in audit.source_messages] == [
             "remember that I prefer tea"
         ]
+
+
+def test_one_shot_preview_blocks_sensitive_memory_by_default(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    service = MemoryReviewService(store)
+
+    candidates = service.preview("remember that my password is swordfish")
+
+    assert candidates == []
+
+
+def test_one_shot_approve_rejects_policy_blocked_candidates_without_promotion(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    service = MemoryReviewService(store)
+    unsafe_candidates = MemoryExtractor().extract(
+        "remember that my password is swordfish",
+        "",
+        [],
+    )
+
+    persisted = service.approve(
+        message="remember that my password is swordfish",
+        session_id="session-review",
+        candidates=unsafe_candidates,
+    )
+
+    rejected = store.list_memory_candidates(status="rejected")
+    assert persisted == []
+    assert store.list_semantic_memories() == []
+    assert len(rejected) == len(unsafe_candidates)
+    assert {
+        decision.rationale
+        for candidate in rejected
+        for decision in store.list_memory_decisions(candidate.id)
+    } == {"blocked by extraction policy: sensitive data blocked: password"}
+
+
+def test_approve_stored_scans_all_sources_for_do_not_remember(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    safe = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="remember that I prefer tea",
+    )
+    private = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="do not remember that I prefer tea",
+    )
+    now = utc_now_iso()
+    store.insert_memory_candidate(
+        MemoryCandidate(
+            id="cand-multi-source-private",
+            candidate_type="semantic",
+            proposed_layer="semantic",
+            content="User prefers tea",
+            weak_structure={"subject": "user", "predicate": "prefers", "object": "tea"},
+            salience=0.9,
+            confidence=0.8,
+            scope=MemoryScope.default(),
+            source_message_ids=[safe.id, private.id],
+            status="pending",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    service = MemoryReviewService(store)
+
+    persisted = service.approve_stored("cand-multi-source-private")
+
+    candidate = store.get_memory_candidate("cand-multi-source-private")
+    assert persisted == []
+    assert candidate is not None
+    assert candidate.status == "rejected"
+    assert store.list_semantic_memories() == []
+    assert store.list_memory_decisions(candidate.id)[0].rationale == (
+        "blocked by extraction policy: explicit do-not-remember request"
+    )
+
+
+def test_approve_stored_scans_all_sources_for_sensitive_data(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    safe = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="remember this account detail",
+    )
+    secret = store.append_conversation_message(
+        session_id="s1",
+        role="user",
+        raw_content="my password is swordfish",
+    )
+    now = utc_now_iso()
+    store.insert_memory_candidate(
+        MemoryCandidate(
+            id="cand-multi-source-secret",
+            candidate_type="semantic",
+            proposed_layer="semantic",
+            content="User account detail is swordfish",
+            weak_structure={
+                "subject": "user",
+                "predicate": "account_detail",
+                "object": "swordfish",
+            },
+            salience=0.9,
+            confidence=0.8,
+            scope=MemoryScope.default(),
+            source_message_ids=[safe.id, secret.id],
+            status="pending",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    service = MemoryReviewService(store)
+
+    persisted = service.approve_stored("cand-multi-source-secret")
+
+    candidate = store.get_memory_candidate("cand-multi-source-secret")
+    assert persisted == []
+    assert candidate is not None
+    assert candidate.status == "rejected"
+    assert store.list_semantic_memories() == []
+    assert store.list_memory_decisions(candidate.id)[0].rationale == (
+        "blocked by extraction policy: sensitive data blocked: password"
+    )
 
 
 def test_one_shot_approve_rolls_back_candidate_when_promotion_fails(

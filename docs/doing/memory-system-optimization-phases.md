@@ -223,29 +223,43 @@ behavior.
 
 Tasks:
 
-- [ ] Introduce an extractor interface with deterministic and LLM-assisted
+- [x] Introduce an extractor interface with deterministic and LLM-assisted
   implementations.
-- [ ] Define strict JSON schema for extracted candidates: layer, memory type,
-  content, entities, weak structure, confidence, stability, salience, source
-  ids, sensitivity flags, and rationale.
-- [ ] Use recent session context and retrieved active memories as extraction
+- [x] Define a local strict JSON validation schema for extracted candidates:
+  layer, memory type, content, entities, weak structure, confidence, stability,
+  salience, source ids, sensitivity flags, and rationale.
+- [x] Use recent session context and retrieved active memories as extraction
   context, so the extractor can identify updates and contradictions.
-- [ ] Add extraction policies for sensitive data, platform/system messages,
+- [x] Add extraction policies for sensitive data, platform/system messages,
   group chat write restrictions, and explicit "do not remember" requests.
-- [ ] Expand consolidation beyond episodic-to-semantic promotion: consolidate
+- [x] Expand consolidation beyond episodic-to-semantic promotion: consolidate
   candidates, merge duplicates, promote stable repeated facts, and queue
   conflict review.
-- [ ] Add configurable consolidation modes: manual, after N turns, and scheduled
+- [x] Add configurable consolidation modes: manual, after N turns, and scheduled
   after a scheduler exists.
+
+Current status: deterministic extraction remains the default offline extractor.
+`LLMAssistedMemoryExtractor` is provider-injected and contract-tested with a
+mock provider; because the current provider interface has no structured-output
+option, strictness is a local validation contract on the returned JSON object,
+not provider-enforced structured output.
+Runtime extraction now passes recent session messages and retrieved active
+semantic memories into the extractor. Policy gates block explicit
+do-not-remember requests, sensitive secrets, platform/system source messages,
+and non-explicit group-chat writes. Consolidation now creates and processes
+candidates through the controller candidate lifecycle and Phase 3 semantic
+lifecycle, records decision audit rows, reports
+promoted/merged/skipped/superseded/conflict counts, and keeps scheduled mode as
+a no-op placeholder until a scheduler exists.
 
 Acceptance criteria:
 
-- [ ] LLM extraction can be enabled without changing the caller-facing
+- [x] LLM extraction can be enabled without changing the caller-facing
   `AlphaAgent.respond()` contract.
-- [ ] Deterministic extraction remains available for tests and offline use.
-- [ ] Group/system messages do not become semantic facts unless policy allows
+- [x] Deterministic extraction remains available for tests and offline use.
+- [x] Group/system messages do not become semantic facts unless policy allows
   them.
-- [ ] Consolidation creates fewer, higher-quality active memories instead of
+- [x] Consolidation creates fewer, higher-quality active memories instead of
   only increasing memory count.
 
 Likely files:
@@ -260,9 +274,9 @@ Likely files:
 
 Checkpoint:
 
-- [ ] Existing deterministic tests pass without network or provider credentials.
-- [ ] LLM-assisted extractor has contract tests using a mock provider.
-- [ ] Consolidation reports include promoted, merged, skipped, superseded, and
+- [x] Existing deterministic tests pass without network or provider credentials.
+- [x] LLM-assisted extractor has contract tests using a mock provider.
+- [x] Consolidation reports include promoted, merged, skipped, superseded, and
   conflict counts.
 
 ## Phase 5: Retrieval, Ranking, And Prompt Injection
