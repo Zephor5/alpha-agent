@@ -25,6 +25,7 @@ from alpha_agent.memory.extractor import MemoryExtractor
 from alpha_agent.memory.models import (
     ConversationMessage,
     MemoryCandidate,
+    MemoryCaptureMode,
     MemoryScope,
     RetrievedContext,
     RuntimeTrace,
@@ -178,6 +179,7 @@ class AlphaAgent:
         retrieval_limit: int = 8,
         prompt_builder: PromptBuilder | None = None,
         extractor: MemoryExtractor | None = None,
+        memory_capture_mode: MemoryCaptureMode | str = "auto_approve_explicit",
         tool_registry: ToolRegistry | None = None,
         max_llm_retries: int = 2,
         llm_retry_sleep_seconds: float = 0.0,
@@ -207,6 +209,7 @@ class AlphaAgent:
             max_summary_tokens=context_max_summary_tokens,
         )
         self.extractor = extractor or MemoryExtractor()
+        self.memory_capture_mode = _normalize_memory_capture_mode(memory_capture_mode)
         self.memory_controller = MemoryController(
             store,
             retriever=retriever,
@@ -278,6 +281,7 @@ class AlphaAgent:
                 source_metadata=dict(source_metadata or {}),
             )
             debug["memory_scope"] = memory_scope.to_record()
+            debug["memory_capture_mode"] = self.memory_capture_mode
             debug["user_message_id"] = user_record.id
             debug["user_message_ordinal"] = user_record.ordinal
 
@@ -352,14 +356,28 @@ class AlphaAgent:
                 assistant_record.id,
                 *[message.id for message in provider_tool_messages],
             ]
-            candidates = self._extract_memory(
-                session_id=session_id,
-                user_message=user_message,
-                assistant_response=llm_response.content,
-                source_message_ids=extraction_source_message_ids,
-                scope=memory_scope,
-            )
-            persisted = self._persist_extracted_memories(session_id, candidates)
+            if self.memory_capture_mode == "disabled":
+                candidates = self._skip_memory_capture(
+                    session_id=session_id,
+                    source_message_ids=extraction_source_message_ids,
+                    scope=memory_scope,
+                )
+                persisted: list[Any] = []
+            else:
+                candidates = self._extract_memory(
+                    session_id=session_id,
+                    user_message=user_message,
+                    assistant_response=llm_response.content,
+                    source_message_ids=extraction_source_message_ids,
+                    scope=memory_scope,
+                )
+                persisted = self._persist_extracted_memories(
+                    session_id,
+                    candidates,
+                    auto_approve_explicit=(
+                        self.memory_capture_mode == "auto_approve_explicit"
+                    ),
+                )
             debug["extracted_memory_count"] = len(candidates)
             debug["persisted_memory_count"] = len(persisted)
             debug["memory_candidate_ids"] = [candidate.id for candidate in candidates]
@@ -1179,18 +1197,44 @@ class AlphaAgent:
                 "extracted_memory_count": len(candidates),
                 "candidate_type_counts": type_counts,
                 "source_message_ids": source_message_ids,
+                "capture_mode": self.memory_capture_mode,
             },
         )
         return candidates
+
+    def _skip_memory_capture(
+        self,
+        *,
+        session_id: str,
+        source_message_ids: list[str],
+        scope: MemoryScope,
+    ) -> list[MemoryCandidate]:
+        self.store.append_runtime_trace(
+            session_id=session_id,
+            event_type="memory.extracted",
+            content=deterministic_json({}),
+            metadata={
+                "extracted_memory_count": 0,
+                "candidate_type_counts": {},
+                "source_message_ids": source_message_ids,
+                "capture_mode": self.memory_capture_mode,
+                "scope": scope.to_record(),
+                "status": "disabled",
+            },
+        )
+        return []
 
     def _persist_extracted_memories(
         self,
         session_id: str,
         candidates: list[MemoryCandidate],
+        *,
+        auto_approve_explicit: bool,
     ) -> list[Any]:
         return self.memory_controller.decide_runtime_candidates(
             session_id=session_id,
             candidates=candidates,
+            auto_approve_explicit=auto_approve_explicit,
         )
 
     def _decide_consolidation_trigger(
@@ -1390,6 +1434,15 @@ def _llm_request_log(
         "tools": _json_safe(list(tools)) if tools is not None else None,
         "tool_choice": _json_safe(tool_choice),
     }
+
+
+def _normalize_memory_capture_mode(value: MemoryCaptureMode | str) -> MemoryCaptureMode:
+    normalized = str(value).strip().lower()
+    if normalized not in {"disabled", "candidate_only", "auto_approve_explicit"}:
+        raise ValueError(
+            "memory_capture_mode must be disabled, candidate_only, or auto_approve_explicit"
+        )
+    return normalized  # type: ignore[return-value]
 
 
 def _llm_response_log(response: LLMResponse) -> dict[str, Any]:

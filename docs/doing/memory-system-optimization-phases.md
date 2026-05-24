@@ -95,7 +95,7 @@ Tasks:
 
 Acceptance criteria:
 
-- [ ] A group/channel turn cannot retrieve or write unrelated user memory.
+- [x] A group/channel turn cannot retrieve or write unrelated user memory.
 - [x] CLI turns keep a deterministic default scope.
 - [x] Gateway session `memory_scope` is connected to long-term memory storage.
 - [x] Existing debug prompt output shows scope for retrieved memories.
@@ -165,7 +165,7 @@ Likely files:
 
 Checkpoint:
 
-- [ ] Automatic extraction can be disabled, candidate-only, or auto-approve by
+- [x] Automatic extraction can be disabled, candidate-only, or auto-approve by
   config/policy.
 - [x] CLI review works without corrupting source transcripts.
 - [x] Prompt construction never sees pending or rejected candidates.

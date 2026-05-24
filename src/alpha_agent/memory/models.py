@@ -9,6 +9,7 @@ MemoryType = Literal["episodic", "semantic", "procedural"]
 CandidateType = Literal["episodic", "semantic", "procedural_candidate"]
 CandidateStatus = Literal["pending", "approved", "auto_approved", "rejected", "edited"]
 ConversationRole = Literal["user", "assistant", "tool"]
+MemoryCaptureMode = Literal["disabled", "candidate_only", "auto_approve_explicit"]
 ScopeKind = Literal["global_user", "platform_user", "chat_thread", "project"]
 
 
@@ -144,8 +145,6 @@ class MemoryScope:
                     user_id=self.user_id,
                 )
             )
-        if self.kind in {"chat_thread", "platform_user"}:
-            scopes.append(MemoryScope.default())
         return _dedupe_scopes(scopes)
 
 

@@ -120,6 +120,7 @@ class MemoryController:
         session_id: str,
         candidates: list[MemoryCandidate],
         trusted_scope: bool = True,
+        auto_approve_explicit: bool = True,
     ) -> list[PersistedMemory]:
         """Apply runtime auto-approval policy and persist approved candidates."""
 
@@ -129,7 +130,11 @@ class MemoryController:
             for candidate in candidates
         )
         for candidate in candidates:
-            if trusted_scope and self._should_auto_approve(candidate, explicit_batch=explicit_batch):
+            if (
+                trusted_scope
+                and auto_approve_explicit
+                and self._should_auto_approve(candidate, explicit_batch=explicit_batch)
+            ):
                 approved = self.store.update_memory_candidate_status(
                     candidate.id,
                     "auto_approved",

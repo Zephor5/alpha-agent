@@ -174,7 +174,10 @@ class GatewayRuntimeBridge:
             result = agent.respond(
                 message.text,
                 session_id=mapping.session_id,
-                source_metadata=gateway_source_metadata(message),
+                source_metadata=gateway_source_metadata(
+                    message,
+                    memory_scope=mapping.memory_scope,
+                ),
             )
             outbound = self._outbound(message, result.response)
         except Exception as exc:
@@ -323,7 +326,11 @@ class GatewayRuntimeBridge:
         )
 
 
-def gateway_source_metadata(message: InboundMessage) -> dict[str, Any]:
+def gateway_source_metadata(
+    message: InboundMessage,
+    *,
+    memory_scope: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return transcript source metadata for one inbound gateway message."""
 
     source = message.source
@@ -346,4 +353,6 @@ def gateway_source_metadata(message: InboundMessage) -> dict[str, Any]:
         metadata["source"] = dict(source.metadata)
     if message.attachments:
         metadata["attachment_count"] = len(message.attachments)
+    if memory_scope is not None:
+        metadata["memory_scope"] = dict(memory_scope)
     return metadata

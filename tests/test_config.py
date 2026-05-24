@@ -31,6 +31,7 @@ api_key = "compatible-key"
 
 [memory]
 retrieval_limit = 3
+capture_mode = "candidate_only"
 
 [context]
 max_prompt_tokens = 4096
@@ -56,6 +57,7 @@ reasoning_effort = "high"
     assert config.daemon_status_path == Path("~/custom-alpha/daemon-status.json").expanduser()
     assert config.llm_provider == "deepseek"
     assert config.retrieval_limit == 3
+    assert config.memory_capture_mode == "candidate_only"
     assert config.context_max_prompt_tokens == 4096
     assert config.context_compression_threshold_ratio == 0.75
     assert config.context_recent_tail_messages == 6
@@ -162,12 +164,14 @@ def test_config_cli_set_and_get(
     set_provider = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
     set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
     set_limit = runner.invoke(app, ["config", "set", "memory.retrieval_limit", "5"])
+    set_capture = runner.invoke(app, ["config", "set", "memory.capture_mode", "disabled"])
     set_context = runner.invoke(app, ["config", "set", "context.max_prompt_tokens", "4096"])
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
 
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
     assert set_limit.exit_code == 0
+    assert set_capture.exit_code == 0
     assert set_context.exit_code == 0
     assert get_provider.exit_code == 0
     assert "codex" in get_provider.output
@@ -175,6 +179,7 @@ def test_config_cli_set_and_get(
     assert config.llm_provider == "codex"
     assert config.llm_debug_logging is True
     assert config.retrieval_limit == 5
+    assert config.memory_capture_mode == "disabled"
     assert config.context_max_prompt_tokens == 4096
 
 
@@ -258,6 +263,52 @@ def test_config_set_rejects_non_positive_limits(
 
     assert result.exit_code != 0
     assert "must be greater than 0" in result.output
+
+
+def test_config_set_rejects_invalid_memory_capture_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["config", "set", "memory.capture_mode", "always"])
+
+    assert result.exit_code != 0
+    assert "Invalid value for memory.capture_mode" in result.output
+
+
+def test_load_config_rejects_invalid_memory_capture_mode(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[memory]
+capture_mode = "always"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Invalid value for memory.capture_mode"):
+        load_config(env_file=None, config_file=config_path)
+
+
+def test_load_config_rejects_invalid_memory_capture_mode_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[memory]
+capture_mode = "candidate_only"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALPHA_MEMORY_CAPTURE_MODE", "always")
+
+    with pytest.raises(ValueError, match="Invalid value for memory.capture_mode"):
+        load_config(env_file=None, config_file=config_path)
 
 
 def test_config_set_rejects_invalid_context_ratio(

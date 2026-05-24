@@ -166,10 +166,23 @@ def test_session_mapping_is_persisted_and_reused(tmp_path: Path) -> None:
     assert second.session_id == first.session_id
     assert second.session_key == first.session_key
     assert second.memory_scope["platform"] == "telegram"
+    assert second.memory_scope["kind"] == "chat_thread"
     assert second.memory_scope["session_mode"] == "thread_per_user"
     assert second.memory_scope["chat_id"] == "chat-1"
     assert second.memory_scope["user_id"] == "user-1"
     assert second.memory_scope["thread_id"] == "thread-9"
+
+
+def test_group_shared_session_mapping_uses_channel_memory_scope(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    gateway_sessions = GatewaySessionStore(store)
+
+    mapping = gateway_sessions.get_or_create(_source(user_id="user-1"), SessionMode.GROUP_SHARED)
+
+    assert mapping.memory_scope["kind"] == "chat_thread"
+    assert mapping.memory_scope["scope_key"] == "platform:telegram:chat:chat-1:thread:main"
+    assert mapping.memory_scope["user_id"] is None
+    assert mapping.memory_scope["metadata"]["source_user_id"] == "user-1"
 
 
 def test_session_mapping_concurrent_creation_reuses_one_mapping(tmp_path: Path) -> None:
@@ -354,6 +367,7 @@ def test_gateway_bridge_handles_inbound_turn_and_sends_runtime_response(tmp_path
                 "message_type": "text",
                 "message_id": "msg-1",
                 "source": {"tenant": "personal"},
+                "memory_scope": mapping.memory_scope,
             },
         )
     ]

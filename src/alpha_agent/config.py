@@ -31,6 +31,7 @@ api_key = ""
 
 [memory]
 retrieval_limit = 8
+capture_mode = "auto_approve_explicit"
 
 [context]
 max_prompt_tokens = 6000
@@ -60,6 +61,7 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "compatible.base_url": str,
     "compatible.api_key": str,
     "memory.retrieval_limit": int,
+    "memory.capture_mode": str,
     "context.max_prompt_tokens": int,
     "context.compression_threshold_ratio": float,
     "context.recent_tail_messages": int,
@@ -83,6 +85,7 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
         "openai_codex",
     },
     "deepseek.reasoning_effort": {"", "low", "medium", "high", "max", "xhigh"},
+    "memory.capture_mode": {"disabled", "candidate_only", "auto_approve_explicit"},
 }
 
 POSITIVE_INT_CONFIG_KEYS = {
@@ -119,6 +122,7 @@ class AlphaConfig:
     compatible_base_url: str | None = None
     compatible_api_key: str | None = None
     retrieval_limit: int = 8
+    memory_capture_mode: str = "auto_approve_explicit"
     context_max_prompt_tokens: int = 6000
     context_compression_threshold_ratio: float = 0.85
     context_recent_tail_messages: int = 8
@@ -324,6 +328,17 @@ def _bool_value(value: Any, default: bool) -> bool:
     return default
 
 
+def _memory_capture_mode_value(value: str | None) -> str:
+    normalized = (value or "auto_approve_explicit").strip().lower()
+    allowed = CONFIG_KEY_ALLOWED_VALUES["memory.capture_mode"]
+    if normalized not in allowed:
+        options = ", ".join(sorted(allowed))
+        raise ValueError(
+            f"Invalid value for memory.capture_mode: {value}. Allowed values: {options}"
+        )
+    return normalized
+
+
 def _load_toml_config(config_file: str | Path | None) -> dict[str, Any]:
     path = Path(config_file).expanduser() if config_file is not None else default_config_path()
     if not path.exists():
@@ -451,6 +466,15 @@ def load_config(
         retrieval_limit=_int_env(
             "ALPHA_RETRIEVAL_LIMIT",
             _int_value(memory.get("retrieval_limit"), 8),
+        ),
+        memory_capture_mode=_memory_capture_mode_value(
+            _env_or_config(
+                "ALPHA_MEMORY_CAPTURE_MODE",
+                config_data,
+                "memory",
+                "capture_mode",
+                "auto_approve_explicit",
+            )
         ),
         context_max_prompt_tokens=_int_env(
             "ALPHA_CONTEXT_MAX_PROMPT_TOKENS",

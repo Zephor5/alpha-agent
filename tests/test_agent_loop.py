@@ -12,6 +12,7 @@ from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolCall
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.memory.models import (
     ConversationMessage,
+    MemoryScope,
     RetrievedContext,
     SessionContextState,
 )
@@ -71,6 +72,79 @@ def test_mock_agent_loop_stores_user_and_assistant_messages(tmp_path: Path) -> N
     assert result.debug["persisted_memory_count"] >= 1
     assert result.debug["memory_scope"]["scope_key"] == "user:default"
     assert result.debug["extracted_memory_count"] >= 1
+
+
+def test_agent_memory_capture_mode_disabled_skips_candidates_and_persistence(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+        memory_capture_mode="disabled",
+    )
+
+    result = agent.respond("remember that I prefer concise answers", session_id="s1")
+
+    assert result.debug["memory_capture_mode"] == "disabled"
+    assert result.debug["extracted_memory_count"] == 0
+    assert result.debug["persisted_memory_count"] == 0
+    assert store.list_memory_candidates() == []
+    assert store.list_semantic_memories() == []
+
+
+def test_agent_memory_capture_mode_candidate_only_does_not_promote(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+        memory_capture_mode="candidate_only",
+    )
+
+    result = agent.respond("remember that I prefer concise answers", session_id="s1")
+
+    pending = store.list_memory_candidates(status="pending")
+    assert result.debug["memory_capture_mode"] == "candidate_only"
+    assert result.debug["extracted_memory_count"] >= 1
+    assert result.debug["persisted_memory_count"] == 0
+    assert pending
+    assert store.list_semantic_memories() == []
+
+
+def test_shared_gateway_scope_writes_candidates_to_channel_scope(tmp_path: Path) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    shared_scope = MemoryScope(
+        kind="chat_thread",
+        scope_key="platform:telegram:chat:chat-1:thread:main",
+        platform="telegram",
+        chat_id="chat-1",
+        user_id=None,
+        metadata={"session_mode": "group_shared", "source_user_id": "user-1"},
+    )
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        retriever=MemoryRetriever(store),
+        memory_capture_mode="candidate_only",
+    )
+
+    result = agent.respond(
+        "remember that the channel prefers weekly summaries",
+        session_id="s1",
+        source_metadata={"channel": "gateway", "memory_scope": shared_scope.to_record()},
+    )
+
+    candidate = store.list_memory_candidates()[0]
+    assert result.debug["memory_scope"]["scope_key"] == shared_scope.scope_key
+    assert candidate.scope.scope_key == shared_scope.scope_key
+    assert candidate.scope.user_id is None
 
 
 def test_agent_turn_persists_user_source_metadata(tmp_path: Path) -> None:

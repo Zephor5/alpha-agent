@@ -133,6 +133,64 @@ def test_retrieval_filters_same_query_by_scope(tmp_path: Path) -> None:
     )
 
 
+def test_shared_channel_scope_does_not_read_default_or_platform_user_memory(
+    tmp_path: Path,
+) -> None:
+    store = MemoryStore(tmp_path / "alpha.db")
+    store.initialize()
+    semantic = SemanticMemoryManager(store)
+    default_scope = MemoryScope.default()
+    platform_user_scope = MemoryScope(
+        kind="platform_user",
+        scope_key="platform:telegram:user:alice",
+        platform="telegram",
+        user_id="alice",
+    )
+    shared_channel_scope = MemoryScope(
+        kind="chat_thread",
+        scope_key="platform:telegram:chat:shared-chat:thread:main",
+        platform="telegram",
+        chat_id="shared-chat",
+        thread_id=None,
+        user_id=None,
+    )
+    semantic.upsert_fact(
+        "user",
+        "prefers",
+        "default tea",
+        "User prefers default tea",
+        salience=0.9,
+        scope=default_scope,
+    )
+    semantic.upsert_fact(
+        "user",
+        "prefers",
+        "private coffee",
+        "User prefers private coffee",
+        salience=0.9,
+        scope=platform_user_scope,
+    )
+    shared = semantic.upsert_fact(
+        "channel",
+        "prefers",
+        "shared agenda",
+        "Channel prefers shared agenda",
+        salience=0.9,
+        scope=shared_channel_scope,
+    )
+
+    assert [scope.scope_key for scope in shared_channel_scope.allowed_read_scopes()] == [
+        shared_channel_scope.scope_key,
+    ]
+
+    assert_retrieves_ids(
+        store,
+        query="what does the user or channel prefer",
+        scope=shared_channel_scope,
+        expected_semantic_ids=[shared.id],
+    )
+
+
 def test_retrieval_filters_inactive_semantic_status(tmp_path: Path) -> None:
     store = MemoryStore(tmp_path / "alpha.db")
     store.initialize()

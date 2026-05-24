@@ -16,6 +16,7 @@ from alpha_agent.gateway.models import (
     OutboundMessage,
     Visibility,
 )
+from alpha_agent.memory.models import MemoryScope
 from alpha_agent.memory.store import MemoryStore
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.utils.ids import new_id
@@ -287,17 +288,79 @@ def _memory_scope(
     mode: SessionMode,
     session_key: str,
 ) -> dict[str, Any]:
-    return {
-        "platform": _norm_required(source.platform, "platform").lower(),
+    platform = _norm_required(source.platform, "platform").lower()
+    chat_id = _norm_required(source.chat_id, "chat_id")
+    user_id = _norm_required(source.user_id, "user_id")
+    thread_id = _norm_optional(source.thread_id)
+    metadata = {
         "session_mode": mode.value,
-        "scope_key": session_key,
         "chat_type": source.chat_type.strip().lower(),
-        "chat_id": _norm_required(source.chat_id, "chat_id"),
-        "user_id": _norm_required(source.user_id, "user_id"),
+        "session_key": session_key,
+        "source_user_id": user_id,
         "user_name": source.user_name,
-        "thread_id": _norm_optional(source.thread_id),
         "external_metadata": dict(source.metadata),
     }
+    if mode == SessionMode.DM:
+        scope = MemoryScope(
+            kind="platform_user",
+            scope_key=f"platform:{platform}:user:{user_id}",
+            platform=platform,
+            user_id=user_id,
+            metadata=metadata,
+        )
+    elif mode == SessionMode.GROUP_PER_USER:
+        scope = MemoryScope(
+            kind="chat_thread",
+            scope_key=f"platform:{platform}:chat:{chat_id}:thread:main:user:{user_id}",
+            platform=platform,
+            chat_id=chat_id,
+            user_id=user_id,
+            metadata=metadata,
+        )
+    elif mode == SessionMode.THREAD_PER_USER:
+        if thread_id is None:
+            raise ValueError("thread_id is required for thread_per_user session mode")
+        scope = MemoryScope(
+            kind="chat_thread",
+            scope_key=f"platform:{platform}:chat:{chat_id}:thread:{thread_id}:user:{user_id}",
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            metadata=metadata,
+        )
+    elif mode == SessionMode.THREAD:
+        if thread_id is None:
+            raise ValueError("thread_id is required for thread session mode")
+        scope = MemoryScope(
+            kind="chat_thread",
+            scope_key=f"platform:{platform}:chat:{chat_id}:thread:{thread_id}",
+            platform=platform,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            user_id=None,
+            metadata=metadata,
+        )
+    else:
+        scope = MemoryScope(
+            kind="chat_thread",
+            scope_key=f"platform:{platform}:chat:{chat_id}:thread:main",
+            platform=platform,
+            chat_id=chat_id,
+            user_id=None,
+            metadata=metadata,
+        )
+    record = scope.to_record()
+    record.update(
+        {
+            "session_mode": mode.value,
+            "chat_type": source.chat_type.strip().lower(),
+            "source_user_id": user_id,
+            "user_name": source.user_name,
+            "external_metadata": dict(source.metadata),
+        }
+    )
+    return record
 
 
 def _platform_message_key(source: ConversationSource, platform_message_id: str) -> str:

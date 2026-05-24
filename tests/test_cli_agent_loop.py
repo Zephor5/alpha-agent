@@ -45,6 +45,7 @@ def test_debug_prompt_loads_gateway_source_from_session_and_prints_retrieval_tra
         content="SQLite memory retrieval decision",
         source_event_ids=[],
         salience=0.9,
+        scope=MemoryScope.from_record(mapping.memory_scope),
     )
     runner = CliRunner()
 
@@ -74,6 +75,60 @@ def test_debug_prompt_loads_gateway_source_from_session_and_prints_retrieval_tra
     with store.connect() as conn:
         access_logs = conn.execute("SELECT count(*) FROM memory_access_log").fetchone()[0]
     assert access_logs == 0
+
+
+def test_debug_prompt_group_shared_uses_persisted_channel_scope(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    source = ConversationSource(
+        platform="feishu",
+        chat_id="shared-chat",
+        chat_type="group",
+        user_id="user-1",
+        user_name="Ada",
+    )
+    mapping = GatewaySessionStore(store).get_or_create(source, SessionMode.GROUP_SHARED)
+    shared_episode = EpisodicMemoryManager(store).create(
+        content="SQLite memory retrieval decision for shared channel",
+        source_event_ids=[],
+        salience=0.9,
+        scope=MemoryScope.from_record(mapping.memory_scope),
+    )
+    EpisodicMemoryManager(store).create(
+        content="SQLite memory retrieval decision from default user",
+        source_event_ids=[],
+        salience=0.9,
+        scope=MemoryScope.default(),
+    )
+    EpisodicMemoryManager(store).create(
+        content="SQLite memory retrieval decision from platform user",
+        source_event_ids=[],
+        salience=0.9,
+        scope=MemoryScope(
+            kind="platform_user",
+            scope_key="platform:feishu:user:user-1",
+            platform="feishu",
+            user_id="user-1",
+        ),
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "debug",
+            "prompt",
+            "sqlite memory",
+            "--session",
+            mapping.session_id,
+        ],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert f"Memory scope: {mapping.memory_scope['scope_key']}" in result.output
+    assert shared_episode.id in result.output
+    assert "default user" not in result.output
+    assert "platform user" not in result.output
 
 
 def test_memory_search_does_not_record_memory_access(tmp_path: Path) -> None:

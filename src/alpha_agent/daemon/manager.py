@@ -71,6 +71,7 @@ class AgentFactory:
             llm_provider=build_provider(self.config),
             retriever=MemoryRetriever(self.store),
             retrieval_limit=self.config.retrieval_limit,
+            memory_capture_mode=self.config.memory_capture_mode,
             llm_debug_logging=self.config.llm_debug_logging,
             llm_trace_log_path=Path(self.config.log_dir) / "llm.jsonl",
             context_max_prompt_tokens=self.config.context_max_prompt_tokens,

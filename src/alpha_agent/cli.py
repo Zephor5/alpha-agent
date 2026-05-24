@@ -339,6 +339,31 @@ def _source_from_gateway_session(store: MemoryStore, session_id: str) -> Convers
     )
 
 
+def _memory_scope_from_gateway_session(
+    store: MemoryStore,
+    session_id: str,
+) -> MemoryScope | None:
+    with store.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT memory_scope FROM gateway_session_mappings
+            WHERE session_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        record = json.loads(row["memory_scope"] or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict) or not record.get("scope_key"):
+        return None
+    return MemoryScope.from_record(record)
+
+
 def _merge_source_context(
     base: ConversationSource | None,
     *,
@@ -455,6 +480,7 @@ def config_show() -> None:
     table.add_row("llm_model", _display_model(config))
     table.add_row("llm_debug_logging", str(config.llm_debug_logging).lower())
     table.add_row("retrieval_limit", str(config.retrieval_limit))
+    table.add_row("memory_capture_mode", config.memory_capture_mode)
     table.add_row("context_max_prompt_tokens", str(config.context_max_prompt_tokens))
     table.add_row(
         "context_compression_threshold_ratio",
@@ -1014,10 +1040,12 @@ def prompt(
         thread_id=thread_id,
         message_id=message_id,
     )
-    memory_scope = MemoryScope.from_source_metadata(
-        session_id=session,
-        source_metadata=_source_metadata(source),
-    )
+    memory_scope = _memory_scope_from_gateway_session(store, session)
+    if memory_scope is None:
+        memory_scope = MemoryScope.from_source_metadata(
+            session_id=session,
+            source_metadata=_source_metadata(source),
+        )
     context = retriever.retrieve_context(
         message,
         session_id=session,
