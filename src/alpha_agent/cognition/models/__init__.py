@@ -23,6 +23,7 @@ from alpha_agent.cognition.models._ids import (
     ExpectedFeedback,
     FailurePattern,
     FeedbackEntry,
+    GoalId,
     GroupRef,
     HistoricalContext,
     InformationalContext,
@@ -86,6 +87,7 @@ from alpha_agent.cognition.models.enums import (
     ValueKind,
 )
 from alpha_agent.cognition.models.event import CognitiveEvent
+from alpha_agent.cognition.models.goal import Goal
 from alpha_agent.cognition.models.judgment import Judgment
 from alpha_agent.cognition.models.perception import Perception, Stimulus
 from alpha_agent.cognition.models.procedure import Procedure
@@ -129,6 +131,8 @@ __all__ = [
     "ExpectedFeedback",
     "FailurePattern",
     "FeedbackEntry",
+    "Goal",
+    "GoalId",
     "GroupRef",
     "HistoricalContext",
     "InformationalContext",

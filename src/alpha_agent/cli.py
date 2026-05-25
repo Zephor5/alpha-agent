@@ -14,13 +14,16 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from alpha_agent.cognition.controller import default_projection_registry
+from alpha_agent.cognition.controller import CognitiveController, default_projection_registry
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
+from alpha_agent.cognition.goals import GoalRegistry
 from alpha_agent.cognition.loops import (
     CheckpointStore,
     ConsolidationConfig,
     ConsolidationLoop,
+    DriveConfig,
+    DriveLoop,
     Scheduler,
 )
 from alpha_agent.cognition.models import (
@@ -36,6 +39,7 @@ from alpha_agent.cognition.models import (
     situation_ref,
     subject_ref,
 )
+from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.cognition.projections.reflection import ReflectionProjection, target_to_parts
 from alpha_agent.cognition.projections.strategy import StrategyProjection
 from alpha_agent.cognition.projections.subject import SubjectProjection
@@ -59,7 +63,7 @@ from alpha_agent.config import (
     write_default_config,
 )
 from alpha_agent.daemon.client import DaemonClient
-from alpha_agent.daemon.manager import initialize_store
+from alpha_agent.daemon.manager import build_provider, initialize_store
 from alpha_agent.daemon.runtime import AlphaDaemon, DaemonAlreadyRunningError
 from alpha_agent.daemon.status import (
     DaemonRuntimeConfig,
@@ -87,6 +91,7 @@ from alpha_agent.runtime.session import new_session_id
 from alpha_agent.runtime.session_context import SessionContextManager
 from alpha_agent.skills.manager import SkillManager
 from alpha_agent.state.store import StateStore
+from alpha_agent.tools.registry import ToolRegistry
 
 console = Console()
 app = typer.Typer(help="Alpha Agent cognition runtime.")
@@ -97,6 +102,7 @@ config_app = typer.Typer(help="Configuration commands.")
 daemon_app = typer.Typer(help="Daemon runtime commands.")
 cognition_app = typer.Typer(help="Cognition inspection commands.")
 lens_app = typer.Typer(help="Subject value lens commands.")
+goals_app = typer.Typer(help="Drive Loop goal commands.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(debug_app, name="debug")
 app.add_typer(gateway_app, name="gateway")
@@ -104,6 +110,7 @@ app.add_typer(config_app, name="config")
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(cognition_app, name="cognition")
 cognition_app.add_typer(lens_app, name="lens")
+cognition_app.add_typer(goals_app, name="goals")
 
 DAEMON_START_TIMEOUT_SECONDS = 5.0
 DAEMON_START_POLL_INTERVAL_SECONDS = 0.1
@@ -791,6 +798,179 @@ def _inspection_view(store: StateStore) -> CognitionView:
         thread_id=ThreadId.cognition(subject_value.id, "inspection"),
         situation=Situation(id=SituationId("situation:cognition-inspection")),
         projections=projections,
+    )
+
+
+@goals_app.command("list")
+def cognition_goals_list(
+    active: Annotated[
+        bool,
+        typer.Option("--active", help="Show only active goals."),
+    ] = False,
+    subject: Annotated[
+        str | None,
+        typer.Option("--subject", help="Reserved for the single-subject runtime."),
+    ] = None,
+) -> None:
+    """List Drive Loop goals."""
+
+    del subject
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projection = GoalProjection(store, event_log=log, auto_rebuild=True)
+    goals = projection.active() if active else projection.list_all()
+    table = Table(title="Cognition Goals")
+    table.add_column("ID")
+    table.add_column("Status")
+    table.add_column("Priority", justify="right")
+    table.add_column("Description")
+    table.add_column("Last Drive")
+    for goal in goals:
+        table.add_row(
+            str(goal.id),
+            goal.status,
+            str(goal.priority),
+            goal.description,
+            str(goal.last_drive_at or ""),
+        )
+    console.print(table)
+    for goal in goals:
+        typer.echo(
+            f"goal={goal.id} status={goal.status} "
+            f"priority={goal.priority} last_drive_at={goal.last_drive_at or ''}"
+        )
+    if not goals:
+        typer.echo(f"goals=0 active={str(active).lower()}")
+
+
+@goals_app.command("set")
+def cognition_goals_set(
+    description: Annotated[str, typer.Option("--description", help="Goal description.")],
+    priority: Annotated[int, typer.Option("--priority", help="Higher priority runs first.")] = 0,
+    target_outcome: Annotated[
+        str,
+        typer.Option("--target-outcome", help="Expected outcome for this goal."),
+    ] = "",
+) -> None:
+    """Set a new active Drive Loop goal."""
+
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projection = GoalProjection(
+        store,
+        event_log=log,
+        auto_rebuild=True,
+        active_limit=config.cognition_drive_active_goal_limit,
+    )
+    registry = GoalRegistry(
+        log,
+        projection=projection,
+        active_limit=config.cognition_drive_active_goal_limit,
+    )
+    try:
+        event = registry.set_goal(
+            description=description,
+            target_outcome=target_outcome,
+            priority=priority,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    raw_goal = event.payload.get("goal")
+    goal_id = str(raw_goal.get("id", "")) if isinstance(raw_goal, dict) else ""
+    typer.echo(f"goal_set event_id={event.id} goal={goal_id}")
+
+
+@goals_app.command("satisfy")
+def cognition_goals_satisfy(
+    goal_id: Annotated[str, typer.Argument(help="Goal id to mark satisfied.")],
+    evidence: Annotated[str, typer.Option("--evidence", help="Evidence for satisfaction.")],
+) -> None:
+    """Mark a goal as satisfied."""
+
+    projection, registry = _goal_registry_from_config()
+    event = registry.satisfy(goal_id, evidence=evidence)
+    goal = projection.get(goal_id)
+    status = goal.status if goal is not None else "unknown"
+    typer.echo(f"goal_satisfied event_id={event.id} goal={goal_id} status={status}")
+
+
+@goals_app.command("abandon")
+def cognition_goals_abandon(
+    goal_id: Annotated[str, typer.Argument(help="Goal id to abandon.")],
+    reason: Annotated[str, typer.Option("--reason", help="Reason for abandoning the goal.")],
+) -> None:
+    """Mark a goal as abandoned."""
+
+    projection, registry = _goal_registry_from_config()
+    event = registry.abandon(goal_id, reason=reason)
+    goal = projection.get(goal_id)
+    status = goal.status if goal is not None else "unknown"
+    typer.echo(f"goal_abandoned event_id={event.id} goal={goal_id} status={status}")
+
+
+@cognition_app.command("drive")
+def cognition_drive(
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Run one manual Drive Loop pass."),
+    ] = False,
+) -> None:
+    """Run the Phase 10 Drive Loop once."""
+
+    if not once:
+        raise typer.BadParameter("Only --once is supported by the v1 Drive Loop CLI.")
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projections = default_projection_registry(log)
+    emitter = EventEmitter(log)
+    controller = CognitiveController(
+        log,
+        projections,
+        llm=build_provider(config),
+        tools=ToolRegistry(),
+        emitter=emitter,
+    )
+    report = DriveLoop(
+        log=log,
+        projections=projections,
+        controller=controller,
+        emitter=emitter,
+        config=DriveConfig(
+            enabled=config.cognition_drive_enabled,
+            interval_seconds=config.cognition_drive_interval_seconds,
+            goal_cooldown_seconds=config.cognition_drive_goal_cooldown_seconds,
+            active_goal_limit=config.cognition_drive_active_goal_limit,
+        ),
+    ).run_once(force=True)
+    typer.echo(
+        "drive "
+        f"triggered={str(report.triggered).lower()} "
+        f"dropped={str(report.dropped).lower()} "
+        f"goal={report.selected_goal_id or ''} "
+        f"reason={report.skipped_reason}"
+    )
+
+
+def _goal_registry_from_config() -> tuple[GoalProjection, GoalRegistry]:
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projection = GoalProjection(
+        store,
+        event_log=log,
+        auto_rebuild=True,
+        active_limit=config.cognition_drive_active_goal_limit,
+    )
+    return (
+        projection,
+        GoalRegistry(
+            log,
+            projection=projection,
+            active_limit=config.cognition_drive_active_goal_limit,
+        ),
     )
 
 

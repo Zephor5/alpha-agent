@@ -44,6 +44,12 @@ context_summary_chars = 480
 counterpart_digest_min_beliefs = 5
 counterpart_digest_min_new_beliefs = 3
 
+[cognition.drive]
+enabled = false
+interval_seconds = 300
+goal_cooldown_seconds = 3600
+active_goal_limit = 8
+
 [deepseek]
 api_key = ""
 reasoning_enabled = true
@@ -65,6 +71,10 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "compatible.base_url": str,
     "compatible.api_key": str,
     "context.recent_tail_messages": int,
+    "cognition.drive.enabled": bool,
+    "cognition.drive.interval_seconds": int,
+    "cognition.drive.goal_cooldown_seconds": int,
+    "cognition.drive.active_goal_limit": int,
     "deepseek.api_key": str,
     "deepseek.reasoning_enabled": bool,
     "deepseek.reasoning_effort": str,
@@ -86,6 +96,9 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
 }
 
 POSITIVE_INT_CONFIG_KEYS = {
+    "cognition.drive.active_goal_limit",
+    "cognition.drive.goal_cooldown_seconds",
+    "cognition.drive.interval_seconds",
     "context.recent_tail_messages",
 }
 
@@ -121,6 +134,10 @@ class AlphaConfig:
     cognition_consolidation_context_summary_chars: int = 480
     cognition_consolidation_counterpart_digest_min_beliefs: int = 5
     cognition_consolidation_counterpart_digest_min_new_beliefs: int = 3
+    cognition_drive_enabled: bool = False
+    cognition_drive_interval_seconds: int = 300
+    cognition_drive_goal_cooldown_seconds: int = 3600
+    cognition_drive_active_goal_limit: int = 8
     deepseek_api_key: str | None = None
     deepseek_reasoning_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
@@ -158,11 +175,7 @@ def set_config_value(
     path = Path(config_path).expanduser() if config_path is not None else default_config_path()
     write_default_config(path)
     config_data = _load_toml_config(path)
-    section_name, field_name = key.split(".", 1)
-    section = config_data.setdefault(section_name, {})
-    if not isinstance(section, dict):
-        raise ValueError(f"Config section {section_name!r} is not editable")
-    section[field_name] = parsed_value
+    _set_nested_value(config_data, key, parsed_value)
     _write_toml_config(path, config_data)
     return parsed_value
 
@@ -179,8 +192,7 @@ def read_config_value(
     path = Path(config_path).expanduser() if config_path is not None else default_config_path()
     write_default_config(path)
     config_data = _load_toml_config(path)
-    section_name, field_name = key.split(".", 1)
-    value = _section(config_data, section_name).get(field_name, "")
+    value = _nested_value(config_data, key, "")
     if key in SECRET_CONFIG_KEYS and not reveal_secret:
         return "***" if value else ""
     if isinstance(value, bool):
@@ -202,6 +214,8 @@ def load_config(
     cognition = _section(config_data, "cognition")
     consolidation = cognition.get("consolidation")
     consolidation = consolidation if isinstance(consolidation, dict) else {}
+    drive = cognition.get("drive")
+    drive = drive if isinstance(drive, dict) else {}
     deepseek = _section(config_data, "deepseek")
 
     config = AlphaConfig(
@@ -320,6 +334,22 @@ def load_config(
             "ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_NEW_BELIEFS",
             _int_value(consolidation.get("counterpart_digest_min_new_beliefs"), 3),
         ),
+        cognition_drive_enabled=_bool_env(
+            "ALPHA_COGNITION_DRIVE_ENABLED",
+            _bool_value(drive.get("enabled"), False),
+        ),
+        cognition_drive_interval_seconds=_int_env(
+            "ALPHA_COGNITION_DRIVE_INTERVAL_SECONDS",
+            _int_value(drive.get("interval_seconds"), 300),
+        ),
+        cognition_drive_goal_cooldown_seconds=_int_env(
+            "ALPHA_COGNITION_DRIVE_GOAL_COOLDOWN_SECONDS",
+            _int_value(drive.get("goal_cooldown_seconds"), 3600),
+        ),
+        cognition_drive_active_goal_limit=_int_env(
+            "ALPHA_COGNITION_DRIVE_ACTIVE_GOAL_LIMIT",
+            _int_value(drive.get("active_goal_limit"), 8),
+        ),
         deepseek_api_key=_env_or_config(
             "ALPHA_DEEPSEEK_API_KEY",
             config_data,
@@ -386,6 +416,10 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         "llm.provider": config.llm_provider,
         "deepseek.reasoning_effort": config.deepseek_reasoning_effort or "",
         "context.recent_tail_messages": config.context_recent_tail_messages,
+        "cognition.drive.enabled": config.cognition_drive_enabled,
+        "cognition.drive.interval_seconds": config.cognition_drive_interval_seconds,
+        "cognition.drive.goal_cooldown_seconds": config.cognition_drive_goal_cooldown_seconds,
+        "cognition.drive.active_goal_limit": config.cognition_drive_active_goal_limit,
     }
     for key, value in values.items():
         _validate_config_value(key, value)
@@ -426,6 +460,12 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
             "cognition.consolidation.counterpart_digest_min_new_beliefs",
             config.cognition_consolidation_counterpart_digest_min_new_beliefs,
         ),
+        ("cognition.drive.interval_seconds", config.cognition_drive_interval_seconds),
+        (
+            "cognition.drive.goal_cooldown_seconds",
+            config.cognition_drive_goal_cooldown_seconds,
+        ),
+        ("cognition.drive.active_goal_limit", config.cognition_drive_active_goal_limit),
     )
     for key, value in positive_values:
         if value <= 0:
@@ -440,6 +480,7 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         "compatible",
         "context",
         "cognition.consolidation",
+        "cognition.drive",
         "deepseek",
         "codex",
     )
@@ -527,6 +568,29 @@ def _nested_section(config_data: dict[str, Any], dotted_name: str) -> dict[str, 
             return {}
         current = current.get(part)
     return current if isinstance(current, dict) else {}
+
+
+def _nested_value(config_data: dict[str, Any], dotted_name: str, default: Any) -> Any:
+    parts = dotted_name.split(".")
+    current: Any = config_data
+    for part in parts[:-1]:
+        if not isinstance(current, dict):
+            return default
+        current = current.get(part)
+    if not isinstance(current, dict):
+        return default
+    return current.get(parts[-1], default)
+
+
+def _set_nested_value(config_data: dict[str, Any], dotted_name: str, value: Any) -> None:
+    parts = dotted_name.split(".")
+    current: Any = config_data
+    for part in parts[:-1]:
+        existing = current.setdefault(part, {})
+        if not isinstance(existing, dict):
+            raise ValueError(f"Config section {part!r} is not editable")
+        current = existing
+    current[parts[-1]] = value
 
 
 def _string_setting(

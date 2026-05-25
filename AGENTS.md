@@ -24,13 +24,14 @@ src/
       controller.py   CognitiveController orchestration for Reactive single tick.
       stages/         Perceive, Attend, Interpret, Judge, Decide, Act, Feedback, Reflect, and Revise stages.
       reflectors/     Deterministic L1 audit rules and L2 strategy-control rules.
-      loops/          In-process Scheduler, checkpoint storage, ConsolidationLoop, and deterministic consolidation workers.
+      loops/          In-process Scheduler, checkpoint storage, ConsolidationLoop, deterministic consolidation workers, and synchronous DriveLoop v1.
+      goals/          GoalRegistry event write path for DriveLoop goals.
       value/          Deterministic ValueProfile derivation, ValueLens persistence, and conflict resolution.
-      projections/    Subject/counterpart projections, SQLite-backed BeliefProjection, ProcedureProjection, ReflectionProjection, StrategyProjection, and ContextWindowProjection.
+      projections/    Subject/counterpart projections, SQLite-backed BeliefProjection, ProcedureProjection, ReflectionProjection, StrategyProjection, GoalProjection, and ContextWindowProjection.
       render/         CognitionView assembly and renderers for chat prompts, graph snapshots, diffs, and evidence traces.
     runtime/          Core turn/session execution, event models, session context, and runtime tool wiring.
       counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
-    state/            SQLite-backed runtime tables plus cognition event/projection tables, including cognitive_events, counterpart_view, belief_view, context_window_view, context_window_background, procedure_view, strategy_view, subject_value_lens, cognition_worker_checkpoint, and reflection_view.
+    state/            SQLite-backed runtime tables plus cognition event/projection tables, including cognitive_events, counterpart_view, belief_view, context_window_view, context_window_background, procedure_view, strategy_view, goal_view, subject_value_lens, cognition_worker_checkpoint, and reflection_view.
     llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
     gateway/          Gateway operation shell, session routing, adapter contracts, status, logging, and gateway config.
     tools/            Tool abstractions and registry used by the runtime.

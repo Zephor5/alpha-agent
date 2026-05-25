@@ -34,6 +34,12 @@ context_summary_chars = 480
 counterpart_digest_min_beliefs = 5
 counterpart_digest_min_new_beliefs = 3
 
+[cognition.drive]
+enabled = false
+interval_seconds = 300
+goal_cooldown_seconds = 3600
+active_goal_limit = 8
+
 [deepseek]
 api_key = ""
 reasoning_enabled = true

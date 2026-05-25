@@ -56,6 +56,10 @@ reasoning_effort = "high"
     assert config.deepseek_reasoning_enabled is False
     assert config.deepseek_reasoning_effort == "high"
     assert config.llm_debug_logging is True
+    assert config.cognition_drive_enabled is False
+    assert config.cognition_drive_interval_seconds == 300
+    assert config.cognition_drive_goal_cooldown_seconds == 3600
+    assert config.cognition_drive_active_goal_limit == 8
 
 
 def test_environment_overrides_config_file(
@@ -187,6 +191,57 @@ context_foreground_max = 7
     saved = config_path.read_text(encoding="utf-8")
     assert "[cognition.consolidation]" in saved
     assert "context_foreground_max = 7" in saved
+
+
+def test_config_set_preserves_cognition_drive_section(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[llm]
+provider = "mock"
+
+[cognition.consolidation]
+enabled = true
+
+[cognition.drive]
+enabled = false
+goal_cooldown_seconds = 120
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["config", "set", "cognition.drive.enabled", "true"])
+
+    assert result.exit_code == 0
+    saved = config_path.read_text(encoding="utf-8")
+    assert "[cognition.consolidation]" in saved
+    assert "[cognition.drive]" in saved
+    assert "enabled = true" in saved
+    assert "goal_cooldown_seconds = 120" in saved
+
+
+def test_drive_config_env_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("ALPHA_COGNITION_DRIVE_ENABLED", "true")
+    monkeypatch.setenv("ALPHA_COGNITION_DRIVE_INTERVAL_SECONDS", "60")
+    monkeypatch.setenv("ALPHA_COGNITION_DRIVE_GOAL_COOLDOWN_SECONDS", "90")
+    monkeypatch.setenv("ALPHA_COGNITION_DRIVE_ACTIVE_GOAL_LIMIT", "3")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.cognition_drive_enabled is True
+    assert config.cognition_drive_interval_seconds == 60
+    assert config.cognition_drive_goal_cooldown_seconds == 90
+    assert config.cognition_drive_active_goal_limit == 3
 
 
 def test_config_set_rejects_unknown_key(

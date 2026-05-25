@@ -228,6 +228,26 @@ CREATE INDEX IF NOT EXISTS idx_strategy_status_validity
 CREATE INDEX IF NOT EXISTS idx_strategy_for_counterpart
     ON strategy_view(for_counterpart, status);
 
+CREATE TABLE IF NOT EXISTS goal_view (
+    id TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    target_outcome TEXT NOT NULL DEFAULT '',
+    priority INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    source TEXT NOT NULL DEFAULT 'user',
+    for_counterpart TEXT,
+    linked_belief_ids TEXT NOT NULL DEFAULT '[]',
+    last_drive_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_event_id TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_goal_status_priority
+    ON goal_view(status, priority DESC);
+CREATE INDEX IF NOT EXISTS idx_goal_for_counterpart
+    ON goal_view(for_counterpart, status);
+
 CREATE TABLE IF NOT EXISTS subject_value_lens (
     subject_id TEXT PRIMARY KEY,
     priority TEXT NOT NULL,

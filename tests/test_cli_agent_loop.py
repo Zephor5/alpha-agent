@@ -48,11 +48,12 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
             "context_window_view",
             "context_window_background",
             "reflection_view",
-            "procedure_view",
-            "strategy_view",
-            "subject_value_lens",
-            "cognition_worker_checkpoint",
-        }
+                "procedure_view",
+                "strategy_view",
+                "goal_view",
+                "subject_value_lens",
+                "cognition_worker_checkpoint",
+            }
 
 
 def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path) -> None:

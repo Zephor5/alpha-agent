@@ -11,6 +11,7 @@ from alpha_agent.cognition.models.enums import CounterpartRole
 SubjectId = NewType("SubjectId", str)
 CounterpartId = NewType("CounterpartId", str)
 BeliefId = NewType("BeliefId", str)
+GoalId = NewType("GoalId", str)
 EventId = NewType("EventId", str)
 SituationId = NewType("SituationId", str)
 PerceptionId = NewType("PerceptionId", str)

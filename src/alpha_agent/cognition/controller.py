@@ -12,6 +12,7 @@ from alpha_agent.cognition.models import Stimulus, ThreadId
 from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefRecallParams
 from alpha_agent.cognition.projections.context_window import ContextWindowProjection
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
+from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.cognition.projections.procedure import ProcedureProjection
 from alpha_agent.cognition.projections.reflection import ReflectionProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
@@ -286,6 +287,13 @@ def default_projection_registry(event_log: EventLog) -> ProjectionRegistry:
     )
     registry.register(
         StrategyProjection(
+            store,
+            event_log=event_log,
+            auto_rebuild=True,
+        )
+    )
+    registry.register(
+        GoalProjection(
             store,
             event_log=event_log,
             auto_rebuild=True,

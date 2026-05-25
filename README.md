@@ -57,12 +57,13 @@ context into background summaries, and maintains counterpart digest beliefs.
 Phase 07 deterministic ValueLens v1 is also in place: subject lenses persist in
 SQLite, queued conflicts resolve through lens-shaped scoring, ties are kept for
 human review, and a conservative consolidation worker can nudge lens
-sensitivity from repeated resolved tradeoffs. Semantic strategy/lens diff and
-drive loop remain staged under `docs/todo/cognition-runtime/`. Phase 08
-Reflector L2 deterministic control v1 adds temporary strategy overrides:
+sensitivity from repeated resolved tradeoffs. Phase 08 Reflector L2
+deterministic control v1 adds temporary strategy overrides:
 `strategy_view` stores active controls, L2 rules can emit `strategy_changed`,
 expired strategies are cleared by consolidation, and Reactive stages honor the
-implemented strategy names.
+implemented strategy names. Phase 10 Drive Loop v1 adds event-sourced goals in
+`goal_view` and a disabled-by-default synchronous manual loop that turns one
+eligible active goal into a cognition-thread `self_signal`.
 
 ## Install
 
@@ -138,6 +139,11 @@ uv run alpha cognition lens show
 uv run alpha cognition lens set --priority safety,honesty,efficiency
 uv run alpha cognition strategies --active
 uv run alpha cognition strategy-expire <strategy-id>
+uv run alpha cognition goals set --description "answer pending question" --priority 5
+uv run alpha cognition goals list --active
+uv run alpha cognition goals satisfy <goal-id> --evidence "accepted"
+uv run alpha cognition goals abandon <goal-id> --reason "obsolete"
+uv run alpha cognition drive --once
 ```
 
 Inspect raw LLM request/response traces from CLI runs:
@@ -208,6 +214,12 @@ access_token = ""
 [context]
 max_prompt_tokens = 6000
 recent_tail_messages = 8
+
+[cognition.drive]
+enabled = false
+interval_seconds = 300
+goal_cooldown_seconds = 3600
+active_goal_limit = 8
 ```
 
 Useful environment overrides:
@@ -235,6 +247,11 @@ Useful environment overrides:
   Alpha tries `CODEX_HOME/auth.json` or `~/.codex/auth.json`.
 - `ALPHA_CONTEXT_MAX_PROMPT_TOKENS`: Prompt budget for the current turn.
 - `ALPHA_CONTEXT_RECENT_TAIL_MESSAGES`: Uncompressed transcript tail to preserve.
+- `ALPHA_COGNITION_DRIVE_ENABLED`: Enables scheduled Drive Loop use when a
+  caller wires it in. Defaults to `false`.
+- `ALPHA_COGNITION_DRIVE_INTERVAL_SECONDS`: Global Drive Loop interval setting.
+- `ALPHA_COGNITION_DRIVE_GOAL_COOLDOWN_SECONDS`: Per-goal self-signal cooldown.
+- `ALPHA_COGNITION_DRIVE_ACTIVE_GOAL_LIMIT`: Maximum concurrently active goals.
 
 The mock provider works without an API key:
 
@@ -275,6 +292,8 @@ The current SQLite state baseline is deliberately narrow:
 - `procedure_view`: Phase 06 minimal learned procedure projection.
 - `strategy_view`: Phase 08 temporary strategy overrides emitted by L2 or
   manual expiry.
+- `goal_view`: Phase 10 active/satisfied/abandoned goal materialization for the
+  Drive Loop.
 - `cognition_worker_checkpoint`: Phase 06 consolidation worker progress.
 - `subject_value_lens`: Phase 07 current subject ValueLens priority and
   sensitivity.
@@ -284,7 +303,8 @@ BeliefProjection, ContextWindowProjection with background compression,
 ReflectionProjection, ProcedureProjection, and renderer-driven prompt assembly
 are now in place. Subject ValueLens persistence, deterministic conflict
 resolution, queued conflict consumption, and temporary strategy overrides are
-also in place. Semantic strategy/lens diff remains pending.
+also in place. GoalProjection and manual DriveLoop self-signals are in place.
+Semantic strategy/lens diff remains pending.
 
 ## Current Limitations
 
@@ -295,7 +315,9 @@ also in place. Semantic strategy/lens diff remains pending.
 - Reflector L2 v1 is deterministic: no strategy DSL, no semantic clustering,
   and no daemon-owned L2 scheduler. It provides scheduler-compatible work units
   and CLI inspection/expiry.
-- Semantic strategy/lens diff and drive loop are still pending.
+- Drive Loop v1 is synchronous and disabled by default: no daemon-owned drive
+  cadence, no autonomous goal generation, and one self-signal per manual pass.
+- Semantic strategy/lens diff is still pending.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
@@ -313,12 +335,14 @@ also in place. Semantic strategy/lens diff remains pending.
    Completed.
 9. Cognition runtime Phase 08: deterministic Reflector L2 control v1.
    Completed.
-10. Cognition runtime Phase 09+: semantic strategy/lens diff and drive loop.
-11. Tool execution system.
-12. Local files / notes ingestion.
-13. API server.
-14. Web UI.
-15. Channel integrations.
+10. Cognition runtime Phase 10: goal projection and synchronous Drive Loop v1.
+    Completed.
+11. Cognition runtime Phase 09+: semantic strategy/lens diff.
+12. Tool execution system.
+13. Local files / notes ingestion.
+14. API server.
+15. Web UI.
+16. Channel integrations.
 
 ## Development
 
