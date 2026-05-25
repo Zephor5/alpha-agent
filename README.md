@@ -24,14 +24,15 @@ See `docs/todo/TODO.md` for the current Hermes-informed roadmap.
 
 ## Cognition Status
 
-Phase 00 has cleared the previous memory-as-records subsystem. The current
-runtime has no long-term memory, retrieval, extraction, candidate review, or
-consolidation layer. It keeps only state needed to run turns: conversation
-messages, runtime traces, gateway session mappings, and gateway deduplication.
+Phase 00 cleared the previous long-term record subsystem. Phase 01 cognition
+foundations are now in place: typed models, the cognitive event log, projection
+infrastructure, the counterpart materialized view, and the single-subject
+LoopCoordinator.
 
-Long-term cognition is being rebuilt in the staged plan under
-`docs/todo/cognition-runtime/`. Future phases will introduce the cognition
-event log and higher-level reasoning structures on top of this state baseline.
+The reactive cognition loop is still pending Phase 02. The current turn
+runtime continues to use recent conversation state only; long-term recall,
+belief projection, context windows, reflection, consolidation, value lens, and
+drive loop remain staged under `docs/todo/cognition-runtime/`.
 
 ## Install
 
@@ -218,23 +219,28 @@ The current SQLite state baseline is deliberately narrow:
 - `runtime_traces`: operational turn, provider, and tool traces.
 - `gateway_session_mappings`: platform/session routing state.
 - `gateway_dedup`: inbound gateway deduplication state.
+- `cognitive_events`: Phase 01 append-only cognition event log.
+- `counterpart_view`: Phase 01 materialized view for counterpart projection
+  queries.
 
 Prompt construction uses the system prompt plus the recent conversation tail.
 There is no long-term recall or cross-session cognition until the cognition
-runtime phases add those capabilities back on the new architecture.
+runtime phases connect the reactive loop and higher-level projections.
 
 ## Current Limitations
 
-- No long-term cognition runtime yet; Phase 00 is the state baseline.
+- Phase 01 cognition foundations are landed, but the reactive loop is not yet
+  wired into turn execution.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
 
 ## Roadmap
 
-1. Cognition runtime Phase 01: event log foundations.
-2. Cognition runtime Phase 02+: counterpart routing, belief projection, context
-   window, reflection, consolidation, value lens, and drive loop.
+1. Cognition runtime Phase 01: event log foundations. Completed.
+2. Cognition runtime Phase 02+: reactive loop, counterpart routing, belief
+   projection, context window, reflection, consolidation, value lens, and drive
+   loop.
 3. Tool execution system.
 4. Local files / notes ingestion.
 5. API server.

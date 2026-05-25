@@ -38,6 +38,8 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
         "runtime_traces",
         "gateway_session_mappings",
         "gateway_dedup",
+        "cognitive_events",
+        "counterpart_view",
     }
 
 

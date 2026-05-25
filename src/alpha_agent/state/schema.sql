@@ -71,3 +71,43 @@ CREATE INDEX IF NOT EXISTS idx_gateway_dedup_platform_message
     ON gateway_dedup(platform, platform_message_id);
 CREATE INDEX IF NOT EXISTS idx_gateway_dedup_expires_at
     ON gateway_dedup(expires_at);
+
+CREATE TABLE IF NOT EXISTS cognitive_events (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    subject_version INTEGER NOT NULL,
+    situation_id TEXT,
+    actor TEXT NOT NULL,
+    rationale TEXT NOT NULL DEFAULT '',
+    inputs TEXT NOT NULL DEFAULT '[]',
+    outputs TEXT NOT NULL DEFAULT '[]',
+    causal_parents TEXT NOT NULL DEFAULT '[]',
+    payload TEXT NOT NULL DEFAULT '{}',
+    timestamp TEXT NOT NULL,
+    ordinal INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(subject_id, ordinal)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cognitive_events_subject_time
+    ON cognitive_events(subject_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_cognitive_events_kind_time
+    ON cognitive_events(kind, timestamp);
+
+CREATE TABLE IF NOT EXISTS counterpart_view (
+    id TEXT PRIMARY KEY,
+    role TEXT NOT NULL,
+    identity TEXT NOT NULL DEFAULT '{}',
+    relationship TEXT NOT NULL DEFAULT 'observed',
+    service_contract TEXT NOT NULL DEFAULT '[]',
+    trust_level REAL NOT NULL DEFAULT 0.5,
+    communication_style TEXT NOT NULL DEFAULT '[]',
+    first_seen_at TEXT NOT NULL,
+    last_interaction_at TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    last_event_id TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_counterpart_role
+    ON counterpart_view(role, last_interaction_at DESC);

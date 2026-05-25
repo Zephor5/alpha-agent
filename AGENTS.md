@@ -20,8 +20,9 @@ src/
   alpha_agent/
     cli.py            Typer CLI entry point for chat, ask, config, skills, debug, and gateway commands.
     config.py         Runtime configuration loading, defaults, environment overrides, and persistent config handling.
+    cognition/        Phase 01 cognition foundations: models, EventLog, projections, counterpart view, and LoopCoordinator.
     runtime/          Core turn/session execution, event models, prompt building, and runtime tool wiring.
-    state/            SQLite-backed session-level state tables only; long-term cognition is rebuilt by docs/todo/cognition-runtime/.
+    state/            SQLite-backed runtime tables plus Phase 01 cognition schema tables cognitive_events and counterpart_view.
     llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
     gateway/          Gateway operation shell, session routing, adapter contracts, status, logging, and gateway config.
     tools/            Tool abstractions and registry used by the runtime.
