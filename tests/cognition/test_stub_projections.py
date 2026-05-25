@@ -39,7 +39,6 @@ def test_stub_projections_return_expected_phase_02_shapes() -> None:
     assert [perception.raw for perception in window.foreground] == ["two", "three"]
     assert window.background is None
     assert window.recalled == []
-    assert registry.get_typed(BeliefProjection).status == "stub"
     assert registry.get_typed(BeliefProjection).recall("anything") == []
     assert registry.get_typed(ProcedureProjection).status == "stub"
     assert registry.get_typed(ProcedureProjection).match("anything") == []

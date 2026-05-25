@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.models import (
+    Belief,
+    BeliefId,
+    BeliefRef,
     CognitiveEvent,
     CognitiveEventKind,
     ContextWindow,
@@ -13,6 +16,7 @@ from alpha_agent.cognition.models import (
     Perception,
     SituationId,
     Subject,
+    belief_ref,
     situation_ref,
     subject_ref,
 )
@@ -45,7 +49,7 @@ class ContextWindowProjection(Projection):
     ) -> ContextWindow:
         perceived = [
             event
-            for event in self.event_log.iter(kinds=[CognitiveEventKind.PERCEIVED])
+            for event in self.event_log.iter(kinds=[CognitiveEventKind.PERCEIVED], until=at)
             if self._same_thread(event, thread_id)
         ][-self.recent_limit :]
         foreground = [self._perception_from_event(event) for event in perceived]
@@ -69,6 +73,13 @@ class ContextWindowProjection(Projection):
             metadata={"status": self.status},
         )
 
+    def attach_recalled(
+        self,
+        window: ContextWindow,
+        recalled: list[Belief | BeliefRef],
+    ) -> ContextWindow:
+        return replace(window, recalled=[_belief_reference(item) for item in recalled])
+
     def apply(self, event: CognitiveEvent) -> None:
         return None
 
@@ -89,3 +100,9 @@ class ContextWindowProjection(Projection):
         if not isinstance(raw, dict):
             raise ValueError(f"perceived event missing perception payload: {event.id}")
         return Perception.from_record(raw)
+
+
+def _belief_reference(value: Belief | BeliefRef) -> BeliefRef:
+    if isinstance(value, Belief):
+        return belief_ref(BeliefId(str(value.id)))
+    return value

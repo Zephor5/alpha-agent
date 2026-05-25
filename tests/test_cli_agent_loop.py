@@ -35,14 +35,17 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-    assert tables == {
-        "conversation_messages",
-        "runtime_traces",
-        "gateway_session_mappings",
-        "gateway_dedup",
-        "cognitive_events",
-        "counterpart_view",
-    }
+        assert tables == {
+            "conversation_messages",
+            "runtime_traces",
+            "gateway_session_mappings",
+            "gateway_dedup",
+            "cognitive_events",
+            "counterpart_view",
+            "belief_view",
+            "belief_entity_index",
+            "belief_about_index",
+        }
 
 
 def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path) -> None:

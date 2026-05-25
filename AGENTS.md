@@ -20,17 +20,17 @@ src/
   alpha_agent/
     cli.py            Typer CLI entry point for chat, ask, config, skills, debug, and gateway commands.
     config.py         Runtime configuration loading, defaults, environment overrides, and persistent config handling.
-    cognition/        Cognition foundations and Phase 02 reactive loop wiring.
+    cognition/        Cognition foundations, Reactive loop wiring, and real BeliefProjection.
       controller.py   CognitiveController orchestration for Reactive single tick.
       stages/         Perceive, Attend, Interpret, Judge, Decide, Act, Feedback, Reflect, and Revise stages.
-      projections/    Subject, counterpart, belief, procedure, and context-window projection interfaces/stubs.
+      projections/    Subject/counterpart projections, SQLite-backed BeliefProjection, and context-window/procedure stubs.
     runtime/          Core turn/session execution, event models, prompt building, and runtime tool wiring.
       counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
-    state/            SQLite-backed runtime tables plus Phase 01 cognition schema tables cognitive_events and counterpart_view.
+    state/            SQLite-backed runtime tables plus cognition event/projection tables, including cognitive_events, counterpart_view, and belief_view.
     llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
     gateway/          Gateway operation shell, session routing, adapter contracts, status, logging, and gateway config.
     tools/            Tool abstractions and registry used by the runtime.
     skills/           Procedural skill manager and built-in Markdown skills.
     utils/            Shared utility helpers for IDs, text, and time.
-tests/                Test coverage grouped around CLI, runtime loop, prompt building, state, LLM providers, config, gateway, and future cognition.
+tests/                Test coverage grouped around CLI, runtime loop, prompt building, cognition, state, LLM providers, config, and gateway.
 ```

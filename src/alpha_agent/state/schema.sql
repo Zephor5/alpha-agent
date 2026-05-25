@@ -111,3 +111,52 @@ CREATE TABLE IF NOT EXISTS counterpart_view (
 
 CREATE INDEX IF NOT EXISTS idx_counterpart_role
     ON counterpart_view(role, last_interaction_at DESC);
+
+CREATE TABLE IF NOT EXISTS belief_view (
+    id TEXT PRIMARY KEY,
+    record TEXT NOT NULL DEFAULT '{}',
+    object TEXT NOT NULL,
+    content TEXT NOT NULL,
+    normalized_content TEXT NOT NULL,
+    cognitive_type TEXT NOT NULL,
+    structure TEXT NOT NULL DEFAULT '{}',
+    sources TEXT NOT NULL DEFAULT '[]',
+    confidence REAL NOT NULL DEFAULT 0.5,
+    applicability TEXT NOT NULL DEFAULT '{}',
+    value_profile TEXT NOT NULL DEFAULT '{}',
+    relations TEXT NOT NULL DEFAULT '[]',
+    formed_in_situation TEXT,
+    holder_role TEXT,
+    action_orientation TEXT NOT NULL DEFAULT '[]',
+    update_policy TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'active',
+    held_since TEXT NOT NULL,
+    held_until TEXT,
+    supersedes TEXT,
+    superseded_by TEXT,
+    last_event_id TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_belief_view_status
+    ON belief_view(status);
+CREATE INDEX IF NOT EXISTS idx_belief_view_type
+    ON belief_view(cognitive_type, status);
+
+CREATE TABLE IF NOT EXISTS belief_entity_index (
+    belief_id TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    PRIMARY KEY(belief_id, entity_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_belief_entity_lookup
+    ON belief_entity_index(entity_id, belief_id);
+
+CREATE TABLE IF NOT EXISTS belief_about_index (
+    belief_id TEXT NOT NULL,
+    about_kind TEXT NOT NULL,
+    about_id TEXT NOT NULL,
+    PRIMARY KEY(belief_id, about_kind, about_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_belief_about_lookup
+    ON belief_about_index(about_kind, about_id, belief_id);

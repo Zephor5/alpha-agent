@@ -9,7 +9,7 @@ from typing import Any
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.models import Stimulus, ThreadId
-from alpha_agent.cognition.projections.belief import BeliefProjection
+from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefRecallParams
 from alpha_agent.cognition.projections.context_window import ContextWindowProjection
 from alpha_agent.cognition.projections.procedure import ProcedureProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
@@ -83,6 +83,7 @@ class CognitiveController:
             emitter=self.emitter,
             tick_id=tick_id,
         )
+        self._apply_projection(perceived.event)
         attended = self.attender.focus(
             perceived.value,
             subject,
@@ -90,14 +91,18 @@ class CognitiveController:
             tick_id=tick_id,
             causal_parent=perceived.event.id,
         )
+        self._apply_projection(attended.event)
 
-        belief_projection = self.projections.get_typed(BeliefProjection)
-        recalled = belief_projection.recall(attended.value, subject=subject, thread_id=thread_id)
-        context_window = self.projections.get_typed(ContextWindowProjection).get(
+        context_projection = self.projections.get_typed(ContextWindowProjection)
+        context_window = context_projection.get(
             thread_id,
             subject,
-            at=stimulus.received_at,
         )
+        belief_projection = self.projections.get_typed(BeliefProjection)
+        recalled = belief_projection.recall(
+            BeliefRecallParams(focus=attended.value, counterpart=context_window.counterpart)
+        )
+        context_window = context_projection.attach_recalled(context_window, recalled)
         interpreted = self.interpreter.interpret(
             attended.value,
             context_window,
@@ -107,6 +112,7 @@ class CognitiveController:
             tick_id=tick_id,
             causal_parent=attended.event.id,
         )
+        self._apply_projection(interpreted.event)
         judged = self.judger.judge(
             interpreted.value,
             subject.value_lens,
@@ -115,6 +121,7 @@ class CognitiveController:
             tick_id=tick_id,
             causal_parent=interpreted.event.id,
         )
+        self._apply_projection(judged.event)
         procedures = self.projections.get_typed(ProcedureProjection).match(
             interpreted.value,
             subject=subject,
@@ -129,6 +136,7 @@ class CognitiveController:
             tick_id=tick_id,
             causal_parent=judged.event.id,
         )
+        self._apply_projection(decided.event)
         acted = self.effector.execute(
             decided.value,
             context_window,
@@ -136,6 +144,7 @@ class CognitiveController:
             tick_id=tick_id,
             causal_parent=decided.event.id,
         )
+        self._apply_projection(acted.event)
         feedback = self.feedback_reader.compare(
             decided.value,
             acted.value,
@@ -143,6 +152,7 @@ class CognitiveController:
             tick_id=tick_id,
             causal_parent=acted.event.id,
         )
+        self._apply_projection(feedback.event)
         reflected = self.reflector.audit(
             feedback.value,
             acted.value,
@@ -150,6 +160,7 @@ class CognitiveController:
             tick_id=tick_id,
             causal_parent=feedback.event.id,
         )
+        self._apply_projection(reflected.event)
         revised = self.reviser.derive(
             feedback.value,
             reflected.value,
@@ -158,6 +169,7 @@ class CognitiveController:
             tick_id=tick_id,
             causal_parent=reflected.event.id,
         )
+        self._apply_projection(revised.event)
 
         return LoopResult(
             response_text=acted.value.text or "",
@@ -182,11 +194,22 @@ class CognitiveController:
             },
         )
 
+    def _apply_projection(self, event: Any) -> None:
+        for projection in self.projections.all():
+            if event.kind in projection.handles:
+                projection.apply(event)
+
 
 def default_projection_registry(event_log: EventLog) -> ProjectionRegistry:
     registry = ProjectionRegistry()
     registry.register(SubjectProjection(event_log))
-    registry.register(BeliefProjection())
+    registry.register(
+        BeliefProjection(
+            getattr(event_log, "store", None),
+            event_log=event_log,
+            auto_rebuild=True,
+        )
+    )
     registry.register(ProcedureProjection())
     registry.register(ContextWindowProjection(event_log))
     return registry

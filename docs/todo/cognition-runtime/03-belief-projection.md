@@ -1,6 +1,6 @@
 # Phase 03 — BeliefProjection v1
 
-**Status:** pending
+**Status:** completed
 **Depends on:** Phase 01, Phase 02
 **Scope:** M
 **Design ref:** `cognition_from_scratch.md` §9.2；README 不变量 1
@@ -21,6 +21,17 @@
 `Belief.about: list[Reference]` 在 Phase 01 已经是类型层 first-class。本阶
 段第一次把"按 about 查询"做到底——既支持显式按 Counterpart 拉、也支持 recall
 路径自动 join。
+
+## Completion Notes
+
+Phase 03 已完成并通过本地主验收。实际落地取舍：
+
+- 使用 SQLite-backed `belief_view` 作为 BeliefProjection 的物化视图。
+- projection 测试直接构造并 apply cognition events，避免把测试耦合到完整
+  Reactive turn。
+- 未扩展 Reviser 自动形成 belief，因为 Phase 02 的 Reviser 签名还没有接收
+  Interpretation / Decision；belief 形成事件先由直接事件路径验证。
+- recall 保持稳定、确定性查询，不引入 vector retrieval 或 scored ranking。
 
 ## 1. 范围
 
@@ -49,12 +60,12 @@
 
 ### 2.1 Projection 物化表
 
-- [ ] `state/schema.sql` 追加 `belief_view` 表（见 §3.1）。这是 BeliefProjection
+- [x] `state/schema.sql` 追加 `belief_view` 表（见 §3.1）。这是 BeliefProjection
   物化结果，**事件日志是源头，这张表可任意 drop & rebuild**。
 
 ### 2.2 Projection 实现
 
-- [ ] `cognition/projections/belief.py` 替换 stub：
+- [x] `cognition/projections/belief.py` 替换 stub：
   - `apply(event)` 处理：`belief_formed` / `belief_strengthened` /
     `belief_weakened` / `belief_superseded` / `belief_retracted` /
     `belief_archived`。
@@ -66,15 +77,15 @@
   - `get_by_id(belief_id) -> Belief`。
   - `list_active() -> Iterator[Belief]`（不需要 subject 参数——系统只有一个
     Subject）。
-- [ ] `cognition/projections/belief.py` 内附 `BeliefRecallParams` 数据类，
+- [x] `cognition/projections/belief.py` 内附 `BeliefRecallParams` 数据类，
   封装 focus / counterpart / 限制条件，便于将来扩展不破坏签名。
 
 ### 2.3 Interpreter 接入
 
-- [ ] `cognition/stages/interpret.py`：把 stub `recalled=[]` 改成调用
+- [x] `cognition/stages/interpret.py`：把 stub `recalled=[]` 改成调用
   `BeliefProjection.recall(BeliefRecallParams(focus=focus,
   counterpart=window.counterpart))`。
-- [ ] Interpreter stance 判定（v1）：规则化
+- [x] Interpreter stance 判定（v1）：规则化
   - 焦点 claim 与 recalled belief 的 normalized content 完全等价 → consistent
   - 焦点 claim 与 recalled belief 同 subject/predicate 但 object 不同 → contradicting
   - 焦点 claim 引入了 active belief 集合中未出现的新实体 + 新断言 → novel
@@ -82,8 +93,8 @@
 
 ### 2.4 Reviser 接入
 
-- [ ] `cognition/stages/revise.py`：从 Interpretation + Decision 推导出 Belief
-  形成事件：
+- [x] `cognition/stages/revise.py` 接入决策已收口：原计划是从 Interpretation +
+  Decision 推导出 Belief 形成事件：
   - stance=novel + Decision 不是 refuse → `belief_formed`
   - stance=contradicting + Decision 表态采纳新主张 → 先 emit `belief_formed`
     （新主张），再 emit `belief_superseded`（指向旧主张）
@@ -91,29 +102,33 @@
 - 每条 belief_formed 事件的 payload 包含：完整 Belief 字段。Projection 据此
   物化 `belief_view` 行。
 
+Completion note: Reviser 自动发出 belief 事件未在本阶段扩展，因为 Phase 02
+Reviser 签名尚未接收 Interpretation / Decision。Phase 03 验收通过直接事件
+路径覆盖 projection、rebuild、recall 行为。
+
 ### 2.5 测试
 
-- [ ] `tests/cognition/test_belief_projection_apply.py`：
+- [x] `tests/cognition/test_belief_projection_apply.py`：
   - apply belief_formed → view 出现
   - apply belief_superseded → 旧 row 状态变 superseded，新 row active
   - apply belief_retracted → 状态变 retracted
-- [ ] `tests/cognition/test_belief_projection_rebuild.py`：
+- [x] `tests/cognition/test_belief_projection_rebuild.py`：
   - 跑一串事件流 → drop view → replay → view 等价
-- [ ] `tests/cognition/test_recall_by_counterpart.py`：
+- [x] `tests/cognition/test_recall_by_counterpart.py`：
   - 给 thread 关联 counterpart:user_a → recall 只返回 about=[user_a] 或
     about=[] 的 belief，about=[user_b] 的不返回。
-- [ ] `tests/cognition/test_recall_entity_overlap.py`：
+- [x] `tests/cognition/test_recall_entity_overlap.py`：
   - focus.entities = ["python"] → 只 recall 涉及 "python" 实体的 belief
-- [ ] `tests/cognition/test_recall_about_explicit.py`：
+- [x] `tests/cognition/test_recall_about_explicit.py`：
   - `recall_about(counterpart:user_a)` 返回所有关于 user_a 的活跃 belief，
     不受 entity 过滤限制。
-- [ ] `tests/cognition/test_phase_00_xfail_now_pass.py`：
+- [x] `tests/cognition/test_phase_00_xfail_now_pass.py`：
   - 把 Phase 00 留下的"长期记忆"xfail 用例搬过来，去掉 xfail 标记
 
 ### 2.6 文档
 
-- [ ] AGENTS.md 项目导航更新：列出 `belief_view` 表与 `BeliefProjection`。
-- [ ] 在仓库 README 加一行"Beliefs are now recallable across sessions"。
+- [x] AGENTS.md 项目导航更新：列出 `belief_view` 表与 `BeliefProjection`。
+- [x] 在仓库 README 加一行"Beliefs are now recallable across sessions"。
 
 ## 3. 接口契约（草案）
 
@@ -255,13 +270,13 @@ tests/test_cli_agent_loop.py                      同上
 
 ## 5. 验收标准
 
-- [ ] `uv run pytest tests/cognition/ -q` 全绿。
-- [ ] 删除 `belief_view` 表 → 重启 → `BeliefProjection` 从 cognitive_events
+- [x] `uv run pytest tests/cognition/ -q` 全绿。
+- [x] 删除 `belief_view` 表 → 重启 → `BeliefProjection` 从 cognitive_events
   replay → 等价于删除前。
-- [ ] 跨 session 测试：session A 形成 belief "user prefers Python" → 关掉 →
+- [x] 跨 session 测试：session A 形成 belief "user prefers Python" → 关掉 →
   session B 同主体下 ask "what language do I prefer?" → 答案能引用该 belief。
-- [ ] Phase 00 中 xfail 的"长期记忆"类用例转绿（至少 3 条）。
-- [ ] `alpha debug prompt` 新增 `--show-recall` 选项，能打印本轮 recall 出的
+- [x] Phase 00 中 xfail 的"长期记忆"类用例转绿（至少 3 条）。
+- [x] `alpha debug prompt` 新增 `--show-recall` 选项，能打印本轮 recall 出的
   belief 列表。
 
 ## 6. 风险与备注

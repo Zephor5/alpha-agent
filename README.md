@@ -46,11 +46,12 @@ Phase 09. `alpha debug prompt --trace` prints the baseline prompt preview plus
 the recent cognitive event chain for the session; it is not the final Phase 09
 renderer output.
 
-Belief and procedure projection remain stubs, and the context window is still
-the Phase 02 lightweight foreground-only implementation. Real belief recall and
-real context projection are Phase 03 / Phase 04 work; reflection,
-consolidation, value lens, renderer extraction, and drive loop remain staged
-under `docs/todo/cognition-runtime/`.
+Phase 03 BeliefProjection is complete: beliefs are materialized in SQLite and
+recallable across sessions through a deterministic projection over cognition
+events. The context window is still the Phase 02 lightweight foreground-only
+implementation until Phase 04. Procedure projection remains stubbed, and
+reflection, consolidation, value lens, renderer extraction, and drive loop remain
+staged under `docs/todo/cognition-runtime/`.
 
 ## Install
 
@@ -240,16 +241,19 @@ The current SQLite state baseline is deliberately narrow:
 - `cognitive_events`: Phase 01 append-only cognition event log.
 - `counterpart_view`: Phase 01 materialized view for counterpart projection
   queries.
+- `belief_view`: Phase 03 materialized view for active, superseded, and
+  retracted beliefs, with deterministic recall across sessions.
 
 Successful user turns now enter the Reactive tick before producing a response.
-Phase 02 still uses stub belief/procedure projections and a lightweight context
-window; there is no real long-term belief recall or full context projection
-until Phase 03 / Phase 04.
+BeliefProjection is now a real SQLite-backed projection. ContextWindowProjection
+remains the lightweight foreground implementation until Phase 04; Procedure
+projection, background compression, and renderer-driven prompt assembly remain
+pending.
 
 ## Current Limitations
 
-- Phase 02 Reactive tick is wired into turn execution, but belief recall and
-  context projection are still stubbed until Phase 03 / Phase 04.
+- ContextWindowProjection remains the Phase 02 lightweight foreground
+  implementation until Phase 04.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
@@ -258,13 +262,14 @@ until Phase 03 / Phase 04.
 
 1. Cognition runtime Phase 01: event log foundations. Completed.
 2. Cognition runtime Phase 02: reactive loop and counterpart routing. Completed.
-3. Cognition runtime Phase 03+: belief projection, context window, reflection,
-   consolidation, value lens, renderer extraction, and drive loop.
-4. Tool execution system.
-5. Local files / notes ingestion.
-6. API server.
-7. Web UI.
-8. Channel integrations.
+3. Cognition runtime Phase 03: belief projection. Completed.
+4. Cognition runtime Phase 04+: context window, reflection, consolidation,
+   value lens, renderer extraction, and drive loop.
+5. Tool execution system.
+6. Local files / notes ingestion.
+7. API server.
+8. Web UI.
+9. Channel integrations.
 
 ## Development
 
