@@ -16,6 +16,7 @@ from alpha_agent.cognition.projections.procedure import ProcedureProjection
 from alpha_agent.cognition.projections.reflection import ReflectionProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.projections.subject import SubjectProjection
+from alpha_agent.cognition.render.build_view import build_view, situation_from_ref
 from alpha_agent.cognition.stages import (
     Attender,
     Decider,
@@ -140,9 +141,20 @@ class CognitiveController:
             causal_parent=judged.event.id,
         )
         self._apply_projection(decided.event)
+        view = build_view(
+            thread_id=thread_id,
+            situation=situation_from_ref(context_window.situation_at),
+            projections=self.projections,
+            window=context_window,
+            recalled_beliefs=recalled,
+            matched_procedures=procedures,
+            current_query=str(decided.value.payload.get("message", ""))
+            if isinstance(decided.value.payload, dict)
+            else None,
+        )
         acted = self.effector.execute(
             decided.value,
-            context_window,
+            view,
             emitter=self.emitter,
             tick_id=tick_id,
             causal_parent=decided.event.id,

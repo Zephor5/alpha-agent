@@ -8,12 +8,14 @@ from typing import Any
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
-    ContextWindow,
     Decision,
     EventId,
     NLStatement,
     Reference,
 )
+from alpha_agent.cognition.render.base import RenderBudget, Renderer, RenderResult
+from alpha_agent.cognition.render.text_chat import TextChatRenderer
+from alpha_agent.cognition.render.view import CognitionView
 from alpha_agent.cognition.stages.types import Emitted, Outcome
 from alpha_agent.llm.base import (
     ChatCompletionToolCall,
@@ -29,7 +31,7 @@ from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
 
-CompletionRunner = Callable[[Decision, ContextWindow], Outcome]
+CompletionRunner = Callable[[Decision, CognitionView, RenderResult], Outcome]
 
 
 class Effector:
@@ -40,28 +42,33 @@ class Effector:
         *,
         llm_provider: LLMProvider,
         tool_registry: ToolRegistry,
+        renderer: Renderer | None = None,
+        render_budget: RenderBudget | None = None,
         completion_runner: CompletionRunner | None = None,
         max_tool_iterations: int = 1,
     ):
         self.llm_provider = llm_provider
         self.tool_registry = tool_registry
         self.tool_executor = ToolExecutor(tool_registry)
+        self.renderer = renderer or TextChatRenderer()
+        self.render_budget = render_budget or RenderBudget()
         self.completion_runner = completion_runner or self._complete_once
         self.max_tool_iterations = max(0, max_tool_iterations)
 
     def execute(
         self,
         decision: Decision,
-        window: ContextWindow,
+        view: CognitionView,
         *,
         emitter: EventEmitter,
         tick_id: str,
         causal_parent: EventId,
     ) -> Emitted[Outcome]:
-        outcome = self.completion_runner(decision, window)
+        rendered = self.renderer.render(view, self.render_budget)
+        outcome = self.completion_runner(decision, view, rendered)
         event = emitter.emit(
             CognitiveEventKind.ACTED,
-            situation=window.situation_at,
+            situation=view.window.situation_at,
             inputs=[Reference("decision", str(decision.id))],
             rationale=NLStatement("Executed decision through effector."),
             causal_parents=[causal_parent],
@@ -74,8 +81,13 @@ class Effector:
         )
         return Emitted(outcome, event)
 
-    def _complete_once(self, decision: Decision, window: ContextWindow) -> Outcome:
-        messages = build_reactive_messages(decision, window)
+    def _complete_once(
+        self,
+        decision: Decision,
+        view: CognitionView,
+        rendered: RenderResult,
+    ) -> Outcome:
+        messages = list(rendered.payload)
         tools = self.tool_registry.to_llm_tool_definitions()
         llm_round_count = 1
         response = self.llm_provider.complete(
@@ -112,6 +124,9 @@ class Effector:
             debug={
                 "provider": response.provider,
                 "final_provider": response.provider,
+                "renderer": self.renderer.name,
+                "render_used_tokens": rendered.used_tokens,
+                "render_dropped_sections": list(rendered.dropped_sections),
                 "llm_round_count": llm_round_count,
                 "llm_retry_count": 0,
                 "tool_iteration_count": 1 if tool_results else 0,
@@ -120,28 +135,6 @@ class Effector:
                 "final_finish_reason": response.finish_reason,
             },
         )
-
-
-def build_reactive_messages(decision: Decision, window: ContextWindow) -> list[ChatMessage]:
-    """Build the temporary Phase 02 prompt inside the Effector boundary."""
-
-    messages: list[ChatMessage] = [
-        {
-            "role": "system",
-            "content": (
-                "Identity: Alpha Agent.\n"
-                "Use the current reactive context and answer concisely. "
-                "Call tools only when they are useful."
-            ),
-        }
-    ]
-    for perception in window.foreground:
-        if perception.raw is None:
-            continue
-        messages.append({"role": "user", "content": str(perception.raw)})
-    if not window.foreground:
-        messages.append({"role": "user", "content": str(decision.payload.get("message", ""))})
-    return messages
 
 
 def _assistant_tool_call_message(

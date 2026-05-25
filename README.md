@@ -38,13 +38,10 @@ preempt the current holder, and does not write cognitive events or conversation
 messages for the rejected stimulus.
 
 The default Reactive Effector executes a bounded tool loop itself: one tool
-iteration followed by a final LLM round. `AlphaAgent.respond()` does not
-pre-build LLM input through `SessionContextManager` + `PromptBuilder`; it
-injects a runtime runner at the Effector boundary so successful turns still
-persist transcript and tool traces. Renderer extraction remains deferred to
-Phase 09. `alpha debug prompt --trace` prints the baseline prompt preview plus
-the recent cognitive event chain for the session; it is not the final Phase 09
-renderer output.
+iteration followed by a final LLM round. Phase 09 renderer extraction is now in
+place: Effector receives a `CognitionView`, calls `TextChatRenderer` by default,
+and feeds rendered messages into the existing LLM/tool loop. The old
+`runtime/prompt_builder.py` path has been removed.
 
 Phase 03 BeliefProjection is complete: beliefs are materialized in SQLite and
 recallable across sessions through a deterministic projection over cognition
@@ -54,8 +51,8 @@ anchors, and rebuildable window state. Belief recall is joined into
 `ContextWindow.recalled` during the Reactive tick. Phase 05 L1 reflection is
 also complete: every tick emits a `reflected` event, with rule findings
 materialized into `reflection_view`. Procedure projection remains stubbed, and
-consolidation, value lens, renderer extraction, and drive loop remain staged
-under `docs/todo/cognition-runtime/`.
+consolidation, value lens, semantic strategy/lens diff, and drive loop remain
+staged under `docs/todo/cognition-runtime/`.
 
 ## Install
 
@@ -113,11 +110,19 @@ Inspect procedural skills:
 uv run alpha skills list
 ```
 
-Print a baseline prompt preview without calling the LLM:
+Print a renderer prompt preview without calling the LLM:
 
 ```bash
-uv run alpha debug prompt "summarize the current session"
+uv run alpha debug prompt "summarize the current session" --renderer text_chat
 uv run alpha debug prompt "summarize this channel" --session <session-id>
+```
+
+Inspect cognition renderer outputs:
+
+```bash
+uv run alpha cognition graph --format mermaid
+uv run alpha cognition diff <tick-id-a> <tick-id-b>
+uv run alpha cognition evidence <belief-id>
 ```
 
 Inspect raw LLM request/response traces from CLI runs:
@@ -252,14 +257,14 @@ The current SQLite state baseline is deliberately narrow:
 - `reflection_view`: Phase 05 materialized view for L1 reflection findings.
 
 Successful user turns now enter the Reactive tick before producing a response.
-BeliefProjection, foreground ContextWindowProjection, and ReflectionProjection
-are now real SQLite-backed projections. Procedure projection, background
-compression, and renderer-driven prompt assembly remain pending.
+BeliefProjection, foreground ContextWindowProjection, ReflectionProjection, and
+renderer-driven prompt assembly are now in place. Procedure projection,
+background compression, and semantic strategy/lens diff remain pending.
 
 ## Current Limitations
 
-- Procedure projection, consolidation, value lens, renderer extraction, and drive
-  loop are still pending.
+- Procedure projection, consolidation, value lens, semantic strategy/lens diff,
+  and drive loop are still pending.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
@@ -271,13 +276,14 @@ compression, and renderer-driven prompt assembly remain pending.
 3. Cognition runtime Phase 03: belief projection. Completed.
 4. Cognition runtime Phase 04: foreground context window. Completed.
 5. Cognition runtime Phase 05: Reflector L1. Completed.
-6. Cognition runtime Phase 06+: consolidation, value lens, renderer extraction,
-   and drive loop.
-7. Tool execution system.
-8. Local files / notes ingestion.
-9. API server.
-10. Web UI.
-11. Channel integrations.
+6. Cognition runtime Phase 09: renderer extraction. Completed.
+7. Cognition runtime Phase 06+: consolidation, value lens, semantic
+   strategy/lens diff, and drive loop.
+8. Tool execution system.
+9. Local files / notes ingestion.
+10. API server.
+11. Web UI.
+12. Channel integrations.
 
 ## Development
 

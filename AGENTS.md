@@ -25,7 +25,8 @@ src/
       stages/         Perceive, Attend, Interpret, Judge, Decide, Act, Feedback, Reflect, and Revise stages.
       reflectors/     Deterministic L1 reflection rules for read-only Reactive tick audits.
       projections/    Subject/counterpart projections, SQLite-backed BeliefProjection, ReflectionProjection, foreground ContextWindowProjection, and procedure stubs.
-    runtime/          Core turn/session execution, event models, prompt building, and runtime tool wiring.
+      render/         CognitionView assembly and renderers for chat prompts, graph snapshots, diffs, and evidence traces.
+    runtime/          Core turn/session execution, event models, session context, and runtime tool wiring.
       counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
     state/            SQLite-backed runtime tables plus cognition event/projection tables, including cognitive_events, counterpart_view, belief_view, context_window_view, and reflection_view.
     llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
@@ -33,5 +34,5 @@ src/
     tools/            Tool abstractions and registry used by the runtime.
     skills/           Procedural skill manager and built-in Markdown skills.
     utils/            Shared utility helpers for IDs, text, and time.
-tests/                Test coverage grouped around CLI, runtime loop, prompt building, state, LLM providers, config, gateway, and future cognition.
+tests/                Test coverage grouped around CLI, runtime loop, cognition renderers, state, LLM providers, config, gateway, and future cognition.
 ```

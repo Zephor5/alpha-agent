@@ -181,7 +181,9 @@ def test_real_reactive_tick_populates_recalled_and_recent_judgments(tmp_path) ->
         effector=Effector(
             llm_provider=_StaticProvider(),
             tool_registry=ToolRegistry(),
-            completion_runner=lambda _decision, window: captured_windows.append(window)
+            completion_runner=lambda _decision, view, _rendered: captured_windows.append(
+                view.window
+            )
             or Outcome(
                 text="ok",
                 tool_calls=[],

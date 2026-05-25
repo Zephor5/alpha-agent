@@ -24,7 +24,14 @@ from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import Instant, LoopPriority, Stimulus, StimulusKind
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
-from alpha_agent.cognition.stages.effector import Effector, build_reactive_messages
+from alpha_agent.cognition.render import (
+    RenderResult,
+    conversation_message_to_chat,
+    estimate_chat_tokens,
+    wrap_system_reminder,
+)
+from alpha_agent.cognition.render.view import CognitionView
+from alpha_agent.cognition.stages.effector import Effector
 from alpha_agent.cognition.stages.types import Outcome
 from alpha_agent.cognition.threads import StimulusRouter
 from alpha_agent.llm.base import (
@@ -37,7 +44,6 @@ from alpha_agent.llm.base import (
 )
 from alpha_agent.runtime.counterpart_router import CounterpartRouter
 from alpha_agent.runtime.events import deterministic_json
-from alpha_agent.runtime.prompt_builder import PromptBuilder, wrap_system_reminder
 from alpha_agent.runtime.session_context import SessionContextManager
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
 from alpha_agent.state.models import ConversationMessage, RuntimeTrace
@@ -162,7 +168,6 @@ class AlphaAgent:
         self,
         store: StateStore,
         llm_provider: LLMProvider,
-        prompt_builder: PromptBuilder | None = None,
         tool_registry: ToolRegistry | None = None,
         max_llm_retries: int = 2,
         llm_retry_sleep_seconds: float = 0.0,
@@ -176,7 +181,6 @@ class AlphaAgent:
     ):
         self.store = store
         self.llm_provider = llm_provider
-        self.prompt_builder = prompt_builder or PromptBuilder()
         self.session_context = SessionContextManager(
             store,
             recent_tail_messages=context_recent_tail_messages,
@@ -288,13 +292,16 @@ class AlphaAgent:
                 effector=Effector(
                     llm_provider=self.llm_provider,
                     tool_registry=self.tool_registry,
-                    completion_runner=lambda decision, window: self._run_reactive_completion(
-                        session_id=session_id,
-                        decision=decision,
-                        window=window,
-                        model_tools=model_tools or None,
-                        model_tool_choice="auto" if model_tools else None,
-                        debug=debug,
+                    completion_runner=lambda decision, view, rendered: (
+                        self._run_reactive_completion(
+                            session_id=session_id,
+                            decision=decision,
+                            view=view,
+                            rendered=rendered,
+                            model_tools=model_tools or None,
+                            model_tool_choice="auto" if model_tools else None,
+                            debug=debug,
+                        )
                     ),
                 ),
             )
@@ -348,19 +355,21 @@ class AlphaAgent:
         *,
         session_id: str,
         decision: Any,
-        window: Any,
+        view: CognitionView,
+        rendered: RenderResult,
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         debug: dict[str, Any],
     ) -> Outcome:
+        del decision
         self._check_canceled(session_id, "before_prompt")
-        messages = build_reactive_messages(decision, window)
-        prompt_token_estimate = self.prompt_builder.estimate_prompt_tokens(
-            messages,
-            tools=model_tools,
-        )
-        debug["context_window_foreground_count"] = len(window.foreground)
+        messages = list(rendered.payload)
+        prompt_token_estimate = estimate_chat_tokens(messages, tools=model_tools)
+        debug["context_window_foreground_count"] = len(view.window.foreground)
         debug["prompt_token_estimate"] = prompt_token_estimate
+        debug["renderer"] = "text_chat"
+        debug["render_used_tokens"] = rendered.used_tokens
+        debug["render_dropped_sections"] = list(rendered.dropped_sections)
         loop_result = self._run_agent_loop(
             session_id=session_id,
             messages=messages,
@@ -428,7 +437,7 @@ class AlphaAgent:
                 prompt_token_estimate=(
                     initial_prompt_token_estimate
                     if llm_round_count == 0
-                    else self.prompt_builder.estimate_prompt_tokens(
+                    else estimate_chat_tokens(
                         conversation_messages,
                         tools=model_tools,
                     )
@@ -483,9 +492,7 @@ class AlphaAgent:
                 llm_response=response,
             )
             provider_tool_messages.append(provider_tool_call_message)
-            conversation_messages.append(
-                self.prompt_builder.conversation_message_to_chat(provider_tool_call_message)
-            )
+            conversation_messages.append(conversation_message_to_chat(provider_tool_call_message))
             provider_results = self._execute_tool_calls(
                 session_id=session_id,
                 calls=provider_tool_calls,
@@ -500,8 +507,7 @@ class AlphaAgent:
             tool_call_count += len(provider_results)
             tool_iteration_count += 1
             conversation_messages.extend(
-                self.prompt_builder.conversation_message_to_chat(message)
-                for message in provider_result_messages
+                conversation_message_to_chat(message) for message in provider_result_messages
             )
 
     def _call_model(

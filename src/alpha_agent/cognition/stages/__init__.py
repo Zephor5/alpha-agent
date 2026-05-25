@@ -2,7 +2,7 @@
 
 from alpha_agent.cognition.stages.attend import Attender
 from alpha_agent.cognition.stages.decide import Decider
-from alpha_agent.cognition.stages.effector import Effector, build_reactive_messages
+from alpha_agent.cognition.stages.effector import Effector
 from alpha_agent.cognition.stages.feedback import FeedbackReader
 from alpha_agent.cognition.stages.interpret import Interpreter
 from alpha_agent.cognition.stages.judge import Judger
@@ -34,5 +34,4 @@ __all__ = [
     "ReflectorL1",
     "Reviser",
     "Revision",
-    "build_reactive_messages",
 ]

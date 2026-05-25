@@ -12,9 +12,31 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from alpha_agent.cognition.controller import default_projection_registry
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
-from alpha_agent.cognition.models import CognitiveEvent
+from alpha_agent.cognition.models import (
+    CognitiveEvent,
+    ContextWindow,
+    Instant,
+    Situation,
+    SituationId,
+    Subject,
+    ThreadId,
+    situation_ref,
+    subject_ref,
+)
 from alpha_agent.cognition.projections.reflection import ReflectionProjection, target_to_parts
+from alpha_agent.cognition.projections.subject import SubjectProjection
+from alpha_agent.cognition.render import (
+    CognitionView,
+    DiffRenderer,
+    EvidenceRenderer,
+    GraphSnapshotRenderer,
+    RenderBudget,
+    TextChatRenderer,
+    conversation_message_to_chat,
+)
+from alpha_agent.cognition.render.build_view import build_view
 from alpha_agent.config import (
     AlphaConfig,
     default_config_path,
@@ -48,7 +70,6 @@ from alpha_agent.gateway.status import gateway_tables_available
 from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
-from alpha_agent.runtime.prompt_builder import PromptBuilder
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.runtime.session_context import SessionContextManager
 from alpha_agent.skills.manager import SkillManager
@@ -504,8 +525,12 @@ def prompt(
         bool,
         typer.Option("--trace", help="Include recent cognitive event trace for the session."),
     ] = False,
+    renderer: Annotated[
+        str,
+        typer.Option("--renderer", help="Renderer name. Currently supports text_chat."),
+    ] = "text_chat",
 ) -> None:
-    """Print a baseline prompt preview and optional cognitive event trace."""
+    """Print a renderer prompt preview and optional cognitive event trace."""
 
     config = load_config()
     store = _store(config)
@@ -514,7 +539,15 @@ def prompt(
         store,
         recent_tail_messages=config.context_recent_tail_messages,
     ).load(session_id)
-    messages = PromptBuilder().build(message, context.messages)
+    if renderer != TextChatRenderer.name:
+        raise typer.BadParameter("supported renderer: text_chat")
+    view = _debug_prompt_view(
+        session_id=session_id,
+        message=message,
+        chat_history=[conversation_message_to_chat(item) for item in context.messages],
+    )
+    rendered = TextChatRenderer().render(view, RenderBudget())
+    messages = rendered.payload
     for index, prompt_message in enumerate(messages, start=1):
         role = prompt_message["role"]
         content = prompt_message.get("content") or ""
@@ -553,6 +586,112 @@ def _render_cognitive_trace(store: StateStore, session_id: str) -> None:
 def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
     raw_thread = event.payload.get("thread_id")
     return isinstance(raw_thread, dict) and raw_thread.get("key") == f"session:{session_id}"
+
+
+def _debug_prompt_view(
+    session_id: str,
+    message: str,
+    chat_history: list[dict[str, Any]],
+) -> CognitionView:
+    situation = Situation(id=SituationId("situation:debug-prompt"))
+    thread_id = ThreadId.from_session(session_id)
+    subject_value = Subject()
+    window = ContextWindow(
+        thread_id=thread_id,
+        counterpart=None,
+        foreground=[],
+        background=None,
+        recalled=[],
+        recent_judgments=[],
+        matched_procedures=[],
+        subject_at=subject_ref(subject_value.id),
+        situation_at=situation_ref(situation.id),
+        assembled_at=Instant(""),
+    )
+    return CognitionView(
+        subject=subject_value,
+        counterpart=None,
+        situation=situation,
+        window=window,
+        assembled_at=Instant(""),
+        current_query=message,
+        chat_history=chat_history,
+    )
+
+
+@cognition_app.command("graph")
+def cognition_graph(
+    format: Annotated[
+        str,
+        typer.Option("--format", help="Graph format: mermaid or dot."),
+    ] = "mermaid",
+    subject: Annotated[
+        str | None,
+        typer.Option("--subject", help="Reserved for future multi-subject inspection."),
+    ] = None,
+) -> None:
+    """Render a minimal active-belief cognition graph."""
+
+    del subject
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projections = default_projection_registry(log)
+    subject_value = projections.get_typed(SubjectProjection).current()
+    thread_id = ThreadId.cognition(subject_value.id, "inspection")
+    view = build_view(
+        thread_id=thread_id,
+        situation=Situation(id=SituationId("situation:cognition-graph")),
+        projections=projections,
+    )
+    rendered = GraphSnapshotRenderer(format=format).render(view, RenderBudget(max_tokens=128))
+    console.print(str(rendered.payload), markup=False)
+
+
+@cognition_app.command("diff")
+def cognition_diff(
+    tick_id_a: Annotated[str, typer.Argument(help="Earlier tick id.")],
+    tick_id_b: Annotated[str, typer.Argument(help="Later tick id.")],
+) -> None:
+    """Render event-kind changes between two ticks."""
+
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    view = _inspection_view(store)
+    rendered = DiffRenderer(log, tick_id_a=tick_id_a, tick_id_b=tick_id_b).render(
+        view,
+        RenderBudget(max_tokens=256),
+    )
+    console.print(str(rendered.payload), markup=False)
+
+
+@cognition_app.command("evidence")
+def cognition_evidence(
+    belief_id: Annotated[str, typer.Argument(help="Belief id to trace.")],
+) -> None:
+    """Render evidence events for one belief id."""
+
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    view = _inspection_view(store)
+    rendered = EvidenceRenderer(log, belief_id=belief_id).render(
+        view,
+        RenderBudget(max_tokens=256),
+    )
+    console.print(str(rendered.payload), markup=False)
+
+
+def _inspection_view(store: StateStore) -> CognitionView:
+    log = SQLiteEventLog(store)
+    projections = default_projection_registry(log)
+    subject_value = projections.get_typed(SubjectProjection).current()
+    return build_view(
+        thread_id=ThreadId.cognition(subject_value.id, "inspection"),
+        situation=Situation(id=SituationId("situation:cognition-inspection")),
+        projections=projections,
+    )
 
 
 @cognition_app.command("reflections")

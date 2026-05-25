@@ -48,10 +48,10 @@ def test_agent_uses_context_window_foreground_for_llm_input(tmp_path) -> None:
     result = agent.respond("current", session_id="s1")
 
     assert result.response == "context response"
-    non_system_messages = [
-        message["content"] for message in provider.calls[-1] if message["role"] != "system"
-    ]
-    assert non_system_messages == ["first", "current"]
+    rendered_contents = "\n".join(str(message.get("content", "")) for message in provider.calls[-1])
+    assert "Foreground:" in rendered_contents
+    assert "first" in rendered_contents
+    assert provider.calls[-1][-1] == {"role": "user", "content": "current"}
 
 
 def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> None:

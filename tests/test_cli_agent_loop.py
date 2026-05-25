@@ -65,7 +65,7 @@ def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path
 
     assert result.exit_code == 0
     assert "Message 1 [system]" in result.output
-    assert "Reactive cognition is active" in result.output
+    assert "Identity: Alpha Agent" in result.output
     assert "hello" in result.output
     assert "hi" in result.output
     assert "continue" in result.output
