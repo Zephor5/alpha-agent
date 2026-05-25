@@ -12,6 +12,7 @@ from alpha_agent.cognition.models import (
     NLStatement,
     Reference,
     SituationRef,
+    ThreadId,
     ValueKind,
     ValueLens,
 )
@@ -28,6 +29,7 @@ class Judger:
         value_lens: ValueLens,
         *,
         situation: SituationRef,
+        thread_id: ThreadId | None = None,
         emitter: EventEmitter,
         tick_id: str,
         causal_parent: EventId,
@@ -53,6 +55,10 @@ class Judger:
             outputs=[Reference("judgment", str(item.id)) for item in judgments],
             rationale=NLStatement("Judged interpretation with the current value lens."),
             causal_parents=[causal_parent],
-            payload={"tick_id": tick_id, "judgment_count": len(judgments)},
+            payload={
+                "tick_id": tick_id,
+                "judgment_count": len(judgments),
+                "thread_id": thread_id.to_record() if thread_id is not None else None,
+            },
         )
         return Emitted(judgments, event)

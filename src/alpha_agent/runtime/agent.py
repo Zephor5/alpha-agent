@@ -21,11 +21,12 @@ from alpha_agent.cognition.coordinator import (
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
-from alpha_agent.cognition.models import Instant, LoopPriority, Stimulus, StimulusKind, ThreadId
+from alpha_agent.cognition.models import Instant, LoopPriority, Stimulus, StimulusKind
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.stages.effector import Effector, build_reactive_messages
 from alpha_agent.cognition.stages.types import Outcome
+from alpha_agent.cognition.threads import StimulusRouter
 from alpha_agent.llm.base import (
     ChatCompletionToolCall,
     ChatMessage,
@@ -270,7 +271,11 @@ class AlphaAgent:
                 kind=StimulusKind.USER_MESSAGE,
                 source=counterpart_ref,
                 payload=user_message,
-                thread_id=ThreadId.from_session(session_id, source_metadata),
+                thread_id=StimulusRouter.route_kind(
+                    StimulusKind.USER_MESSAGE,
+                    payload={"source_metadata": dict(source_metadata or {})},
+                    session_id=session_id,
+                ),
                 received_at=Instant(utc_now_iso()),
             )
 

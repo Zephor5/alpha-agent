@@ -160,3 +160,21 @@ CREATE TABLE IF NOT EXISTS belief_about_index (
 
 CREATE INDEX IF NOT EXISTS idx_belief_about_lookup
     ON belief_about_index(about_kind, about_id, belief_id);
+
+CREATE TABLE IF NOT EXISTS context_window_view (
+    thread_id TEXT PRIMARY KEY,
+    thread_kind TEXT NOT NULL,
+    counterpart_id TEXT,
+    foreground_ids TEXT NOT NULL DEFAULT '[]',
+    anchored_ids TEXT NOT NULL DEFAULT '[]',
+    recent_judgment_ids TEXT NOT NULL DEFAULT '[]',
+    matched_procedure_ids TEXT NOT NULL DEFAULT '[]',
+    background_summary_id TEXT,
+    last_event_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ctx_window_counterpart
+    ON context_window_view(counterpart_id, thread_kind);
+CREATE INDEX IF NOT EXISTS idx_ctx_window_kind
+    ON context_window_view(thread_kind);

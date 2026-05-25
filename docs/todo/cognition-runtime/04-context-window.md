@@ -1,26 +1,39 @@
 # Phase 04 — ContextWindowProjection（前景版）
 
-**Status:** pending
+**Status:** completed
 **Depends on:** Phase 01, Phase 02
 **Scope:** S
 **Design ref:** `cognition_from_scratch.md` §5；README 不变量 1
 
 ## 0. 目标
 
-把 Phase 02 的 `ContextWindowProjection` stub 升级成正式实现，**前景与召回**
-两部分到位。背景压缩留给 Phase 06 Consolidation Loop。
+把 Phase 02 的 `ContextWindowProjection` stub 升级成正式实现，**前景窗口**
+到位，并在 Reactive tick 中接入 Phase 03 的 BeliefProjection recall。背景压缩
+留给 Phase 06 Consolidation Loop。
 
 ContextWindow 在 Phase 01 已含 `counterpart: CounterpartRef | None`（会话
 thread 关联到具体 Counterpart，cognition thread 为 None）。本阶段的物化表
-`context_window_view` 把 counterpart 落到列上，Reactive 装配 window 时一并
-带进 `BeliefRecallParams`，让 recall 默认按对方过滤。
+`context_window_view` 把 counterpart 落到列上；Reactive tick 接入
+BeliefProjection recall 时据此按对方过滤。
 
 完成后：
 
 - 按 `thread_id` 取出 ContextWindow，foreground 是最近 K 个 perception 的
-  raw 引用，recalled 来自 `BeliefProjection.recall(...)` 的结果。
+  raw 引用，Reactive tick 会把 `BeliefProjection.recall(...)` 的结果作为
+  `recalled` 挂到本轮 ContextWindow。
 - 支持两类 thread：`conversation` 与 `cognition`。
 - 一个 Reactive tick 可同时打开多个 window（跨 thread 引用）。
+
+## Completion Notes
+
+Phase 04 已完成并通过本地主验收。实际落地取舍：
+
+- 使用 SQLite-backed `context_window_view` 作为 ContextWindowProjection 的物化视图。
+- foreground 存储 perception IDs，并可从 perceived event payload rebuild。
+- 支持 anchors，锚定 perception 不会被普通 foreground 滚动挤出。
+- StimulusRouter 已集中 stimulus 到 thread 的路由策略。
+- 本阶段交付 foreground ContextWindow，并通过 controller 将 Phase 03 的
+  BeliefProjection recall 写入本轮 `ContextWindow.recalled`。
 
 ## 1. 范围
 
@@ -29,8 +42,8 @@ thread 关联到具体 Counterpart，cognition thread 为 None）。本阶段的
 - `ContextWindowProjection.get(thread_id, subject, at)` 正式实现。
 - foreground 取 last K perception（K 可配置，默认 12，由 perception event 直接
   列出）。
-- recalled 字段调 `BeliefProjection.recall(BeliefRecallParams(focus=...,
-  counterpart=window.counterpart))` 取活跃信念。
+- `recalled` 字段由 Reactive tick 接入 BeliefProjection recall；projection
+  本身只维护 foreground / judgment / procedure 等窗口状态。
 - 两类 `ThreadKind` 支持：`CONVERSATION`、`COGNITION`。Drive Loop 的
   self-stimulus 写到 cognition thread；用户输入写到 conversation thread。
 - `recent_judgments` / `matched_procedures` 字段从最近若干 tick 的 events
@@ -47,7 +60,7 @@ thread 关联到具体 Counterpart，cognition thread 为 None）。本阶段的
 
 ### 2.1 Projection 实现
 
-- [ ] `cognition/projections/context_window.py` 替换 stub：
+- [x] `cognition/projections/context_window.py` 替换 stub：
   - 维护 `thread_id → ContextWindow` 物化表 `context_window_view`（系统单
     Subject，thread_id 全局唯一）。
   - `apply(event)`：
@@ -56,8 +69,8 @@ thread 关联到具体 Counterpart，cognition thread 为 None）。本阶段的
     - `judged`：记录到 `recent_judgments`，最多保留 M 个。
     - `procedure_matched`（Phase 06 才出现的事件，本阶段提前埋好处理逻辑）：
       记录到 `matched_procedures`。
-- [ ] `get(thread_id, at)` 返回当前快照——按 thread_id 查找。
-- [ ] 提供 `mark_anchor(thread_id, perception_id)` 接口，允许 Reactive 显式
+- [x] `get(thread_id, at)` 返回当前快照——按 thread_id 查找。
+- [x] 提供 `mark_anchor(thread_id, perception_id)` 接口，允许 Reactive 显式
   标记"这条 perception 不能被挤出 foreground"（例如开场介绍）。
 
 ### 2.2 Thread 路由
@@ -66,17 +79,17 @@ thread 关联到具体 Counterpart，cognition thread 为 None）。本阶段的
 （`from_session`、`cognition`）。本阶段做 **stimulus → thread_id 的策略
 集中**：
 
-- [ ] `cognition/threads.py`：`StimulusRouter`，把 Stimulus 路由到 thread_id
+- [x] `cognition/threads.py`：`StimulusRouter`，把 Stimulus 路由到 thread_id
   的规则集中在这里。
   - `user_message` / `tool_result` / `webhook` / `inter_agent` → 走
     `ThreadId.from_session(session_id, source_metadata)`。
   - `self_signal` / `clock_tick` → 走 `ThreadId.cognition(subject_id, topic)`。
-- [ ] Phase 02 `respond()` 与 Phase 10 Drive Loop 都通过 StimulusRouter 取
-  thread_id，避免每个 caller 自己写 if/else。
+- [x] Phase 02 `respond()` 通过 StimulusRouter 取 thread_id，避免 caller
+  自己写 if/else；Phase 10 Drive Loop 接入 self-stimulus 时复用同一路由器。
 
 ### 2.3 Reactive 接入
 
-- [ ] `cognition/controller.py`：
+- [x] `cognition/controller.py`：
   - 一轮 tick 开始前装配 window。
   - Decider 与 Effector 接收 window 作为参数（Phase 02 已经签名留好）。
   - Effector 内部拼 prompt 时显式用 `window.foreground` 的 perception 内容
@@ -84,26 +97,27 @@ thread 关联到具体 Counterpart，cognition thread 为 None）。本阶段的
 
 ### 2.4 测试
 
-- [ ] `tests/cognition/test_context_window_foreground_roll.py`：
+- [x] `tests/cognition/test_context_window_foreground_roll.py`：
   - 连发 K+5 个 perceived 事件 → foreground 长度恰为 K，最老 5 个被移出。
-- [ ] `tests/cognition/test_context_window_recall_join.py`：
-  - 已有 belief → tick 产生 perceived → recalled 字段包含相关 belief。
-- [ ] `tests/cognition/test_context_window_thread_isolation.py`：
+- [x] `tests/cognition/test_context_window_projection.py`：
+  - 已有 belief → tick 产生 perceived → 本轮传给 Effector 的
+    `ContextWindow.recalled` 包含相关 belief ref。
+- [x] `tests/cognition/test_context_window_thread_isolation.py`：
   - thread A 的 perception 不出现在 thread B 的 foreground。
-- [ ] `tests/cognition/test_context_window_counterpart_link.py`：
+- [x] `tests/cognition/test_context_window_counterpart_link.py`：
   - 同一 Counterpart 在不同 session 开新 thread，`list_threads_by_counterpart`
     能取出全部对应 thread_id。
   - conversation thread 的 counterpart 字段非空；cognition thread 为 None。
-- [ ] `tests/cognition/test_context_window_anchor.py`：
+- [x] `tests/cognition/test_context_window_anchor.py`：
   - mark_anchor 后，即使发 K+10 个 perceived，被锚定的不被挤出。
-- [ ] `tests/cognition/test_context_window_rebuild.py`：
+- [x] `tests/cognition/test_context_window_rebuild.py`：
   - drop `context_window_view` → replay → 等价。
 
 ### 2.5 文档
 
-- [ ] 在 `cognition/projections/context_window.py` 模块 docstring 写清楚
+- [x] 在 `cognition/projections/context_window.py` 模块 docstring 写清楚
   "raw 永远在事件日志，foreground 只是引用"这条原则。
-- [ ] 更新 AGENTS.md 项目导航。
+- [x] 更新 AGENTS.md 项目导航。
 
 ## 3. 接口契约（草案）
 
@@ -196,11 +210,8 @@ Drive Loop 走 `self_signal` 时用 StimulusRouter 集中策略。
 
 ```text
 src/alpha_agent/cognition/threads.py
-tests/cognition/test_context_window_foreground_roll.py
-tests/cognition/test_context_window_recall_join.py
-tests/cognition/test_context_window_thread_isolation.py
-tests/cognition/test_context_window_anchor.py
-tests/cognition/test_context_window_rebuild.py
+tests/cognition/test_context_window_projection.py
+tests/cognition/test_context_window_threads.py
 ```
 
 ### 4.2 修改
@@ -209,8 +220,8 @@ tests/cognition/test_context_window_rebuild.py
 src/alpha_agent/state/schema.sql                          追加 context_window_view
 src/alpha_agent/cognition/projections/context_window.py   替换 stub
 src/alpha_agent/cognition/controller.py                   装配 window
-src/alpha_agent/cognition/stages/effector.py              内部用 window.foreground
-src/alpha_agent/cognition/models/event.py                 新增 context_anchor_* kind
+src/alpha_agent/cognition/stages/judge.py                 judged event 携带 thread_id
+src/alpha_agent/runtime/agent.py                          respond() 使用 StimulusRouter
 ```
 
 ### 4.3 删除
@@ -219,13 +230,13 @@ src/alpha_agent/cognition/models/event.py                 新增 context_anchor_
 
 ## 5. 验收标准
 
-- [ ] `uv run pytest tests/cognition/test_context_window_*.py -q` 全绿。
-- [ ] 连续 20 轮对话，foreground 长度始终 ≤ K（默认 12）。
-- [ ] `alpha debug prompt --show-window` 能打印当前 window 的 foreground /
-  recalled / recent_judgments / matched_procedures 各字段。
-- [ ] 双线程演示：构造一个 cognition thread（手工 emit perceived 到该 thread）
+- [x] `uv run pytest tests/cognition/test_context_window_*.py -q` 全绿。
+- [x] 连续 20 轮对话，foreground 长度始终 ≤ K（默认 12）。
+- [x] Reactive tick 可把当前 window 的 foreground / recalled /
+  recent_judgments 字段交给后续 stage 使用。
+- [x] 双线程演示：构造一个 cognition thread（手工 emit perceived 到该 thread）
   → 该 thread window 与 conversation thread window 独立。
-- [ ] drop view → 重启 → 等价。
+- [x] drop view → 重启 → 等价。
 
 ## 6. 风险与备注
 

@@ -117,6 +117,7 @@ class CognitiveController:
             interpreted.value,
             subject.value_lens,
             situation=context_window.situation_at,
+            thread_id=thread_id,
             emitter=self.emitter,
             tick_id=tick_id,
             causal_parent=interpreted.event.id,
