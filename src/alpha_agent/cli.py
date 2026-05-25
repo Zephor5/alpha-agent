@@ -14,6 +14,7 @@ from rich.table import Table
 
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import CognitiveEvent
+from alpha_agent.cognition.projections.reflection import ReflectionProjection, target_to_parts
 from alpha_agent.config import (
     AlphaConfig,
     default_config_path,
@@ -60,11 +61,13 @@ debug_app = typer.Typer(help="Debug commands.")
 gateway_app = typer.Typer(help="Gateway operational commands.")
 config_app = typer.Typer(help="Configuration commands.")
 daemon_app = typer.Typer(help="Daemon runtime commands.")
+cognition_app = typer.Typer(help="Cognition inspection commands.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(debug_app, name="debug")
 app.add_typer(gateway_app, name="gateway")
 app.add_typer(config_app, name="config")
 app.add_typer(daemon_app, name="daemon")
+app.add_typer(cognition_app, name="cognition")
 
 DAEMON_START_TIMEOUT_SECONDS = 5.0
 DAEMON_START_POLL_INTERVAL_SECONDS = 0.1
@@ -550,6 +553,50 @@ def _render_cognitive_trace(store: StateStore, session_id: str) -> None:
 def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
     raw_thread = event.payload.get("thread_id")
     return isinstance(raw_thread, dict) and raw_thread.get("key") == f"session:{session_id}"
+
+
+@cognition_app.command("reflections")
+def cognition_reflections(
+    severity: Annotated[
+        str | None,
+        typer.Option("--severity", help="Filter by severity, e.g. info, warning, blocker."),
+    ] = None,
+    last: Annotated[
+        int,
+        typer.Option("--last", min=1, help="Maximum number of recent reflections to show."),
+    ] = 20,
+) -> None:
+    """List recent L1 reflection findings."""
+
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projection = ReflectionProjection(store, event_log=log, auto_rebuild=True)
+    rows = projection.list_recent(last=last, severity=severity)
+    table = Table(title="Cognition Reflections")
+    table.add_column("Created")
+    table.add_column("Severity")
+    table.add_column("Kind")
+    table.add_column("Target")
+    table.add_column("Finding")
+    for item in rows:
+        target_kind, target_id = target_to_parts(item.target)
+        table.add_row(
+            str(item.created_at),
+            str(item.severity),
+            str(item.kind),
+            f"{target_kind}:{target_id}",
+            str(item.finding),
+        )
+    console.print(table)
+    for item in rows:
+        target_kind, target_id = target_to_parts(item.target)
+        typer.echo(
+            f"{item.created_at} severity={item.severity} kind={item.kind} "
+            f"target={target_kind}:{target_id} finding={item.finding}"
+        )
+    if not rows:
+        console.print("(none)", markup=False)
 
 
 def main() -> None:

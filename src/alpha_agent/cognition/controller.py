@@ -11,7 +11,9 @@ from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.models import Stimulus, ThreadId
 from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefRecallParams
 from alpha_agent.cognition.projections.context_window import ContextWindowProjection
+from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.projections.procedure import ProcedureProjection
+from alpha_agent.cognition.projections.reflection import ReflectionProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.projections.subject import SubjectProjection
 from alpha_agent.cognition.stages import (
@@ -70,7 +72,7 @@ class CognitiveController:
         self.decider = decider or Decider()
         self.effector = effector or Effector(llm_provider=llm, tool_registry=tools)
         self.feedback_reader = feedback_reader or FeedbackReader()
-        self.reflector = reflector or ReflectorL1()
+        self.reflector = reflector or ReflectorL1(self.projections)
         self.reviser = reviser or Reviser()
 
     def reactive_tick(self, stimulus: Stimulus, thread_id: ThreadId) -> LoopResult:
@@ -155,8 +157,15 @@ class CognitiveController:
         )
         self._apply_projection(feedback.event)
         reflected = self.reflector.audit(
-            feedback.value,
+            perceived.value,
+            attended.value,
+            interpreted.value,
+            judged.value,
+            decided.value,
             acted.value,
+            feedback.value,
+            subject,
+            context_window,
             emitter=self.emitter,
             tick_id=tick_id,
             causal_parent=feedback.event.id,
@@ -211,6 +220,16 @@ def default_projection_registry(event_log: EventLog) -> ProjectionRegistry:
             auto_rebuild=True,
         )
     )
+    store = getattr(event_log, "store", None)
+    if store is not None:
+        registry.register(CounterpartProjection(store))
     registry.register(ProcedureProjection())
     registry.register(ContextWindowProjection(event_log))
+    registry.register(
+        ReflectionProjection(
+            store,
+            event_log=event_log,
+            auto_rebuild=True,
+        )
+    )
     return registry

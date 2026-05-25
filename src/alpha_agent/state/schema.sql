@@ -178,3 +178,21 @@ CREATE INDEX IF NOT EXISTS idx_ctx_window_counterpart
     ON context_window_view(counterpart_id, thread_kind);
 CREATE INDEX IF NOT EXISTS idx_ctx_window_kind
     ON context_window_view(thread_kind);
+
+CREATE TABLE IF NOT EXISTS reflection_view (
+    id TEXT PRIMARY KEY,
+    tick_id TEXT NOT NULL,
+    level TEXT NOT NULL DEFAULT 'L1',
+    kind TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    target_kind TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    finding TEXT NOT NULL,
+    suggested_remedy TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reflection_severity
+    ON reflection_view(severity, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reflection_kind
+    ON reflection_view(kind, created_at DESC);

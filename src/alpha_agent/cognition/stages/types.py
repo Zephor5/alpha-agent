@@ -56,8 +56,9 @@ class Outcome:
 @dataclass(frozen=True)
 class Feedback:
     matched_expected: bool
-    surprises: list[str]
-    affected_belief_ids: list[BeliefId]
+    surprises: list[str] = field(default_factory=list)
+    affected_belief_ids: list[BeliefId] = field(default_factory=list)
+    formed_belief_ids: list[BeliefId] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

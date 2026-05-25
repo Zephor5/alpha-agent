@@ -20,13 +20,14 @@ src/
   alpha_agent/
     cli.py            Typer CLI entry point for chat, ask, config, skills, debug, and gateway commands.
     config.py         Runtime configuration loading, defaults, environment overrides, and persistent config handling.
-    cognition/        Cognition foundations, Reactive loop wiring, real BeliefProjection, and foreground ContextWindowProjection.
+    cognition/        Cognition foundations, Reactive loop wiring, belief/context/reflection projections, and L1 reflectors.
       controller.py   CognitiveController orchestration for Reactive single tick.
       stages/         Perceive, Attend, Interpret, Judge, Decide, Act, Feedback, Reflect, and Revise stages.
-      projections/    Subject/counterpart projections, SQLite-backed BeliefProjection, foreground ContextWindowProjection, and procedure stubs.
+      reflectors/     Deterministic L1 reflection rules for read-only Reactive tick audits.
+      projections/    Subject/counterpart projections, SQLite-backed BeliefProjection, ReflectionProjection, foreground ContextWindowProjection, and procedure stubs.
     runtime/          Core turn/session execution, event models, prompt building, and runtime tool wiring.
       counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
-    state/            SQLite-backed runtime tables plus cognition event/projection tables, including cognitive_events, counterpart_view, belief_view, and context_window_view.
+    state/            SQLite-backed runtime tables plus cognition event/projection tables, including cognitive_events, counterpart_view, belief_view, context_window_view, and reflection_view.
     llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
     gateway/          Gateway operation shell, session routing, adapter contracts, status, logging, and gateway config.
     tools/            Tool abstractions and registry used by the runtime.

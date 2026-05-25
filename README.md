@@ -51,9 +51,11 @@ recallable across sessions through a deterministic projection over cognition
 events. Phase 04 ContextWindowProjection is also complete for foreground
 context: `context_window_view` stores thread-local foreground perception IDs,
 anchors, and rebuildable window state. Belief recall is joined into
-`ContextWindow.recalled` during the Reactive tick. Procedure projection remains
-stubbed, and reflection, consolidation, value lens, renderer extraction, and
-drive loop remain staged under `docs/todo/cognition-runtime/`.
+`ContextWindow.recalled` during the Reactive tick. Phase 05 L1 reflection is
+also complete: every tick emits a `reflected` event, with rule findings
+materialized into `reflection_view`. Procedure projection remains stubbed, and
+consolidation, value lens, renderer extraction, and drive loop remain staged
+under `docs/todo/cognition-runtime/`.
 
 ## Install
 
@@ -247,16 +249,17 @@ The current SQLite state baseline is deliberately narrow:
   retracted beliefs, with deterministic recall across sessions.
 - `context_window_view`: Phase 04 materialized view for thread-local foreground
   ContextWindow state, including perception IDs and anchors.
+- `reflection_view`: Phase 05 materialized view for L1 reflection findings.
 
 Successful user turns now enter the Reactive tick before producing a response.
-BeliefProjection and foreground ContextWindowProjection are now real
-SQLite-backed projections. Procedure projection, background compression, and
-renderer-driven prompt assembly remain pending.
+BeliefProjection, foreground ContextWindowProjection, and ReflectionProjection
+are now real SQLite-backed projections. Procedure projection, background
+compression, and renderer-driven prompt assembly remain pending.
 
 ## Current Limitations
 
-- Procedure projection, reflection, consolidation, value lens, renderer
-  extraction, and drive loop are still pending.
+- Procedure projection, consolidation, value lens, renderer extraction, and drive
+  loop are still pending.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
@@ -267,13 +270,14 @@ renderer-driven prompt assembly remain pending.
 2. Cognition runtime Phase 02: reactive loop and counterpart routing. Completed.
 3. Cognition runtime Phase 03: belief projection. Completed.
 4. Cognition runtime Phase 04: foreground context window. Completed.
-5. Cognition runtime Phase 05+: reflection, consolidation, value lens, renderer
-   extraction, and drive loop.
-6. Tool execution system.
-7. Local files / notes ingestion.
-8. API server.
-9. Web UI.
-10. Channel integrations.
+5. Cognition runtime Phase 05: Reflector L1. Completed.
+6. Cognition runtime Phase 06+: consolidation, value lens, renderer extraction,
+   and drive loop.
+7. Tool execution system.
+8. Local files / notes ingestion.
+9. API server.
+10. Web UI.
+11. Channel integrations.
 
 ## Development
 

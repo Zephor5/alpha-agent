@@ -23,6 +23,7 @@ class FeedbackReader:
             matched_expected=bool(outcome.text) or bool(outcome.tool_results),
             surprises=[] if outcome.text or outcome.tool_results else ["empty_outcome"],
             affected_belief_ids=[],
+            formed_belief_ids=[],
         )
         event = emitter.emit(
             CognitiveEventKind.RECEIVED_FEEDBACK,
@@ -33,6 +34,7 @@ class FeedbackReader:
                 "tick_id": tick_id,
                 "matched_expected": feedback.matched_expected,
                 "surprises": list(feedback.surprises),
+                "formed_belief_ids": [str(item) for item in feedback.formed_belief_ids],
                 "expected_feedback": str(decision.expected_feedback),
             },
         )
