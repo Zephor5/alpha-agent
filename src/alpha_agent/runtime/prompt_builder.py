@@ -1,4 +1,4 @@
-"""Prompt builder for the Phase 00 state baseline."""
+"""Deprecated Phase 00 prompt builder kept until Phase 09 renderer split."""
 
 from __future__ import annotations
 
@@ -18,14 +18,14 @@ def wrap_system_reminder(content: str) -> str:
 
 
 class PromptBuilder:
-    """Build minimal OpenAI-style chat prompts from recent session messages."""
+    """Build minimal chat prompts while Effector owns Phase 02 rendering."""
 
     system_prompt = """Identity: Alpha Agent.
 
 Behavior rules:
 - Be concise but useful.
-- Use only the current conversation transcript as context.
-- Long-term cognition is disabled in this Phase 00 baseline.
+- Use the current conversation transcript as operational context.
+- Reactive cognition is active; long-term belief/context projections are Phase 02 stubs.
 - Prefer asking clarifying questions only when necessary.
 - Keep the runtime understandable and avoid hidden agent behavior."""
 

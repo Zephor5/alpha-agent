@@ -5,6 +5,8 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from alpha_agent.cli import app
+from alpha_agent.llm.mock import MockLLMProvider
+from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
 
 
@@ -58,10 +60,39 @@ def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path
 
     assert result.exit_code == 0
     assert "Message 1 [system]" in result.output
-    assert "Long-term cognition is disabled" in result.output
+    assert "Reactive cognition is active" in result.output
     assert "hello" in result.output
     assert "hi" in result.output
     assert "continue" in result.output
+
+
+def test_debug_prompt_trace_renders_recent_cognitive_events(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    AlphaAgent(store=store, llm_provider=MockLLMProvider()).respond("hello", session_id="s1")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["debug", "prompt", "continue", "--session", "s1", "--trace"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "Cognitive Trace" in result.output
+    for kind in [
+        "perceived",
+        "attended",
+        "interpreted",
+        "judged",
+        "decided",
+        "acted",
+        "received_feedback",
+        "reflected",
+        "revised",
+    ]:
+        assert f"kind={kind}" in result.output
+    assert "tick_id=" in result.output
 
 
 def test_skills_list_reads_builtin_skills_without_state_store(tmp_path: Path) -> None:

@@ -2,9 +2,9 @@
 
 Alpha Agent is a personal agent runtime for rebuilding cognition from first
 principles. The current baseline is intentionally small and controllable: it
-runs from the CLI, stores session-level state in SQLite, builds a transparent
-prompt from recent conversation state, and uses either a mock LLM or an
-OpenAI-compatible chat completions provider.
+runs from the CLI, stores session-level and cognition state in SQLite, drives
+successful turns through a Reactive cognition tick, and uses either a mock LLM
+or an OpenAI-compatible chat completions provider.
 
 This is not a LangChain, LangGraph, LlamaIndex, AutoGen, CrewAI, or similar
 framework wrapper. The goal is to own the execution flow directly.
@@ -17,7 +17,7 @@ access, session routing, status reporting, and local operations. The intent is
 usability parity where it matters for daily use, not internal design parity.
 
 The core agent runtime remains Alpha's own design: explicit turn execution,
-SQLite-backed state, transparent prompt assembly, and direct provider/tool
+SQLite-backed state, Reactive stage orchestration, and direct provider/tool
 wiring. Hermes' plugin/provider/gateway implementation is treated as reference
 material for integration decisions, not as code to copy wholesale.
 See `docs/todo/TODO.md` for the current Hermes-informed roadmap.
@@ -29,10 +29,28 @@ foundations are now in place: typed models, the cognitive event log, projection
 infrastructure, the counterpart materialized view, and the single-subject
 LoopCoordinator.
 
-The reactive cognition loop is still pending Phase 02. The current turn
-runtime continues to use recent conversation state only; long-term recall,
-belief projection, context windows, reflection, consolidation, value lens, and
-drive loop remain staged under `docs/todo/cognition-runtime/`.
+Phase 02 Reactive tick is now wired into `AlphaAgent.respond()`. A successful
+user turn flows through Perceive, Attend, Interpret, Judge, Decide, Act,
+Feedback, Reflect, and Revise, with a shared `tick_id` in the cognitive event
+log. The Reactive loop uses non-blocking acquisition: when the single-subject
+coordinator is busy, `respond()` returns a busy result immediately, does not
+preempt the current holder, and does not write cognitive events or conversation
+messages for the rejected stimulus.
+
+The default Reactive Effector executes a bounded tool loop itself: one tool
+iteration followed by a final LLM round. `AlphaAgent.respond()` does not
+pre-build LLM input through `SessionContextManager` + `PromptBuilder`; it
+injects a runtime runner at the Effector boundary so successful turns still
+persist transcript and tool traces. Renderer extraction remains deferred to
+Phase 09. `alpha debug prompt --trace` prints the baseline prompt preview plus
+the recent cognitive event chain for the session; it is not the final Phase 09
+renderer output.
+
+Belief and procedure projection remain stubs, and the context window is still
+the Phase 02 lightweight foreground-only implementation. Real belief recall and
+real context projection are Phase 03 / Phase 04 work; reflection,
+consolidation, value lens, renderer extraction, and drive loop remain staged
+under `docs/todo/cognition-runtime/`.
 
 ## Install
 
@@ -90,7 +108,7 @@ Inspect procedural skills:
 uv run alpha skills list
 ```
 
-Print the prompt without calling the LLM:
+Print a baseline prompt preview without calling the LLM:
 
 ```bash
 uv run alpha debug prompt "summarize the current session"
@@ -215,7 +233,7 @@ only an override.
 The current SQLite state baseline is deliberately narrow:
 
 - `conversation_messages`: append-only session transcript used for current
-  prompt context.
+  successful turn context.
 - `runtime_traces`: operational turn, provider, and tool traces.
 - `gateway_session_mappings`: platform/session routing state.
 - `gateway_dedup`: inbound gateway deduplication state.
@@ -223,14 +241,15 @@ The current SQLite state baseline is deliberately narrow:
 - `counterpart_view`: Phase 01 materialized view for counterpart projection
   queries.
 
-Prompt construction uses the system prompt plus the recent conversation tail.
-There is no long-term recall or cross-session cognition until the cognition
-runtime phases connect the reactive loop and higher-level projections.
+Successful user turns now enter the Reactive tick before producing a response.
+Phase 02 still uses stub belief/procedure projections and a lightweight context
+window; there is no real long-term belief recall or full context projection
+until Phase 03 / Phase 04.
 
 ## Current Limitations
 
-- Phase 01 cognition foundations are landed, but the reactive loop is not yet
-  wired into turn execution.
+- Phase 02 Reactive tick is wired into turn execution, but belief recall and
+  context projection are still stubbed until Phase 03 / Phase 04.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
@@ -238,14 +257,14 @@ runtime phases connect the reactive loop and higher-level projections.
 ## Roadmap
 
 1. Cognition runtime Phase 01: event log foundations. Completed.
-2. Cognition runtime Phase 02+: reactive loop, counterpart routing, belief
-   projection, context window, reflection, consolidation, value lens, and drive
-   loop.
-3. Tool execution system.
-4. Local files / notes ingestion.
-5. API server.
-6. Web UI.
-7. Channel integrations.
+2. Cognition runtime Phase 02: reactive loop and counterpart routing. Completed.
+3. Cognition runtime Phase 03+: belief projection, context window, reflection,
+   consolidation, value lens, renderer extraction, and drive loop.
+4. Tool execution system.
+5. Local files / notes ingestion.
+6. API server.
+7. Web UI.
+8. Channel integrations.
 
 ## Development
 

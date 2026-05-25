@@ -1,4 +1,4 @@
-"""Explicit personal agent runtime for the Phase 00 state baseline."""
+"""Explicit personal agent runtime backed by the reactive cognition tick."""
 
 from __future__ import annotations
 
@@ -6,11 +6,26 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from alpha_agent.cognition.controller import CognitiveController, default_projection_registry
+from alpha_agent.cognition.coordinator import (
+    LockBusy,
+    LoopAcquireRequest,
+    LoopCoordinator,
+)
+from alpha_agent.cognition.emitter import EventEmitter
+from alpha_agent.cognition.event_log.base import EventLog
+from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
+from alpha_agent.cognition.models import Instant, LoopPriority, Stimulus, StimulusKind, ThreadId
+from alpha_agent.cognition.models.subject import SUBJECT_SELF
+from alpha_agent.cognition.projections.counterpart import CounterpartProjection
+from alpha_agent.cognition.stages.effector import Effector, build_reactive_messages
+from alpha_agent.cognition.stages.types import Outcome
 from alpha_agent.llm.base import (
     ChatCompletionToolCall,
     ChatMessage,
@@ -19,6 +34,7 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.runtime.counterpart_router import CounterpartRouter
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.runtime.prompt_builder import PromptBuilder, wrap_system_reminder
 from alpha_agent.runtime.session_context import SessionContextManager
@@ -79,6 +95,8 @@ class RetriedLLMCompletion:
 class AgentLoopResult:
     response: LLMResponse
     provider_tool_messages: list[ConversationMessage]
+    provider_tool_calls: list[ToolCall]
+    tool_results: list[Any]
     llm_round_count: int
     llm_retry_count: int
     tool_iteration_count: int
@@ -152,6 +170,8 @@ class AlphaAgent:
         llm_debug_logging: bool = False,
         llm_trace_log_path: str | Path | None = None,
         context_recent_tail_messages: int = 8,
+        event_log: EventLog | None = None,
+        coordinator: LoopCoordinator | None = None,
     ):
         self.store = store
         self.llm_provider = llm_provider
@@ -177,6 +197,14 @@ class AlphaAgent:
         self.llm_trace_log_path = (
             Path(llm_trace_log_path).expanduser() if llm_trace_log_path else None
         )
+        self.event_log = event_log or SQLiteEventLog(store)
+        self.emitter = EventEmitter(self.event_log)
+        self.counterpart_projection = CounterpartProjection(store)
+        self.counterpart_router = CounterpartRouter(
+            self.event_log,
+            counterpart_projection=self.counterpart_projection,
+        )
+        self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
         self._canceled_sessions: set[str] = set()
 
     def cancel(self, session_id: str) -> None:
@@ -197,6 +225,21 @@ class AlphaAgent:
         """Run one explicit agent turn."""
 
         turn_id = new_id("turn")
+        acquire_request = LoopAcquireRequest(
+            loop_name="reactive",
+            priority=LoopPriority.REACTIVE,
+            max_chunk_duration=timedelta(seconds=120),
+        )
+        acquire_context = self.coordinator.try_acquire(acquire_request)
+        try:
+            acquire_context.__enter__()
+        except LockBusy as busy:
+            return AgentTurnResult(
+                response=self._compose_busy_message(busy),
+                session_id=session_id,
+                debug={"busy": True, "holder": busy.holder, "since": busy.since},
+            )
+
         debug: dict[str, Any] = {
             "turn_id": turn_id,
             "llm_retry_count": 0,
@@ -204,10 +247,14 @@ class AlphaAgent:
             "tool_iteration_count": 0,
             "tool_call_count": 0,
             "provider_tool_call_count": 0,
-            "note": "long-term cognition disabled; see docs/todo/cognition-runtime/",
+            "note": "reactive cognition tick enabled; projections are Phase 02 stubs",
         }
         try:
             self._check_canceled(session_id, "before_user_event")
+            counterpart_ref = self.counterpart_router.upsert_from_source_metadata(
+                source_metadata,
+                emitter=self.emitter,
+            )
             user_record = self.store.append_conversation_message(
                 session_id=session_id,
                 role="user",
@@ -217,46 +264,52 @@ class AlphaAgent:
             debug["user_message_id"] = user_record.id
             debug["user_message_ordinal"] = user_record.ordinal
 
-            self._check_canceled(session_id, "before_prompt")
-            session_context = self.session_context.load(
-                session_id,
-                before_ordinal=user_record.ordinal,
-            )
-            messages = self.prompt_builder.build(user_message, session_context.messages)
             model_tools = self.tool_registry.to_llm_tool_definitions()
-            prompt_token_estimate = self.prompt_builder.estimate_prompt_tokens(
-                messages,
-                tools=model_tools or None,
-            )
-            debug["session_context_message_count"] = len(session_context.messages)
-            debug["prompt_token_estimate"] = prompt_token_estimate
 
-            loop_result = self._run_agent_loop(
-                session_id=session_id,
-                messages=messages,
-                model_tools=model_tools or None,
-                model_tool_choice="auto" if model_tools else None,
-                initial_prompt_token_estimate=prompt_token_estimate,
-                debug=debug,
+            stimulus = Stimulus(
+                kind=StimulusKind.USER_MESSAGE,
+                source=counterpart_ref,
+                payload=user_message,
+                thread_id=ThreadId.from_session(session_id, source_metadata),
+                received_at=Instant(utc_now_iso()),
             )
-            llm_response = loop_result.response
-            debug.update(
-                {
-                    "provider": llm_response.provider,
-                    "final_provider": llm_response.provider,
-                    "llm_round_count": loop_result.llm_round_count,
-                    "llm_retry_count": loop_result.llm_retry_count,
-                    "tool_iteration_count": loop_result.tool_iteration_count,
-                    "tool_call_count": loop_result.tool_call_count,
-                    "provider_tool_call_count": loop_result.provider_tool_call_count,
-                    "final_finish_reason": llm_response.finish_reason,
-                }
+
+            controller = CognitiveController(
+                event_log=self.event_log,
+                projections=default_projection_registry(self.event_log),
+                llm=self.llm_provider,
+                tools=self.tool_registry,
+                emitter=self.emitter,
+                effector=Effector(
+                    llm_provider=self.llm_provider,
+                    tool_registry=self.tool_registry,
+                    completion_runner=lambda decision, window: self._run_reactive_completion(
+                        session_id=session_id,
+                        decision=decision,
+                        window=window,
+                        model_tools=model_tools or None,
+                        model_tool_choice="auto" if model_tools else None,
+                        debug=debug,
+                    ),
+                ),
             )
+            loop_result = controller.reactive_tick(
+                stimulus=stimulus,
+                thread_id=stimulus.thread_id,
+            )
+            debug.update(loop_result.debug)
+            llm_response = loop_result.outcome.raw_llm_response
+            if not isinstance(llm_response, LLMResponse):
+                llm_response = LLMResponse(
+                    content=loop_result.response_text,
+                    model="unknown",
+                    provider="unknown",
+                )
             assistant_record = self._write_assistant_message(session_id, llm_response)
             debug["assistant_message_id"] = assistant_record.id
             debug["assistant_message_ordinal"] = assistant_record.ordinal
             return AgentTurnResult(
-                response=llm_response.content,
+                response=loop_result.response_text,
                 session_id=session_id,
                 debug=debug,
             )
@@ -281,8 +334,59 @@ class AlphaAgent:
             self.clear_cancel(session_id)
             raise
         finally:
+            acquire_context.__exit__(None, None, None)
             if session_id not in self._canceled_sessions:
                 self.clear_cancel(session_id)
+
+    def _run_reactive_completion(
+        self,
+        *,
+        session_id: str,
+        decision: Any,
+        window: Any,
+        model_tools: Sequence[LLMToolDefinitionInput] | None,
+        model_tool_choice: LLMToolChoice | None,
+        debug: dict[str, Any],
+    ) -> Outcome:
+        self._check_canceled(session_id, "before_prompt")
+        messages = build_reactive_messages(decision, window)
+        prompt_token_estimate = self.prompt_builder.estimate_prompt_tokens(
+            messages,
+            tools=model_tools,
+        )
+        debug["context_window_foreground_count"] = len(window.foreground)
+        debug["prompt_token_estimate"] = prompt_token_estimate
+        loop_result = self._run_agent_loop(
+            session_id=session_id,
+            messages=messages,
+            model_tools=model_tools,
+            model_tool_choice=model_tool_choice,
+            initial_prompt_token_estimate=prompt_token_estimate,
+            debug=debug,
+        )
+        llm_response = loop_result.response
+        return Outcome(
+            text=llm_response.content,
+            tool_calls=list(loop_result.provider_tool_calls),
+            tool_results=list(loop_result.tool_results),
+            raw_llm_response=llm_response,
+            debug={
+                "provider": llm_response.provider,
+                "final_provider": llm_response.provider,
+                "llm_round_count": loop_result.llm_round_count,
+                "llm_retry_count": loop_result.llm_retry_count,
+                "tool_iteration_count": loop_result.tool_iteration_count,
+                "tool_call_count": loop_result.tool_call_count,
+                "provider_tool_call_count": loop_result.provider_tool_call_count,
+                "final_finish_reason": llm_response.finish_reason,
+            },
+        )
+
+    def _compose_busy_message(self, busy: LockBusy) -> str:
+        return (
+            f"Agent is currently {busy.holder} "
+            f"(started at {busy.since}); please retry shortly."
+        )
 
     def _run_agent_loop(
         self,
@@ -296,6 +400,8 @@ class AlphaAgent:
     ) -> AgentLoopResult:
         conversation_messages = list(messages)
         provider_tool_messages: list[ConversationMessage] = []
+        provider_tool_calls_seen: list[ToolCall] = []
+        tool_results_seen: list[Any] = []
         llm_round_count = llm_retry_count = tool_iteration_count = 0
         tool_call_count = provider_tool_call_count = 0
         finalizing_reason: str | None = None
@@ -336,6 +442,8 @@ class AlphaAgent:
                 return AgentLoopResult(
                     response=response,
                     provider_tool_messages=provider_tool_messages,
+                    provider_tool_calls=provider_tool_calls_seen,
+                    tool_results=tool_results_seen,
                     llm_round_count=llm_round_count,
                     llm_retry_count=llm_retry_count,
                     tool_iteration_count=tool_iteration_count,
@@ -363,6 +471,7 @@ class AlphaAgent:
                 continue
 
             provider_tool_call_count += len(provider_tool_calls)
+            provider_tool_calls_seen.extend(provider_tool_calls)
             provider_tool_call_message = self._write_assistant_tool_call_message(
                 session_id=session_id,
                 calls=provider_tool_calls,
@@ -377,6 +486,7 @@ class AlphaAgent:
                 calls=provider_tool_calls,
                 recover_errors=True,
             )
+            tool_results_seen.extend(item.result for item in provider_results)
             provider_result_messages = self._write_tool_result_messages(
                 session_id=session_id,
                 results=provider_results,

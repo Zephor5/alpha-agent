@@ -42,7 +42,7 @@ def test_prompt_contains_system_recent_transcript_and_current_user_message() -> 
     messages = builder.build("what now?", history)
 
     assert [message["role"] for message in messages] == ["system", "user", "assistant", "user"]
-    assert "Long-term cognition is disabled" in messages[0]["content"]
+    assert "Reactive cognition is active" in messages[0]["content"]
     assert messages[1]["content"] == "hello"
     assert messages[2]["content"] == "hi"
     assert messages[-1]["content"] == "what now?"

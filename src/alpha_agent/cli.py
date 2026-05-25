@@ -12,6 +12,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
+from alpha_agent.cognition.models import CognitiveEvent
 from alpha_agent.config import (
     AlphaConfig,
     default_config_path,
@@ -495,8 +497,12 @@ def prompt(
         str | None,
         typer.Option("--session", "-s", help="Existing session id to include."),
     ] = None,
+    trace: Annotated[
+        bool,
+        typer.Option("--trace", help="Include recent cognitive event trace for the session."),
+    ] = False,
 ) -> None:
-    """Print the prompt without calling the LLM."""
+    """Print a baseline prompt preview and optional cognitive event trace."""
 
     config = load_config()
     store = _store(config)
@@ -510,6 +516,40 @@ def prompt(
         role = prompt_message["role"]
         content = prompt_message.get("content") or ""
         console.print(f"Message {index} [{role}]\n{content}", markup=False)
+    if trace:
+        _render_cognitive_trace(store, session_id)
+
+
+def _render_cognitive_trace(store: StateStore, session_id: str) -> None:
+    all_events = list(SQLiteEventLog(store).iter())
+    tick_ids = {
+        str(event.payload["tick_id"])
+        for event in all_events
+        if _event_belongs_to_session(event, session_id) and "tick_id" in event.payload
+    }
+    events = [
+        event
+        for event in all_events
+        if event.payload.get("tick_id") is not None
+        and str(event.payload.get("tick_id")) in tick_ids
+    ]
+    console.print("Cognitive Trace", markup=False)
+    if not events:
+        console.print("(none)", markup=False)
+        return
+    for event in events[-20:]:
+        tick_id = event.payload.get("tick_id", "-")
+        parents = ",".join(str(parent) for parent in event.causal_parents) or "-"
+        console.print(
+            f"{event.timestamp} kind={event.kind.value} tick_id={tick_id} "
+            f"id={event.id} parents={parents}",
+            markup=False,
+        )
+
+
+def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
+    raw_thread = event.payload.get("thread_id")
+    return isinstance(raw_thread, dict) and raw_thread.get("key") == f"session:{session_id}"
 
 
 def main() -> None:

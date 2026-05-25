@@ -24,7 +24,7 @@ def test_agent_responds_and_persists_conversation_messages(tmp_path) -> None:
 
     assert result.session_id == "s1"
     assert result.response == "Mock response: I heard you say: hello."
-    assert result.debug["note"] == "long-term cognition disabled; see docs/todo/cognition-runtime/"
+    assert result.debug["note"] == "reactive cognition tick enabled; projections are Phase 02 stubs"
     messages = store.list_conversation_messages("s1")
     assert [message.role for message in messages] == ["user", "assistant"]
     assert messages[0].raw_content == "hello"
@@ -35,7 +35,7 @@ def test_agent_responds_and_persists_conversation_messages(tmp_path) -> None:
     ]
 
 
-def test_agent_uses_recent_session_context_without_long_term_retrieval(tmp_path) -> None:
+def test_agent_uses_context_window_foreground_for_llm_input(tmp_path) -> None:
     store = _store(tmp_path)
     provider = _RecordingProvider("context response")
     agent = AlphaAgent(
@@ -43,16 +43,15 @@ def test_agent_uses_recent_session_context_without_long_term_retrieval(tmp_path)
         llm_provider=provider,
         context_recent_tail_messages=1,
     )
-    store.append_conversation_message(session_id="s1", role="user", raw_content="old")
-    store.append_conversation_message(session_id="s1", role="assistant", raw_content="middle")
+    agent.respond("first", session_id="s1")
 
     result = agent.respond("current", session_id="s1")
 
     assert result.response == "context response"
-    assert [message["content"] for message in provider.calls[0] if message["role"] != "system"] == [
-        "middle",
-        "current",
+    non_system_messages = [
+        message["content"] for message in provider.calls[-1] if message["role"] != "system"
     ]
+    assert non_system_messages == ["first", "current"]
 
 
 def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> None:
