@@ -20,6 +20,7 @@ from alpha_agent.cognition.models import (
 )
 from alpha_agent.cognition.projections.base import Projection
 from alpha_agent.cognition.stages.types import AttentionFocus
+from alpha_agent.cognition.value.profile_derivation import derive_value_profile
 from alpha_agent.state.store import StateStore
 
 _SCHEMA = """
@@ -355,6 +356,7 @@ class BeliefProjection(Projection):
         return Belief.from_record(raw)
 
     def _upsert_belief(self, event: CognitiveEvent, belief: Belief) -> None:
+        belief = _belief_with_derived_profile(belief)
         with self.store.transaction() as conn:
             conn.execute(
                 """
@@ -550,3 +552,22 @@ class BeliefProjection(Projection):
             }
         )
         return materialized
+
+
+def _belief_with_derived_profile(belief: Belief) -> Belief:
+    if belief.value_profile.weights:
+        return belief
+    profile = derive_value_profile(
+        belief.content,
+        belief.structure,
+        belief.cognitive_type,
+        belief.about,
+    )
+    if not profile.weights:
+        return belief
+    return Belief.from_record(
+        {
+            **belief.to_record(),
+            "value_profile": profile.to_record(),
+        }
+    )

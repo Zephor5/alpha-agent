@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from alpha_agent.cognition.controller import default_projection_registry
+from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.loops import (
     CheckpointStore,
@@ -30,6 +31,7 @@ from alpha_agent.cognition.models import (
     SituationId,
     Subject,
     ThreadId,
+    ValueKind,
     situation_ref,
     subject_ref,
 )
@@ -45,6 +47,7 @@ from alpha_agent.cognition.render import (
     conversation_message_to_chat,
 )
 from alpha_agent.cognition.render.build_view import build_view
+from alpha_agent.cognition.value.lens import default_value_lens, load_lens, save_lens
 from alpha_agent.config import (
     AlphaConfig,
     default_config_path,
@@ -91,12 +94,14 @@ gateway_app = typer.Typer(help="Gateway operational commands.")
 config_app = typer.Typer(help="Configuration commands.")
 daemon_app = typer.Typer(help="Daemon runtime commands.")
 cognition_app = typer.Typer(help="Cognition inspection commands.")
+lens_app = typer.Typer(help="Subject value lens commands.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(debug_app, name="debug")
 app.add_typer(gateway_app, name="gateway")
 app.add_typer(config_app, name="config")
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(cognition_app, name="cognition")
+cognition_app.add_typer(lens_app, name="lens")
 
 DAEMON_START_TIMEOUT_SECONDS = 5.0
 DAEMON_START_POLL_INTERVAL_SECONDS = 0.1
@@ -785,6 +790,85 @@ def _inspection_view(store: StateStore) -> CognitionView:
         situation=Situation(id=SituationId("situation:cognition-inspection")),
         projections=projections,
     )
+
+
+@lens_app.command("show")
+def cognition_lens_show(
+    subject: Annotated[
+        str | None,
+        typer.Argument(help="Subject id. Defaults to the single agent subject."),
+    ] = None,
+) -> None:
+    """Show the current subject value lens."""
+
+    config = load_config()
+    store = _store(config)
+    lens = load_lens(store, subject or "agent:self")
+    table = Table(title="Subject Value Lens")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Subject", subject or "agent:self")
+    table.add_row("Priority", ", ".join(value.value for value in lens.priorities))
+    table.add_row(
+        "Sensitivity",
+        ", ".join(
+            f"{value.value}={lens.sensitivity.get(value, 1.0):.3f}"
+            for value in lens.priorities
+        ),
+    )
+    console.print(table)
+    typer.echo("priority=" + ",".join(value.value for value in lens.priorities))
+
+
+@lens_app.command("set")
+def cognition_lens_set(
+    subject: Annotated[
+        str | None,
+        typer.Argument(help="Subject id. Defaults to the single agent subject."),
+    ] = None,
+    priority: Annotated[
+        str,
+        typer.Option(
+            "--priority",
+            help="Comma-separated ValueKind priority, e.g. safety,honesty,efficiency.",
+        ),
+    ] = "",
+) -> None:
+    """Set the subject value lens priority order."""
+
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    emitter = EventEmitter(log)
+    current = load_lens(store, subject or "agent:self")
+    priorities = _parse_lens_priority(priority) if priority else default_value_lens().priorities
+    updated = current.__class__(
+        priorities=priorities,
+        weights=current.weights,
+        sensitivity=current.sensitivity,
+    )
+    event = save_lens(
+        store,
+        emitter,
+        updated,
+        subject_id=subject or "agent:self",
+        trigger="cli lens set",
+        before=current,
+    )
+    typer.echo(f"value_lens_shifted event_id={event.id}")
+    saved = load_lens(store, subject or "agent:self")
+    typer.echo("priority=" + ",".join(value.value for value in saved.priorities))
+
+
+def _parse_lens_priority(raw: str) -> list[ValueKind]:
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    if not values:
+        raise typer.BadParameter("--priority must contain at least one ValueKind")
+    try:
+        return [ValueKind(value) for value in values]
+    except ValueError as exc:
+        allowed = ", ".join(value.value for value in ValueKind)
+        raise typer.BadParameter(f"unknown ValueKind; allowed: {allowed}") from exc
 
 
 @cognition_app.command("reflections")

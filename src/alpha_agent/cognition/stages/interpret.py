@@ -17,6 +17,7 @@ from alpha_agent.cognition.models import (
 )
 from alpha_agent.cognition.stages._payload import ref_ids
 from alpha_agent.cognition.stages.types import AttentionFocus, Emitted, Interpretation
+from alpha_agent.cognition.value.resolver import resolve_conflict
 
 
 class Interpreter:
@@ -46,9 +47,15 @@ class Interpreter:
                 continue
             if any(_same_relation_different_object(claim, belief_content) for claim in claim_texts):
                 contradict_refs.append(belief_ref(belief.id))
+        proposed_resolution = None
+        recalled_conflict = _first_recalled_conflict(recalled_beliefs)
+        if recalled_conflict is not None:
+            left, right = recalled_conflict
+            proposed_resolution = resolve_conflict(left, right, subject.value_lens)
+            contradict_refs.extend([belief_ref(left.id), belief_ref(right.id)])
         if support_refs:
             stance = "consistent"
-        elif contradict_refs:
+        elif contradict_refs or proposed_resolution is not None:
             stance = "contradicting"
         elif not claim_texts:
             stance = "ambiguous"
@@ -66,6 +73,10 @@ class Interpreter:
             novel_claims=list(focus.salient_claims) if stance == "novel" else [],
             ambiguity_notes=[] if text else ["empty stimulus"],
             source_text=text,
+            proposed_resolution=proposed_resolution,
+        )
+        resolution_payload = (
+            proposed_resolution.to_payload() if proposed_resolution is not None else None
         )
         event = emitter.emit(
             CognitiveEventKind.INTERPRETED,
@@ -79,6 +90,7 @@ class Interpreter:
                 "support_ids": ref_ids(interpretation.supporting_beliefs),
                 "contradict_ids": ref_ids(interpretation.contradicting_beliefs),
                 "novel_claim_count": len(interpretation.novel_claims),
+                "proposed_resolution": resolution_payload,
             },
         )
         return Emitted(interpretation, event)
@@ -100,6 +112,15 @@ def _same_relation_different_object(claim: str, belief: str) -> bool:
     if claim_parts is None or belief_parts is None:
         return False
     return claim_parts[:2] == belief_parts[:2] and claim_parts[2] != belief_parts[2]
+
+
+def _first_recalled_conflict(beliefs: list[Belief]) -> tuple[Belief, Belief] | None:
+    for left_index, left in enumerate(beliefs):
+        left_content = _normalize(left.content)
+        for right in beliefs[left_index + 1:]:
+            if _same_relation_different_object(left_content, _normalize(right.content)):
+                return left, right
+    return None
 
 
 def _statement_parts(value: str) -> tuple[str, str, str] | None:

@@ -32,6 +32,8 @@ class ConsolidationConfig:
     context_summary_chars: int = 480
     counterpart_digest_min_beliefs: int = 5
     counterpart_digest_min_new_beliefs: int = 3
+    value_lens_learning_threshold: int = 5
+    value_lens_sensitivity_delta: float = 0.1
     dry_run: bool = False
 
 

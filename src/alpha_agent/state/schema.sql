@@ -210,6 +210,15 @@ CREATE INDEX IF NOT EXISTS idx_reflection_severity
 CREATE INDEX IF NOT EXISTS idx_reflection_kind
     ON reflection_view(kind, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS subject_value_lens (
+    subject_id TEXT PRIMARY KEY,
+    priority TEXT NOT NULL,
+    sensitivity TEXT NOT NULL DEFAULT '{}',
+    tradeoff_preferences TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL,
+    last_event_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS procedure_view (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

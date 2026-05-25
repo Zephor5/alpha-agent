@@ -42,6 +42,7 @@ class Interpretation:
     novel_claims: list[NLStatement]
     ambiguity_notes: list[str]
     source_text: str = ""
+    proposed_resolution: Any | None = None
 
 
 @dataclass(frozen=True)

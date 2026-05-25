@@ -26,13 +26,13 @@ from alpha_agent.cognition.models import (
     Role,
     SituationId,
     UpdatePolicy,
-    ValueProfile,
     belief_ref,
     situation_ref,
     subject_ref,
 )
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
+from alpha_agent.cognition.value.profile_derivation import derive_value_profile
 
 
 def trigger(
@@ -140,7 +140,11 @@ def active_belief(
         sources=list(sources or []),
         confidence=confidence,
         applicability=Applicability("{}"),
-        value_profile=ValueProfile(),
+        value_profile=derive_value_profile(
+            content,
+            cognitive_type=cognitive_type,
+            entities=about or [],
+        ),
         relations=[],
         formed_in=situation_ref(SituationId("situation:consolidation")),
         holder_role=Role("agent"),
