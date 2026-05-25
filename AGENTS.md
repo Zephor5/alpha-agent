@@ -14,7 +14,7 @@ docs/
   cognition/          Reference docs for cognition related model.
   develop_record/     Archived working notes and completed refactor records, no need to read this unless required.
   doing/              Execution ledger for active tasks only; record during execution, then clear after self-check on completion
-  TODO.md             Integration-oriented follow-up work.
+  todo/               Todo docs
 src/
   alpha_agent/
     cli.py            Typer CLI entry point for chat, ask, memory, config, skills, debug, and gateway commands.
