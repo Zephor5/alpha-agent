@@ -46,7 +46,10 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
             "belief_entity_index",
             "belief_about_index",
             "context_window_view",
+            "context_window_background",
             "reflection_view",
+            "procedure_view",
+            "cognition_worker_checkpoint",
         }
 
 

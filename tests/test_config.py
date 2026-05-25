@@ -162,6 +162,33 @@ def test_config_cli_set_and_get(
     assert config.context_recent_tail_messages == 6
 
 
+def test_config_set_preserves_cognition_consolidation_section(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[llm]
+provider = "mock"
+
+[cognition.consolidation]
+enabled = true
+context_foreground_max = 7
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
+
+    assert result.exit_code == 0
+    saved = config_path.read_text(encoding="utf-8")
+    assert "[cognition.consolidation]" in saved
+    assert "context_foreground_max = 7" in saved
+
+
 def test_config_set_rejects_unknown_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

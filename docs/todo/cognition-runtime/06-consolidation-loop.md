@@ -1,6 +1,7 @@
 # Phase 06 — Consolidation Loop + 背景压缩
 
-**Status:** pending
+**Status:** deterministic v1 implemented; remaining idealized background and
+semantic capabilities deferred
 **Depends on:** Phase 03, Phase 04, Phase 05
 **Scope:** L
 **Design ref:** `cognition_from_scratch.md` §5.3, §6, §7（学习路径 1-3）；
@@ -55,7 +56,7 @@ thread 的 ContextWindow.background（压缩）、以及为每个 active Counter
   5. **ContextWindow.background 压缩**：见 §3.3。
   6. **Counterpart 摘要**：对每个 active Counterpart，从
      `BeliefProjection.recall_about(counterpart_ref)` 取关于该 Counterpart
-     的活跃 belief → 生成一条 cognitive_type="self"（描述对方）的
+     的活跃 belief → 生成一条 cognitive_type="concept"（关于对方的归纳）的
      digest belief，about=[counterpart_ref]，supersede 旧 digest（如有）。
      这条 digest 给 Renderer 在打开该 Counterpart 的会话时快速取用。
 - 配置：
@@ -66,8 +67,8 @@ thread 的 ContextWindow.background（压缩）、以及为每个 active Counter
 
 ### 1.2 Out of scope
 
-- ValueLens 解冲突（Phase 07）——本阶段合并 belief 时只处理完全等价的，遇到
-  矛盾就发 `consolidation_conflict_queued` 事件留给后续解决。
+- ValueLens 解冲突（Phase 07）——v1 合并 belief 时只处理完全等价项；
+  `consolidation_conflict_queued` 的生产和消费都留给 Phase 07。
 - Drive Loop（Phase 10）——Consolidation 不主动生成 stimulus。
 - 跨主体合并——主体内单独跑。
 
@@ -75,17 +76,17 @@ thread 的 ContextWindow.background（压缩）、以及为每个 active Counter
 
 ### 2.1 调度
 
-- [ ] `cognition/loops/__init__.py`。
-- [ ] `cognition/loops/consolidation.py`：`ConsolidationLoop`。
+- [x] `cognition/loops/__init__.py`。
+- [x] `cognition/loops/consolidation.py`：`ConsolidationLoop`。
   - 内部 6 个 worker（一件工作一个），每个 worker 是个 callable，**带
     checkpoint 状态**便于 resumable。
   - 提供 `run_once()` 串行跑全部 worker（CLI / 测试用）。在 worker 之间与
     worker 内分块边界 **必须** 调 `coordinator.yield_to_higher_priority()`。
   - 通过 `register_all_workers()` 把 6 个 worker 注册到共享 Scheduler；
-    生产环境由 Scheduler 持续 tick，不需要在 ConsolidationLoop 上单独
-    启停（其它 loop 同理）。
-  - 整个 loop 入口先 `coordinator.acquire(consolidation, max_chunk=30s)`。
-- [ ] `cognition/loops/scheduler.py`：通用 in-process scheduler（也给 Phase
+    v1 提供 `Scheduler.tick()` 入口，但不启动后台 daemon。
+  - v1 调度路径按 due worker acquire；`run_once()` 走同一执行路径但强制
+    跳过 trigger gate。
+- [x] `cognition/loops/scheduler.py`：通用 in-process scheduler（也给 Phase
   08 L2、Phase 10 Drive、Phase 11 L3 复用）。
   - 调度策略：**时间 + 关注内容**（见 §3.6）。每个 worker 声明
     `ScheduleTrigger`，scheduler 在 wake-up 时调 `should_run(worker, now)`
@@ -93,31 +94,33 @@ thread 的 ContextWindow.background（压缩）、以及为每个 active Counter
     Reactive busy。
   - 每个 worker 的 last_run_at / last_processed_event_id 存在
     `cognition_worker_checkpoint` 表（见 §3.7）；scheduler 启动时从表恢复。
+  - `tick()` 只 acquire/run due workers；空 backlog 不 acquire、不写 checkpoint。
+  - `last_status="yielded"` 的 checkpoint 会绕过 `min_interval`，确保让位后
+    下次 tick 立即续跑。
 
 ### 2.2 Workers
 
-- [ ] `cognition/loops/workers/promote_judgment.py`：
+- [x] `cognition/loops/workers/promote_judgment.py`：
   - 扫最近 N tick 的 `judged` 事件。
   - 按 claim normalized 聚合 → 若 ≥M 次 → emit `belief_formed`。
-- [ ] `cognition/loops/workers/merge_beliefs.py`：
+- [x] `cognition/loops/workers/merge_beliefs.py`：
   - 扫 BeliefProjection.list_active 找 normalized 等价的多条。
   - 选 confidence 最高那条留 active，其余 emit `belief_superseded`
     （指向保留的）。
-  - 遇到 normalized 不等价但 subject/predicate 同 → emit
-    `consolidation_conflict_queued`，留 Phase 07 处理。
-- [ ] `cognition/loops/workers/archive_expired.py`：
+  - v1 只处理完全等价 belief；冲突队列留 Phase 07。
+- [x] `cognition/loops/workers/archive_expired.py`：
   - applicability.valid_until < now → emit `belief_archived`。
-- [ ] `cognition/loops/workers/learn_procedure.py`：
+- [x] `cognition/loops/workers/learn_procedure.py`：
   - 扫最近若干 decided + received_feedback 事件。
   - 按 trigger pattern hash 聚合，成功 ≥K 次 → emit `procedure_learned`。
-- [ ] `cognition/loops/workers/compress_context.py`：
+- [x] `cognition/loops/workers/compress_context.py`：
   - 扫每个 thread_id 的 ContextWindow（系统只有一个 Subject，无须二维 key）。
   - 若 foreground 长度 > K 或 token 估算超阈值 → 取最老 J 条 → 生成摘要 →
     emit `context_compressed`。
   - 摘要生成 v1：deterministic concatenation + heuristic salience-based
     truncation。Phase 09 Renderer 接入后可选 LLM 摘要。
   - 必须 preserve anchors（context_anchor_set 标过的不能进 background）。
-- [ ] `cognition/loops/workers/summarize_counterpart.py`：
+- [x] `cognition/loops/workers/summarize_counterpart.py`：
   - 扫 CounterpartProjection.list_active() 取每个 Counterpart。
   - 对每个 Counterpart 调 `BeliefProjection.recall_about(counterpart_ref)`。
   - 若关于该 Counterpart 的活跃 belief 数 ≥ N（默认 5）或自上次 digest 起
@@ -135,33 +138,37 @@ thread 的 ContextWindow.background（压缩）、以及为每个 active Counter
 
 ### 2.3 ContextWindow projection 接收新事件
 
-- [ ] `cognition/projections/context_window.py` 已经在 Phase 04 留好对
+- [x] `cognition/projections/context_window.py` 已经在 Phase 04 留好对
   `context_compressed` 事件的处理；本阶段补完：把对应 perception_ids 从
   foreground 移到 background_summary_id 引用。
-- [ ] 新增 `context_window_background` 表存摘要本身（见 §3.3）。
+- [x] 新增 `context_window_background` 表存摘要本身（见 §3.3）。
 
 ### 2.4 Procedure projection 接收新事件
 
-- [ ] `cognition/projections/procedure.py` 替换 stub：
+- [x] `cognition/projections/procedure.py` 替换 stub：
   - handle `procedure_learned`、`procedure_strengthened`、
     `procedure_weakened`。
   - `match(judgments, subject)` 实现：按 trigger pattern 模糊匹配。
-- [ ] `procedure_view` 表（见 §3.4）。
+- [x] `procedure_view` 表（见 §3.4）。
 
 ### 2.5 测试
 
-- [ ] `tests/cognition/test_consolidation_promote_judgment.py`。
-- [ ] `tests/cognition/test_consolidation_merge_beliefs.py`。
-- [ ] `tests/cognition/test_consolidation_archive_expired.py`。
-- [ ] `tests/cognition/test_consolidation_learn_procedure.py`。
-- [ ] `tests/cognition/test_consolidation_compress_context.py`。
-- [ ] `tests/cognition/test_consolidation_summarize_counterpart.py`：
+- [x] `tests/cognition/test_consolidation_loop.py` covers promote judgment,
+  merge beliefs, archive expired, learn procedure, compress context,
+  summarize counterpart, checkpoint persistence, replay, idempotency, and CLI
+  dry-run in one focused v1 file. It also covers scheduler tick gating, watched
+  event cursor suppression, resumable counterpart cursors, procedure replay,
+  dry-run DB immutability, config rewrite preservation, yielded checkpoint
+  immediate resume, wrap-around cursor resume, and no-op scan yields.
+- [ ] Split into one test file per worker if Phase 06 later grows beyond v1.
+- [x] `tests/cognition/test_consolidation_summarize_counterpart.py` behavior
+  covered in `test_consolidation_loop.py`：
   - 给关于 user_a 的 6 条 active belief → run_once → 出现一条 digest
     belief，about=[user_a]，supersedes 列表为空。
   - 再加 4 条 → 再 run_once → 新 digest，supersedes 指向上一条 digest。
   - drop belief_view 重 replay → 等价。
 - [ ] `tests/cognition/test_consolidation_conflict_queued.py`。
-- [ ] `tests/cognition/test_consolidation_idempotent.py`：跑两次 run_once
+- [x] `tests/cognition/test_consolidation_idempotent.py`：跑两次 run_once
   结果不变。
 - [ ] `tests/cognition/test_consolidation_yield_opens_window_for_reactive.py`：
   - consolidation 进行中、Reactive 持续 try_acquire 收 busy → worker 在下
@@ -170,12 +177,26 @@ thread 的 ContextWindow.background（压缩）、以及为每个 active Counter
 - [ ] `tests/cognition/test_consolidation_no_preemption.py`：
   - Reactive 反复 try_acquire 收 busy 期间 consolidation 进行中，coordinator
     不发任何强制中断；consolidation 必须**自己**调 yield 才让出窗口。
-- [ ] `tests/cognition/test_cli_consolidate.py`。
+- [x] `tests/cognition/test_cli_consolidate.py` covered in
+  `test_consolidation_loop.py`.
 
 ### 2.6 文档
 
-- [ ] AGENTS.md。
-- [ ] 在 `cognition/loops/README.md` 列五个 worker 与各自阈值。
+- [x] AGENTS.md。
+- [x] 在 `cognition/loops/README.md` 列六个 worker 与各自阈值。
+
+### 2.7 v1 收口说明
+
+- [x] v1 不引入真实后台 daemon scheduler；只提供 in-process `Scheduler.tick()`
+  和 `run_once()`。
+- [x] `Scheduler.tick()` 已实现 due-worker gate；仍不表示有后台 daemon。
+- [x] Worker cursor resume 先处理 cursor 之后的排序后缀，再 wrap 到
+  lower/equal 前缀；依靠 worker 幂等性避免 yield 窗口中新出现但排序靠前的
+  work 在 watched-event cursor 前进前被跳过。
+- [x] ProcedureProjection 已替换为最小 SQLite-backed `procedure_view`。
+- [x] `learn_procedure` 是 deterministic 最小版本，不声明已具备语义抽象学习。
+- [ ] `consolidation_conflict_queued` 的完整生产与消费仍归 Phase 07。
+- [ ] 长时间 worker 与 Reactive 抢占窗口的压力测试仍待后续拆分补齐。
 
 ## 3. 接口契约
 
@@ -239,7 +260,7 @@ CREATE TABLE IF NOT EXISTS context_window_background (
     id TEXT PRIMARY KEY,
     thread_id TEXT NOT NULL,
     summary TEXT NOT NULL,
-    derived_from_event_ids TEXT NOT NULL DEFAULT '[]',
+    derived_from_perception_ids TEXT NOT NULL DEFAULT '[]',
     preserved_anchors TEXT NOT NULL DEFAULT '[]',
     compression_policy TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -288,7 +309,7 @@ CREATE INDEX IF NOT EXISTS idx_procedure_trigger
 "context_compressed"
 {
     "thread_id": ...,
-    "absorbed_event_ids": [...],
+    "absorbed_perception_ids": [...],
     "produced_summary_id": "...",
     "compression_policy": "deterministic_v1",
     "preserved_anchors": [...],
@@ -452,9 +473,8 @@ AGENTS.md
   "未来可换"。
 - **Resumable worker 是硬要求，不是 nice-to-have**。每个 worker 必须在
   yield 边界 checkpoint 自己的进度（最近处理到哪条 belief / Counterpart /
-  thread）；下次 run_once 从 checkpoint 继续。否则一旦 Reactive 让位次数多，
-  worker 会反复从头扫描永远跑不完。checkpoint 存储建议放
-  `state/consolidation_checkpoint` 表（简单 key-value）。
+  thread / pattern）；下次 run_once 从 checkpoint 继续。v1 使用
+  `cognition_worker_checkpoint.metadata` 存 deterministic cursor。
 - **30 秒 chunk 不是绝对值**。复杂 worker（如 LLM 摘要 if 启用）单步可能 >
   30s。worker 实现者应在每个 belief / Counterpart / thread 处理完毕后立即调
   yield；30s 是"最长应该容忍的非 yield 窗口"。
@@ -464,8 +484,8 @@ AGENTS.md
 - **学习 procedure 的误报**。规则化 trigger pattern 容易学到"看似规律的偶然
   连续"。设置较高阈值（K ≥ 3）+ trigger normalize 限制（必须含相同主要工具
   / 同类动作）。
-- **conflict_queued 事件不消费会堆积**。Phase 07 来消费。本阶段在 CLI
-  metrics 里把这个队列长度暴露出来。
+- **conflict_queued deferred**。Phase 06 v1 不生产也不消费冲突队列；
+  Phase 07 负责引入冲突事件与队列指标。
 - **单 Subject 调度**。v1 每次 run_once 只处理 `SUBJECT_SELF`。如果将来要扩
   展到多主体，必须另开设计文档；本计划内不要引入 subject-by-subject 调度。
 

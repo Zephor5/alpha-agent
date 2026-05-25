@@ -16,6 +16,7 @@ class CognitiveType(StrEnum):
     SOCIAL = "social"
     TEMPORAL = "temporal"
     META = "meta"
+    CONCEPT = "concept"
 
 
 class ValueKind(StrEnum):

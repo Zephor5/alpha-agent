@@ -609,7 +609,7 @@ ContextWindow（数据结构）   非认知，view
 ```python
 emit("context_compressed", {
     "thread_id": ...,
-    "absorbed_event_ids": [...],
+    "absorbed_perception_ids": [...],
     "produced_summary": ...,
     "compression_policy": "...",
     "actor": "ConsolidationLoop",

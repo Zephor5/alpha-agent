@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -14,6 +16,12 @@ from rich.table import Table
 
 from alpha_agent.cognition.controller import default_projection_registry
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
+from alpha_agent.cognition.loops import (
+    CheckpointStore,
+    ConsolidationConfig,
+    ConsolidationLoop,
+    Scheduler,
+)
 from alpha_agent.cognition.models import (
     CognitiveEvent,
     ContextWindow,
@@ -681,6 +689,91 @@ def cognition_evidence(
         RenderBudget(max_tokens=256),
     )
     console.print(str(rendered.payload), markup=False)
+
+
+@cognition_app.command("consolidate")
+def cognition_consolidate(
+    now: Annotated[
+        bool,
+        typer.Option("--now", help="Run one synchronous consolidation pass."),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview worker reports without writing events."),
+    ] = False,
+) -> None:
+    """Run the Phase 06 consolidation loop once."""
+
+    if not now:
+        raise typer.BadParameter("Only --now is supported by the v1 in-process scheduler.")
+    config = load_config()
+    consolidation_config = ConsolidationConfig(
+        enabled=config.cognition_consolidation_enabled,
+        interval_seconds=config.cognition_consolidation_interval_seconds,
+        judgment_repeat_window=config.cognition_consolidation_judgment_repeat_window,
+        judgment_repeat_threshold=config.cognition_consolidation_judgment_repeat_threshold,
+        procedure_success_threshold=config.cognition_consolidation_procedure_success_threshold,
+        context_foreground_max=config.cognition_consolidation_context_foreground_max,
+        context_absorb_batch=config.cognition_consolidation_context_absorb_batch,
+        context_summary_chars=config.cognition_consolidation_context_summary_chars,
+        counterpart_digest_min_beliefs=config.cognition_consolidation_counterpart_digest_min_beliefs,
+        counterpart_digest_min_new_beliefs=(
+            config.cognition_consolidation_counterpart_digest_min_new_beliefs
+        ),
+        dry_run=dry_run,
+    )
+    if dry_run:
+        with tempfile.TemporaryDirectory(prefix="alpha-consolidation-dry-run-") as tmp_dir:
+            store = _dry_run_store(config, Path(tmp_dir))
+            reports = _run_consolidation_once(store, consolidation_config)
+    else:
+        reports = _run_consolidation_once(_store(config), consolidation_config)
+    table = Table(title="Cognition Consolidation")
+    table.add_column("Worker")
+    table.add_column("Inspected", justify="right")
+    table.add_column("Emitted", justify="right")
+    table.add_column("Status")
+    for item in reports:
+        table.add_row(
+            item.worker,
+            str(item.inspected),
+            str(item.emitted),
+            item.new_checkpoint.last_status,
+        )
+    console.print(table)
+    typer.echo(
+        "dry_run="
+        f"{str(dry_run).lower()} workers={len(reports)} "
+        f"emitted={sum(item.emitted for item in reports)}"
+    )
+
+
+def _run_consolidation_once(
+    store: StateStore,
+    consolidation_config: ConsolidationConfig,
+):
+    log = SQLiteEventLog(store)
+    projections = default_projection_registry(log)
+    scheduler = Scheduler(log, CheckpointStore(store))
+    return ConsolidationLoop(
+        scheduler=scheduler,
+        log=log,
+        projections=projections,
+        config=consolidation_config,
+    ).run_once()
+
+
+def _dry_run_store(config: AlphaConfig, tmp_dir: Path) -> StateStore:
+    dry_db = tmp_dir / "alpha-dry-run.db"
+    if config.db_path.exists():
+        shutil.copy2(config.db_path, dry_db)
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{config.db_path}{suffix}")
+            if sidecar.exists():
+                shutil.copy2(sidecar, Path(f"{dry_db}{suffix}"))
+    store = StateStore(dry_db)
+    store.initialize()
+    return store
 
 
 def _inspection_view(store: StateStore) -> CognitionView:

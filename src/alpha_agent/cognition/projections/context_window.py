@@ -164,6 +164,29 @@ class ContextWindowProjection(Projection):
             ).fetchall()
         return [ThreadId.from_record(json.loads(row["thread_id"])) for row in rows]
 
+    def list_thread_ids(self) -> list[ThreadId]:
+        """Return materialized context-window thread ids in stable order."""
+
+        if self._store is None:
+            states = sorted(
+                self._memory_states.values(),
+                key=lambda state: (_thread_key(state.thread_id), state.updated_at),
+            )
+            return [state.thread_id for state in states]
+        with self._store.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT thread_id
+                FROM context_window_view
+                ORDER BY updated_at ASC, thread_id ASC
+                """
+            ).fetchall()
+        return [ThreadId.from_record(json.loads(row["thread_id"])) for row in rows]
+
+    def foreground_ids(self, thread_id: ThreadId) -> list[str]:
+        state = self._load_state(thread_id)
+        return list(state.foreground_ids) if state is not None else []
+
     def attach_recalled(
         self,
         window: ContextWindow,
@@ -200,6 +223,7 @@ class ContextWindowProjection(Projection):
         if self._store is not None:
             self._ensure_schema()
             with self._store.immediate_transaction() as conn:
+                conn.execute("DELETE FROM context_window_background")
                 conn.execute("DELETE FROM context_window_view")
 
     def view(self) -> ContextWindowProjectionView:
@@ -229,8 +253,21 @@ class ContextWindowProjection(Projection):
                 self.recent_judgment_limit,
             )
         elif event.kind == CognitiveEventKind.CONTEXT_COMPRESSED:
-            summary_id = event.payload.get("background_summary_id")
+            summary_id = event.payload.get("produced_summary_id") or event.payload.get(
+                "background_summary_id"
+            )
+            absorbed_ids = {
+                str(item) for item in event.payload.get("absorbed_perception_ids", [])
+            }
+            anchored_ids = set(state.anchored_ids)
+            if absorbed_ids:
+                state.foreground_ids = [
+                    item
+                    for item in state.foreground_ids
+                    if item not in absorbed_ids or item in anchored_ids
+                ]
             state.background_summary_id = str(summary_id) if summary_id else None
+            self._save_background_summary(state, event, str(summary_id) if summary_id else None)
         elif event.kind == CognitiveEventKind.CONTEXT_ANCHOR_SET:
             perception_id = event.payload.get("perception_id")
             if perception_id is not None:
@@ -372,7 +409,54 @@ class ContextWindowProjection(Projection):
                     ON context_window_view(counterpart_id, thread_kind);
                 CREATE INDEX IF NOT EXISTS idx_ctx_window_kind
                     ON context_window_view(thread_kind);
+                CREATE TABLE IF NOT EXISTS context_window_background (
+                    id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    derived_from_perception_ids TEXT NOT NULL DEFAULT '[]',
+                    preserved_anchors TEXT NOT NULL DEFAULT '[]',
+                    compression_policy TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_ctx_bg_thread_time
+                    ON context_window_background(thread_id, created_at DESC);
                 """
+            )
+
+    def _save_background_summary(
+        self,
+        state: _ThreadState,
+        event: CognitiveEvent,
+        summary_id: str | None,
+    ) -> None:
+        if self._store is None or summary_id is None or "summary" not in event.payload:
+            return
+        with self._store.immediate_transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO context_window_background
+                    (id, thread_id, summary, derived_from_perception_ids, preserved_anchors,
+                     compression_policy, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    thread_id = excluded.thread_id,
+                    summary = excluded.summary,
+                    derived_from_perception_ids = excluded.derived_from_perception_ids,
+                    preserved_anchors = excluded.preserved_anchors,
+                    compression_policy = excluded.compression_policy,
+                    created_at = excluded.created_at
+                """,
+                (
+                    summary_id,
+                    _thread_key(state.thread_id),
+                    str(event.payload.get("summary", "")),
+                    _dumps(
+                        [str(item) for item in event.payload.get("absorbed_perception_ids", [])]
+                    ),
+                    _dumps([str(item) for item in event.payload.get("preserved_anchors", [])]),
+                    str(event.payload.get("compression_policy", "deterministic_v1")),
+                    str(event.timestamp),
+                ),
             )
 
     def _counterpart_from_state(self, state: _ThreadState | None) -> CounterpartRef | None:

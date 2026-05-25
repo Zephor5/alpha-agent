@@ -32,6 +32,18 @@ api_key = ""
 [context]
 recent_tail_messages = 8
 
+[cognition.consolidation]
+enabled = true
+interval_seconds = 300
+judgment_repeat_window = 20
+judgment_repeat_threshold = 3
+procedure_success_threshold = 3
+context_foreground_max = 8
+context_absorb_batch = 4
+context_summary_chars = 480
+counterpart_digest_min_beliefs = 5
+counterpart_digest_min_new_beliefs = 3
+
 [deepseek]
 api_key = ""
 reasoning_enabled = true
@@ -99,6 +111,16 @@ class AlphaConfig:
     compatible_base_url: str | None = None
     compatible_api_key: str | None = None
     context_recent_tail_messages: int = 8
+    cognition_consolidation_enabled: bool = True
+    cognition_consolidation_interval_seconds: int = 300
+    cognition_consolidation_judgment_repeat_window: int = 20
+    cognition_consolidation_judgment_repeat_threshold: int = 3
+    cognition_consolidation_procedure_success_threshold: int = 3
+    cognition_consolidation_context_foreground_max: int = 8
+    cognition_consolidation_context_absorb_batch: int = 4
+    cognition_consolidation_context_summary_chars: int = 480
+    cognition_consolidation_counterpart_digest_min_beliefs: int = 5
+    cognition_consolidation_counterpart_digest_min_new_beliefs: int = 3
     deepseek_api_key: str | None = None
     deepseek_reasoning_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
@@ -177,6 +199,9 @@ def load_config(
 
     config_data = _load_toml_config(config_file)
     context = _section(config_data, "context")
+    cognition = _section(config_data, "cognition")
+    consolidation = cognition.get("consolidation")
+    consolidation = consolidation if isinstance(consolidation, dict) else {}
     deepseek = _section(config_data, "deepseek")
 
     config = AlphaConfig(
@@ -255,6 +280,46 @@ def load_config(
             "ALPHA_CONTEXT_RECENT_TAIL_MESSAGES",
             _int_value(context.get("recent_tail_messages"), 8),
         ),
+        cognition_consolidation_enabled=_bool_env(
+            "ALPHA_COGNITION_CONSOLIDATION_ENABLED",
+            _bool_value(consolidation.get("enabled"), True),
+        ),
+        cognition_consolidation_interval_seconds=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_INTERVAL_SECONDS",
+            _int_value(consolidation.get("interval_seconds"), 300),
+        ),
+        cognition_consolidation_judgment_repeat_window=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_JUDGMENT_REPEAT_WINDOW",
+            _int_value(consolidation.get("judgment_repeat_window"), 20),
+        ),
+        cognition_consolidation_judgment_repeat_threshold=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_JUDGMENT_REPEAT_THRESHOLD",
+            _int_value(consolidation.get("judgment_repeat_threshold"), 3),
+        ),
+        cognition_consolidation_procedure_success_threshold=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_PROCEDURE_SUCCESS_THRESHOLD",
+            _int_value(consolidation.get("procedure_success_threshold"), 3),
+        ),
+        cognition_consolidation_context_foreground_max=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_CONTEXT_FOREGROUND_MAX",
+            _int_value(consolidation.get("context_foreground_max"), 8),
+        ),
+        cognition_consolidation_context_absorb_batch=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_CONTEXT_ABSORB_BATCH",
+            _int_value(consolidation.get("context_absorb_batch"), 4),
+        ),
+        cognition_consolidation_context_summary_chars=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_CONTEXT_SUMMARY_CHARS",
+            _int_value(consolidation.get("context_summary_chars"), 480),
+        ),
+        cognition_consolidation_counterpart_digest_min_beliefs=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_BELIEFS",
+            _int_value(consolidation.get("counterpart_digest_min_beliefs"), 5),
+        ),
+        cognition_consolidation_counterpart_digest_min_new_beliefs=_int_env(
+            "ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_NEW_BELIEFS",
+            _int_value(consolidation.get("counterpart_digest_min_new_beliefs"), 3),
+        ),
         deepseek_api_key=_env_or_config(
             "ALPHA_DEEPSEEK_API_KEY",
             config_data,
@@ -324,18 +389,67 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
     }
     for key, value in values.items():
         _validate_config_value(key, value)
+    positive_values = (
+        (
+            "cognition.consolidation.interval_seconds",
+            config.cognition_consolidation_interval_seconds,
+        ),
+        (
+            "cognition.consolidation.judgment_repeat_window",
+            config.cognition_consolidation_judgment_repeat_window,
+        ),
+        (
+            "cognition.consolidation.judgment_repeat_threshold",
+            config.cognition_consolidation_judgment_repeat_threshold,
+        ),
+        (
+            "cognition.consolidation.procedure_success_threshold",
+            config.cognition_consolidation_procedure_success_threshold,
+        ),
+        (
+            "cognition.consolidation.context_foreground_max",
+            config.cognition_consolidation_context_foreground_max,
+        ),
+        (
+            "cognition.consolidation.context_absorb_batch",
+            config.cognition_consolidation_context_absorb_batch,
+        ),
+        (
+            "cognition.consolidation.context_summary_chars",
+            config.cognition_consolidation_context_summary_chars,
+        ),
+        (
+            "cognition.consolidation.counterpart_digest_min_beliefs",
+            config.cognition_consolidation_counterpart_digest_min_beliefs,
+        ),
+        (
+            "cognition.consolidation.counterpart_digest_min_new_beliefs",
+            config.cognition_consolidation_counterpart_digest_min_new_beliefs,
+        ),
+    )
+    for key, value in positive_values:
+        if value <= 0:
+            raise ValueError(f"{key} must be greater than 0")
     return config
 
 
 def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
-    sections = ("runtime", "llm", "compatible", "context", "deepseek", "codex")
+    sections = (
+        "runtime",
+        "llm",
+        "compatible",
+        "context",
+        "cognition.consolidation",
+        "deepseek",
+        "codex",
+    )
     lines = [
         "# Alpha Agent local configuration.",
         "# Environment variables still override these values for one-off runs or deploys.",
         "",
     ]
     for section_name in sections:
-        section = _section(config_data, section_name)
+        section = _nested_section(config_data, section_name)
         if not section:
             continue
         lines.append(f"[{section_name}]")
@@ -404,6 +518,15 @@ def _load_toml_config(config_file: str | Path | None) -> dict[str, Any]:
 def _section(config_data: dict[str, Any], name: str) -> dict[str, Any]:
     value = config_data.get(name)
     return value if isinstance(value, dict) else {}
+
+
+def _nested_section(config_data: dict[str, Any], dotted_name: str) -> dict[str, Any]:
+    current: Any = config_data
+    for part in dotted_name.split("."):
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(part)
+    return current if isinstance(current, dict) else {}
 
 
 def _string_setting(

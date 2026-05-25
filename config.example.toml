@@ -22,6 +22,18 @@ api_key = ""
 [context]
 recent_tail_messages = 8
 
+[cognition.consolidation]
+enabled = true
+interval_seconds = 300
+judgment_repeat_window = 20
+judgment_repeat_threshold = 3
+procedure_success_threshold = 3
+context_foreground_max = 8
+context_absorb_batch = 4
+context_summary_chars = 480
+counterpart_digest_min_beliefs = 5
+counterpart_digest_min_new_beliefs = 3
+
 [deepseek]
 api_key = ""
 reasoning_enabled = true

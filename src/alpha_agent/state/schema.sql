@@ -179,6 +179,19 @@ CREATE INDEX IF NOT EXISTS idx_ctx_window_counterpart
 CREATE INDEX IF NOT EXISTS idx_ctx_window_kind
     ON context_window_view(thread_kind);
 
+CREATE TABLE IF NOT EXISTS context_window_background (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    derived_from_perception_ids TEXT NOT NULL DEFAULT '[]',
+    preserved_anchors TEXT NOT NULL DEFAULT '[]',
+    compression_policy TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ctx_bg_thread_time
+    ON context_window_background(thread_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS reflection_view (
     id TEXT PRIMARY KEY,
     tick_id TEXT NOT NULL,
@@ -196,3 +209,29 @@ CREATE INDEX IF NOT EXISTS idx_reflection_severity
     ON reflection_view(severity, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reflection_kind
     ON reflection_view(kind, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS procedure_view (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    trigger_pattern TEXT NOT NULL,
+    steps TEXT NOT NULL DEFAULT '[]',
+    expected_outcome TEXT NOT NULL DEFAULT '',
+    learned_from_event_ids TEXT NOT NULL DEFAULT '[]',
+    success_count INTEGER NOT NULL DEFAULT 0,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    confidence REAL NOT NULL DEFAULT 0.5,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_procedure_trigger
+    ON procedure_view(trigger_pattern);
+
+CREATE TABLE IF NOT EXISTS cognition_worker_checkpoint (
+    worker_name TEXT PRIMARY KEY,
+    last_run_at TEXT,
+    last_processed_event_id TEXT,
+    last_status TEXT NOT NULL DEFAULT 'ok',
+    metadata TEXT NOT NULL DEFAULT '{}'
+);

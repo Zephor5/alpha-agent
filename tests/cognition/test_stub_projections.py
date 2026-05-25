@@ -11,7 +11,7 @@ from alpha_agent.llm.base import ChatMessage, LLMResponse
 from alpha_agent.tools.registry import ToolRegistry
 
 
-def test_stub_projections_return_expected_phase_02_shapes() -> None:
+def test_default_projections_return_expected_shapes() -> None:
     log = InMemoryEventLog()
     registry = default_projection_registry(log)
     controller = CognitiveController(
@@ -40,7 +40,7 @@ def test_stub_projections_return_expected_phase_02_shapes() -> None:
     assert window.background is None
     assert window.recalled == []
     assert registry.get_typed(BeliefProjection).recall("anything") == []
-    assert registry.get_typed(ProcedureProjection).status == "stub"
+    assert registry.get_typed(ProcedureProjection).status == "materialized"
     assert registry.get_typed(ProcedureProjection).match("anything") == []
 
 

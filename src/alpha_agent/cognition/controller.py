@@ -235,7 +235,13 @@ def default_projection_registry(event_log: EventLog) -> ProjectionRegistry:
     store = getattr(event_log, "store", None)
     if store is not None:
         registry.register(CounterpartProjection(store))
-    registry.register(ProcedureProjection())
+    registry.register(
+        ProcedureProjection(
+            store,
+            event_log=event_log,
+            auto_rebuild=True,
+        )
+    )
     registry.register(ContextWindowProjection(event_log))
     registry.register(
         ReflectionProjection(

@@ -50,9 +50,12 @@ context: `context_window_view` stores thread-local foreground perception IDs,
 anchors, and rebuildable window state. Belief recall is joined into
 `ContextWindow.recalled` during the Reactive tick. Phase 05 L1 reflection is
 also complete: every tick emits a `reflected` event, with rule findings
-materialized into `reflection_view`. Procedure projection remains stubbed, and
-consolidation, value lens, semantic strategy/lens diff, and drive loop remain
-staged under `docs/todo/cognition-runtime/`.
+materialized into `reflection_view`. Phase 06 deterministic consolidation v1 is
+available through a synchronous `run_once`: it merges equivalent beliefs,
+archives expired beliefs, learns minimal procedures, compresses foreground
+context into background summaries, and maintains counterpart digest beliefs.
+Value lens, semantic strategy/lens diff, and drive loop remain staged under
+`docs/todo/cognition-runtime/`.
 
 ## Install
 
@@ -123,6 +126,7 @@ Inspect cognition renderer outputs:
 uv run alpha cognition graph --format mermaid
 uv run alpha cognition diff <tick-id-a> <tick-id-b>
 uv run alpha cognition evidence <belief-id>
+uv run alpha cognition consolidate --now --dry-run
 ```
 
 Inspect raw LLM request/response traces from CLI runs:
@@ -254,17 +258,22 @@ The current SQLite state baseline is deliberately narrow:
   retracted beliefs, with deterministic recall across sessions.
 - `context_window_view`: Phase 04 materialized view for thread-local foreground
   ContextWindow state, including perception IDs and anchors.
+- `context_window_background`: Phase 06 deterministic background summaries for
+  compressed foreground context.
 - `reflection_view`: Phase 05 materialized view for L1 reflection findings.
+- `procedure_view`: Phase 06 minimal learned procedure projection.
+- `cognition_worker_checkpoint`: Phase 06 consolidation worker progress.
 
 Successful user turns now enter the Reactive tick before producing a response.
-BeliefProjection, foreground ContextWindowProjection, ReflectionProjection, and
-renderer-driven prompt assembly are now in place. Procedure projection,
-background compression, and semantic strategy/lens diff remain pending.
+BeliefProjection, ContextWindowProjection with background compression,
+ReflectionProjection, ProcedureProjection, and renderer-driven prompt assembly
+are now in place. Semantic strategy/lens diff remains pending.
 
 ## Current Limitations
 
-- Procedure projection, consolidation, value lens, semantic strategy/lens diff,
-  and drive loop are still pending.
+- Consolidation is deterministic v1 only: no background daemon scheduler, no LLM
+  summarization policy, and no Phase 07 conflict consumption yet.
+- Value lens, semantic strategy/lens diff, and drive loop are still pending.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
@@ -277,13 +286,14 @@ background compression, and semantic strategy/lens diff remain pending.
 4. Cognition runtime Phase 04: foreground context window. Completed.
 5. Cognition runtime Phase 05: Reflector L1. Completed.
 6. Cognition runtime Phase 09: renderer extraction. Completed.
-7. Cognition runtime Phase 06+: consolidation, value lens, semantic
-   strategy/lens diff, and drive loop.
-8. Tool execution system.
-9. Local files / notes ingestion.
-10. API server.
-11. Web UI.
-12. Channel integrations.
+7. Cognition runtime Phase 06: deterministic consolidation loop v1. Completed.
+8. Cognition runtime Phase 07+: value lens, semantic strategy/lens diff, and
+   drive loop.
+9. Tool execution system.
+10. Local files / notes ingestion.
+11. API server.
+12. Web UI.
+13. Channel integrations.
 
 ## Development
 
