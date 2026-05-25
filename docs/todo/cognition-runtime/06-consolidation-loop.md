@@ -59,7 +59,7 @@ thread 的 ContextWindow.background（压缩）、以及为每个 active Counter
      digest belief，about=[counterpart_ref]，supersede 旧 digest（如有）。
      这条 digest 给 Renderer 在打开该 Counterpart 的会话时快速取用。
 - 配置：
-  - 是否启用（`config.consolidation.enabled`）。
+  - 是否启用（`config.cognition.consolidation.enabled`）。
   - 周期（默认 5 min）。
   - 各阈值（N、M、K 等）。
 - CLI：`alpha cognition consolidate --now` 手动触发；`--dry-run` 预览。
@@ -426,7 +426,7 @@ src/alpha_agent/state/schema.sql                              追加 context_win
 src/alpha_agent/cognition/projections/context_window.py       补完 context_compressed
 src/alpha_agent/cognition/projections/procedure.py            替换 stub
 src/alpha_agent/cognition/models/event.py                     新增事件 kind
-src/alpha_agent/config.py                                     新增 consolidation 配置段
+src/alpha_agent/config.py                                     新增 cognition.consolidation 配置段
 src/alpha_agent/cli.py                                        alpha cognition consolidate
 AGENTS.md
 ```
@@ -466,8 +466,8 @@ AGENTS.md
   / 同类动作）。
 - **conflict_queued 事件不消费会堆积**。Phase 07 来消费。本阶段在 CLI
   metrics 里把这个队列长度暴露出来。
-- **subject-by-subject 还是全局调度**。v1 每次 run_once 取所有 active
-  subject 跑一遍。subject 多时改为优先级调度（最近活跃优先）。
+- **单 Subject 调度**。v1 每次 run_once 只处理 `SUBJECT_SELF`。如果将来要扩
+  展到多主体，必须另开设计文档；本计划内不要引入 subject-by-subject 调度。
 
 ## 7. 后续衔接
 

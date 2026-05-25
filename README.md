@@ -21,7 +21,7 @@ SQLite-backed memory layers, deterministic retrieval, salience scoring, and
 policy-gated consolidation. Hermes' plugin/provider/gateway implementation is
 treated as reference material for integration decisions, not as code to copy
 wholesale.
-See `docs/TODO.md` for the current Hermes-informed roadmap.
+See `docs/todo/TODO.md` for the current Hermes-informed roadmap.
 
 ## What Human-Like Memory Means Here
 

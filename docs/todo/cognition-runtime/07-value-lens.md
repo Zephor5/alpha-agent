@@ -1,7 +1,7 @@
 # Phase 07 — ValueLens 与冲突解决
 
 **Status:** pending
-**Depends on:** Phase 03, Phase 05
+**Depends on:** Phase 03, Phase 05, Phase 06
 **Scope:** M
 **Design ref:** `cognition_from_scratch.md` §2.5, §7（学习路径 4）；README
 不变量 1/2
@@ -34,8 +34,8 @@ ValueLens 属于 Subject（Agent 自己），不属于 Counterpart——Counterp
 
 ### 1.1 In scope
 
-- `ValueProfile` 自动派生（从 Belief 内容启发式推权重；已在 cognition_implementation.md
-  §5.5 给过示意，这里实现到位）。
+- `ValueProfile` 自动派生（从 Belief 内容启发式推权重；规则在本阶段文档内
+  定义，设计动机见 `docs/cognition/cognition_from_scratch.md`）。
 - `ValueLens` 持久化与读取（默认 lens + 主体覆写）。
 - Conflict resolution 算法：给定两条矛盾 belief + lens → 返回胜者。
 - Interpreter / Reviser 接入：检测冲突 → 调 resolver → emit
@@ -240,12 +240,12 @@ AGENTS.md
 
 - [ ] `uv run pytest tests/cognition/test_value_*.py
   tests/cognition/test_resolver_*.py tests/cognition/test_lens_*.py -q` 全绿。
-- [ ] 构造同样的两条矛盾 belief，对两个 subject 配不同 lens → BeliefProjection
-  最终 active belief 不同。
+- [ ] 构造同样的两条矛盾 belief，分别用两组 ValueLens 参数调用 resolver →
+  supersede 方向不同；持久化路径仍只验证单 Subject 的当前 lens。
 - [ ] `alpha cognition lens show` 能打印当前 lens；`set` 修改后 emit
   `value_lens_shifted` 并被 SubjectProjection 反映。
 - [ ] Phase 06 留下的 conflict_queued 事件，跑一次 consolidate 后被消化。
-- [ ] `value_lens_shifted` 在 24h 内每主体最多 1 次。
+- [ ] `value_lens_shifted` 对 `SUBJECT_SELF` 在 24h 内最多 1 次。
 
 ## 6. 风险与备注
 
@@ -253,8 +253,9 @@ AGENTS.md
   fallback 到默认 profile；记录"未匹配关键词"日志用于后续扩词典。
 - **平手情况**。平手的 supersede 默认不发——记 `conflict_kept_for_human
   _review`。Phase 08 L2 可决定要不要自动选个方向，本阶段不做。
-- **lens 学习要克制**。v1 每主体每 24h 最多 1 次 shift，且只调 sensitivity，
-  不动 priority。priority 改变是大事，等 Phase 11 L3 设计完整流程。
+- **lens 学习要克制**。v1 对 `SUBJECT_SELF` 每 24h 最多 1 次 shift，且只调
+  sensitivity，不动 priority。priority 改变是大事，等 Phase 11 L3 设计完整
+  流程。
 - **解释链审计**。每条 `belief_superseded` 现在带 `decisive_value_kinds` —
   这是后续审计"为什么这条 belief 输了"的关键。
 

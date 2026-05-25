@@ -13,10 +13,6 @@ docs/cognition/cognition_from_scratch.md
   ── 架构设计（事件日志 + 多 loop + ContextWindow + 元认知三级）
   ── 本计划的"为什么这样设计"权威，本计划只回答"怎么做、做到哪算完"
 
-docs/cognition/cognition_implementation.md
-  ── 旧的渐进式（在 memory 之上加薄层）方案
-  ── 与本计划不兼容，仅作历史参照保留
-
 docs/doing/memory-system-optimization-phases.md
   ── 已完成的 memory 子系统优化记录
   ── 本计划 Phase 00 要清理的对象
@@ -165,28 +161,24 @@ checkpoint 表）。
 | 04    | ContextWindowProjection（前景）| 01, 02       | S (小) | pending |
 | 05    | Reflector L1                   | 02, 03       | S (小) | pending |
 | 06    | Consolidation Loop + 背景压缩  | 03, 04, 05   | L (大) | pending |
-| 07    | ValueLens 与冲突解决           | 03, 05       | M (中) | pending |
+| 07    | ValueLens 与冲突解决           | 03, 05, 06   | M (中) | pending |
 | 08    | Reflector L2                   | 05, 07       | M (中) | pending |
 | 09    | Renderer 解耦                  | 02, 03, 04   | M (中) | pending |
-| 10    | Drive Loop                     | 02           | M (中) | pending |
+| 10    | Drive Loop                     | 02, 06       | M (中) | pending |
 | 11    | Reflector L3 / SelfModel       | 05, 06, 08   | M (中) | pending |
 
 Phase 01 是 L 而非 M，因为它一次落齐所有 first-class 类型 + 事件日志 +
-LoopCoordinator + Counterpart/Belief projection——这套地基所有后续阶段都依
+LoopCoordinator + Counterpart projection——这套地基所有后续阶段都依
 赖，不能渐进。
 
 依赖图（→ 表示"必须先于"）：
 
 ```text
-00 → 01 → 02 ─┬─→ 03 ─┬─→ 05 ─┬─→ 06 ─┐
-              │       │       │       │
-              ├─→ 04 ─┤       │       ├─→ 11
-              │       │       │       │
-              ├──────────────→ 09      │
-              │       │       │       │
-              │       └─→ 07 ─┴─→ 08 ──┘
-              │
-              └─→ 10  (默认关，可后置)
+00 → 01 → 02 ─┬─→ 03 ─┬─→ 05 ─┬─→ 06 ─┬─→ 07 ─→ 08 ─┐
+              │       │       │       │              │
+              ├─→ 04 ─┤       │       ├─→ 10         ├─→ 11
+              │       │       │       │              │
+              └──────────────→ 09      └──────────────┘
 ```
 
 具体依赖（来自各 Phase 文档头部）：
@@ -195,10 +187,10 @@ LoopCoordinator + Counterpart/Belief projection——这套地基所有后续阶
 - 04 ← 01, 02
 - 05 ← 02, 03
 - 06 ← 03, 04, 05
-- 07 ← 03, 05
+- 07 ← 03, 05, 06
 - 08 ← 05, 07
 - 09 ← 02, 03, 04
-- 10 ← 02
+- 10 ← 02, 06
 - 11 ← 05, 06, 08
 
 也就是说：
@@ -206,8 +198,10 @@ LoopCoordinator + Counterpart/Belief projection——这套地基所有后续阶
 - 00 → 01 → 02 是一条强直线，必须先打通。
 - 03 与 04 都依赖 02，可并行（不同的 projection）。
 - 05 在 03 之后就能开；06 要等 03/04/05 都到位。
-- 07 / 08 / 11 是元认知与价值链的延伸。
-- 09 渲染器与 10 Drive Loop 可在 02 之后任何点并行插入。
+- 07 / 08 / 11 是元认知与价值链的延伸；07 消费 06 留下的冲突队列并注册
+  consolidation worker，所以不能早于 06。
+- 09 渲染器可在 02/03/04 之后并行插入；10 Drive Loop 需要 Phase 06 的通用
+  Scheduler，所以在 06 之后插入。
 
 ## 推荐落地顺序
 
@@ -215,7 +209,7 @@ LoopCoordinator + Counterpart/Belief projection——这套地基所有后续阶
 
 到这里主体已能：感知、解释、判断、决策、行动、反思、用结构化方式渲染给 LLM。
 
-完整主体：补 06 → 07 → 08 → 11，并按需要加 10。
+完整主体：补 06 → 07 → 08 → 11，并按需要在 06 之后加 10。
 
 ## 每阶段文档结构
 

@@ -1,7 +1,7 @@
 # Phase 10 — Drive Loop
 
 **Status:** pending
-**Depends on:** Phase 02
+**Depends on:** Phase 02, Phase 06
 **Scope:** M
 **Design ref:** `cognition_from_scratch.md` §6 (Drive Loop), §11；README
 不变量 1/2
@@ -39,7 +39,7 @@ Drive Loop 的运行分两步：
 
 - `Goal` 类型与 `goal_view` projection。
 - `GoalRegistry`：set_goal / satisfy / abandon。
-- `DriveLoop` 调度器（复用 Phase 06 的 scheduler）。
+- `DriveLoop` 调度器（复用 Phase 06 的 Scheduler 与 checkpoint 表）。
 - 简单 goal selection 策略（优先级 + 上次活动时间）。
 - self-stimulus 生成器：把 goal 状态包成 `Stimulus(kind="self_signal", ...)`。
 - 配置开关 + CLI 控制。
@@ -112,7 +112,8 @@ Drive Loop 的运行分两步：
 
 ### 2.5 配置 & CLI
 
-- [ ] `config.cognition.drive.enabled = false`（默认关）。
+- [ ] `config.cognition.drive.enabled = false`（默认关），与 Phase 06 的
+  `config.cognition.consolidation.*` 使用同一 `cognition` 配置命名空间。
 - [ ] `alpha cognition goals list [--active] [--subject]`。
 - [ ] `alpha cognition goals set --description ... [--priority N]`。
 - [ ] `alpha cognition goals satisfy <id> --evidence ...`。
@@ -230,7 +231,7 @@ src/alpha_agent/state/schema.sql                追加 goal_view
 src/alpha_agent/cognition/models/event.py       新增 goal_* kind
 src/alpha_agent/cognition/stages/perceive.py    支持 self_signal
 src/alpha_agent/cognition/loops/README.md
-src/alpha_agent/config.py                       drive 配置段
+src/alpha_agent/config.py                       cognition.drive 配置段
 src/alpha_agent/cli.py                          alpha cognition goals / drive
 AGENTS.md
 ```
@@ -261,8 +262,8 @@ AGENTS.md
 - **cognition thread 名字冲突**。`ThreadId.cognition(subject_id, goal_id)`
   是 stable key——同一 goal 多次 drive 共用一个 thread，ContextWindow 累积
   得到主体在该 goal 上的"思路"。
-- **goal 太多会刷屏**。每主体 active goal 上限默认 8，超过拒绝 set；用户要
-  abandon 老的才能加新的。
+- **goal 太多会刷屏**。`SUBJECT_SELF` 的 active goal 上限默认 8，超过拒绝
+  set；用户要 abandon 老的才能加新的。
 
 ## 7. 后续衔接
 
