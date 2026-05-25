@@ -1,787 +1,135 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import cast
-
-import pytest
-
-from alpha_agent.llm.base import ChatMessage, LLMToolDefinition
-from alpha_agent.memory.models import (
-    ConversationMessage,
-    EpisodicMemory,
-    ProceduralMemory,
-    RetrievedContext,
-    SemanticMemory,
-    SessionContextState,
-)
-from alpha_agent.memory.retrieval import MemoryRetriever
-from alpha_agent.memory.store import MemoryStore
-from alpha_agent.runtime.context_compression import (
-    CompressionBudget,
-    CompressionFocus,
-    DeterministicContextCompressor,
-)
-from alpha_agent.runtime.prompt_builder import PromptBuilder
-from alpha_agent.runtime.session_context import SessionContextManager, SessionContextProjection
-from tests.memory_eval import seed_memory_behavior_fixture
+from alpha_agent.runtime.prompt_builder import PromptBuilder, wrap_system_reminder
+from alpha_agent.runtime.session_context import SessionContextManager
+from alpha_agent.state.models import ConversationMessage
+from alpha_agent.state.store import StateStore
 
 
-def test_prompt_includes_memory_sections() -> None:
-    context = RetrievedContext(
-        semantic_memories=[
-            SemanticMemory(
-                id="sem1",
-                content="User prefers concise answers",
-                memory_type="preference",
-                subject="user",
-                predicate="prefers",
-                object="concise answers",
-                entities=["user", "concise answers"],
-                confidence=0.9,
-                salience=0.8,
-                stability=0.8,
-                source_memory_ids=[],
-                created_at="2026-01-01T00:00:00+00:00",
-                updated_at="2026-01-01T00:00:00+00:00",
-                metadata={},
-            )
-        ],
-        episodic_memories=[
-            EpisodicMemory(
-                id="epi1",
-                content="User asked for memory MVP",
-                summary="User asked for memory MVP",
-                source_event_ids=[],
-                people=[],
-                places=[],
-                topics=[],
-                salience=0.8,
-                confidence=0.8,
-                created_at="2026-01-01T00:00:00+00:00",
-                metadata={},
-            )
-        ],
-        procedural_memories=[
-            ProceduralMemory(
-                id="proc1",
-                name="Debug Loop",
-                description="Debug failures",
-                trigger="debug",
-                procedure_markdown="1. Reproduce\n2. Fix",
-                success_count=0,
-                failure_count=0,
-                confidence=0.8,
-                created_at="2026-01-01T00:00:00+00:00",
-                updated_at="2026-01-01T00:00:00+00:00",
-                metadata={},
-            )
-        ],
-        entity_hints=["Alpha"],
+def _message(
+    *,
+    message_id: str,
+    session_id: str = "s1",
+    ordinal: int,
+    role: str,
+    content: str,
+    tool_call_id: str | None = None,
+    tool_calls: list[dict] | None = None,
+) -> ConversationMessage:
+    return ConversationMessage(
+        id=message_id,
+        session_id=session_id,
+        ordinal=ordinal,
+        role=role,  # type: ignore[arg-type]
+        raw_content=content,
+        model_content=None,
+        tool_call_id=tool_call_id,
+        tool_calls=tool_calls or [],
+        tool_result_id=None,
+        provider_metadata={},
+        source_metadata={},
+        created_at="2026-01-01T00:00:00+00:00",
     )
 
-    messages = PromptBuilder().build(
-        "What should we do?",
-        context,
-        runtime_reminders=["Tool lookup: current build status is green"],
-    )
-    context_prompt = cast(str, messages[1].get("content"))
+
+def test_prompt_contains_system_recent_transcript_and_current_user_message() -> None:
+    builder = PromptBuilder()
+    history = [
+        _message(message_id="msg_1", ordinal=1, role="user", content="hello"),
+        _message(message_id="msg_2", ordinal=2, role="assistant", content="hi"),
+    ]
+
+    messages = builder.build("what now?", history)
+
+    assert [message["role"] for message in messages] == ["system", "user", "assistant", "user"]
+    assert "Long-term cognition is disabled" in messages[0]["content"]
+    assert messages[1]["content"] == "hello"
+    assert messages[2]["content"] == "hi"
+    assert messages[-1]["content"] == "what now?"
+
+
+def test_prompt_preserves_prior_user_message_even_when_text_matches_current_input() -> None:
+    builder = PromptBuilder()
+    history = [_message(message_id="msg_1", ordinal=1, role="user", content="hello")]
+
+    messages = builder.build("hello", history)
 
     assert [message["role"] for message in messages] == ["system", "user", "user"]
-    assert messages[-1]["content"] == "What should we do?"
-    assert context_prompt.startswith("<system-reminder>\n")
-    assert context_prompt.endswith("\n</system-reminder>")
-    assert "## Retrieved Context (Reference Only)" in context_prompt
-    assert "### Runtime Reminders" in context_prompt
-    assert "Tool lookup: current build status is green" in context_prompt
-    assert "### User Facts" in context_prompt
-    assert "status=active" in context_prompt
-    assert "scope=user:default" in context_prompt
-    assert "source=" in context_prompt
-    assert "### Prior Episodes" in context_prompt
-    assert "### Relevant Procedures" in context_prompt
-    assert "### Entity Hints" in context_prompt
-    assert "## Current User Message" not in context_prompt
-    assert sum(1 for message in messages if message["role"] == "system") == 1
-
-
-def test_memory_behavior_fixture_renders_prompt_context(tmp_path: Path) -> None:
-    store = MemoryStore(tmp_path / "alpha.db")
-    store.initialize()
-    fixture = seed_memory_behavior_fixture(store)
-    context = MemoryRetriever(store).retrieve_context(
-        fixture.prompt_query,
-        fixture.session_id,
-        scopes=fixture.scope.allowed_read_scopes(),
-        record_access=False,
-    )
-
-    messages = PromptBuilder().build(fixture.prompt_query, context)
-    context_prompt = cast(str, messages[1].get("content"))
-
-    assert "### User Facts" in context_prompt
-    assert "User prefers concise answers for routine replies" in context_prompt
-    assert "Project Alpha Agent is finishing memory behavior fixture coverage" in context_prompt
-    semantic_ids = [memory.id for memory in context.semantic_memories]
-    assert fixture.semantic_ids["correction"] in semantic_ids
-    assert fixture.semantic_ids["correction_old"] not in semantic_ids
-    assert "uv run pytest" in context_prompt
-    assert "### Relevant Procedures" in context_prompt
-    assert "Debug tests fixture" in context_prompt
-    assert "Reproduce the failing test" in context_prompt
-    assert "do not remember that I prefer tea" not in context_prompt
-
-
-def test_prompt_keeps_scene_and_persona_reference_only_below_current_request() -> None:
-    context = RetrievedContext(
-        semantic_memories=[
-            SemanticMemory(
-                id="sem_persona",
-                content="User usually prefers Python examples.",
-                memory_type="persona",
-                subject="user.profile",
-                predicate="summarizes",
-                object="Python examples",
-                entities=["user", "Python"],
-                confidence=0.9,
-                salience=0.8,
-                stability=0.95,
-                source_memory_ids=["sem_atomic"],
-                created_at="2026-01-01T00:00:00+00:00",
-                updated_at="2026-01-01T00:00:00+00:00",
-                metadata={"projection_layer": "persona", "source_message_ids": ["msg-1"]},
-            ),
-            SemanticMemory(
-                id="sem_scene",
-                content="Project Atlas is migrating memory retrieval.",
-                memory_type="scene",
-                subject="scene:project atlas",
-                predicate="summarizes",
-                object="memory retrieval migration",
-                entities=["Project Atlas"],
-                confidence=0.88,
-                salience=0.75,
-                stability=0.85,
-                source_memory_ids=["sem_atomic"],
-                created_at="2026-01-01T00:00:00+00:00",
-                updated_at="2026-01-01T00:00:00+00:00",
-                metadata={"projection_layer": "scene", "source_message_ids": ["msg-1"]},
-            ),
-        ],
-        episodic_memories=[],
-        procedural_memories=[],
-    )
-
-    messages = PromptBuilder().build("Use Go for this answer.", context)
-    context_prompt = cast(str, messages[1].get("content"))
-
-    assert "never override explicit instructions in the current user message" in context_prompt
-    assert "### Persona / Profile Projection" in context_prompt
-    assert "### Scene Summaries" in context_prompt
-    assert "source_memories=sem_atomic" in context_prompt
-    assert "source_messages=msg-1" in context_prompt
-    assert messages[-1] == {"role": "user", "content": "Use Go for this answer."}
-
-
-def test_prompt_omits_empty_context_message() -> None:
-    context = RetrievedContext(
-        semantic_memories=[],
-        episodic_memories=[],
-        procedural_memories=[],
-    )
-
-    messages = PromptBuilder().build("hello", context)
-
-    assert [message["role"] for message in messages] == ["system", "user"]
+    assert messages[1]["content"] == "hello"
     assert messages[-1]["content"] == "hello"
-    assert sum(1 for message in messages if message["role"] == "system") == 1
 
 
-def test_deterministic_context_compressor_outputs_structured_session_state() -> None:
-    messages = [
-        ConversationMessage(
-            id="msg_1",
-            session_id="s1",
+def test_prompt_replays_tool_call_round() -> None:
+    builder = PromptBuilder()
+    history = [
+        _message(
+            message_id="msg_1",
             ordinal=1,
-            role="user",
-            raw_content=(
-                "Goal: finish memory Phase 6. Must avoid Phase 7. "
-                "Relevant file src/alpha_agent/memory/store.py."
-            ),
-            model_content=None,
-            tool_call_id=None,
-            tool_calls=[],
-            tool_result_id=None,
-            provider_metadata={},
-            source_metadata={},
-            created_at="2026-01-01T00:00:00+00:00",
-        ),
-        ConversationMessage(
-            id="msg_2",
-            session_id="s1",
-            ordinal=2,
             role="assistant",
-            raw_content="Decision: store scene summaries as source-backed projections.",
-            model_content=None,
-            tool_call_id=None,
-            tool_calls=[],
-            tool_result_id=None,
-            provider_metadata={},
-            source_metadata={},
-            created_at="2026-01-01T00:00:01+00:00",
-        ),
-        ConversationMessage(
-            id="msg_3",
-            session_id="s1",
-            ordinal=3,
-            role="user",
-            raw_content="Open question: should graph edges exist only when auditable?",
-            model_content=None,
-            tool_call_id=None,
-            tool_calls=[],
-            tool_result_id=None,
-            provider_metadata={},
-            source_metadata={},
-            created_at="2026-01-01T00:00:02+00:00",
-        ),
-    ]
-
-    result = DeterministicContextCompressor().compress(
-        messages,
-        previous_summary="",
-        focus=CompressionFocus(
-            session_id="s1",
-            current_user_message="CURRENT REQUEST SHOULD NOT ENTER SUMMARY",
-            prompt_token_estimate=500,
-            budget=CompressionBudget(max_summary_tokens=256),
-            compressed_until_ordinal=0,
-        ),
-    )
-
-    assert "## Structured Session State" in result.summary
-    assert "### Current Goal" in result.summary
-    assert "finish memory Phase 6" in result.summary
-    assert "### Decisions" in result.summary
-    assert "source-backed projections" in result.summary
-    assert "### Open Questions" in result.summary
-    assert "graph edges" in result.summary
-    assert "### User Constraints" in result.summary
-    assert "avoid Phase 7" in result.summary
-    assert "src/alpha_agent/memory/store.py" in result.summary
-    assert "CURRENT REQUEST" not in result.summary
-    assert result.metadata["projection"]["current_goal"]
-    assert result.metadata["projection"]["last_action"]
-
-
-def test_prompt_keeps_irrelevant_procedure_body_out_of_context() -> None:
-    context = RetrievedContext(
-        semantic_memories=[],
-        episodic_memories=[],
-        procedural_memories=[
-            ProceduralMemory(
-                id="proc1",
-                name="Debug Loop",
-                description="Diagnose failures",
-                trigger="debug failure regression",
-                procedure_markdown="1. Reproduce\n2. Inspect\n3. Fix",
-                success_count=0,
-                failure_count=0,
-                confidence=0.8,
-                created_at="2026-01-01T00:00:00+00:00",
-                updated_at="2026-01-01T00:00:00+00:00",
-                metadata={},
-            )
-        ],
-    )
-
-    messages = PromptBuilder().build("What tools do you have?", context)
-    context_prompt = cast(str, messages[1].get("content"))
-
-    assert "Debug Loop: Diagnose failures" in context_prompt
-    assert "1. Reproduce" not in context_prompt
-
-
-def test_prompt_includes_matching_procedure_body() -> None:
-    context = RetrievedContext(
-        semantic_memories=[],
-        episodic_memories=[],
-        procedural_memories=[
-            ProceduralMemory(
-                id="proc1",
-                name="Debug Loop",
-                description="Diagnose failures",
-                trigger="debug failure regression",
-                procedure_markdown="1. Reproduce\n2. Inspect\n3. Fix",
-                success_count=0,
-                failure_count=0,
-                confidence=0.8,
-                created_at="2026-01-01T00:00:00+00:00",
-                updated_at="2026-01-01T00:00:00+00:00",
-                metadata={},
-            )
-        ],
-    )
-
-    messages = PromptBuilder().build("Debug this failing regression", context)
-    context_prompt = cast(str, messages[1].get("content"))
-
-    assert "1. Reproduce" in context_prompt
-
-
-def test_prompt_applies_independent_layer_budgets() -> None:
-    context = RetrievedContext(
-        semantic_memories=[
-            SemanticMemory(
-                id="sem1",
-                content="User prefers " + "very detailed " * 20 + "answers",
-                memory_type="preference",
-                subject="user",
-                predicate="prefers",
-                object="detailed answers",
-                entities=["user"],
-                confidence=0.92,
-                salience=0.9,
-                stability=0.8,
-                source_memory_ids=["msg-sem"],
-                created_at="2026-01-01T00:00:00+00:00",
-                updated_at="2026-01-01T00:00:00+00:00",
-                metadata={},
-            )
-        ],
-        episodic_memories=[
-            EpisodicMemory(
-                id="epi1",
-                content="",
-                summary="Prior decision " + "with extensive detail " * 20,
-                source_event_ids=["msg-epi"],
-                people=[],
-                places=[],
-                topics=[],
-                salience=0.7,
-                confidence=0.8,
-                created_at="2026-01-01T00:00:00+00:00",
-                metadata={},
-            )
-        ],
-        procedural_memories=[
-            ProceduralMemory(
-                id="proc1",
-                name="Debug Loop",
-                description="Debug " + "complicated failures " * 20,
-                trigger="debug",
-                procedure_markdown="1. Reproduce\n2. Inspect\n3. Fix",
-                success_count=0,
-                failure_count=0,
-                confidence=0.8,
-                created_at="2026-01-01T00:00:00+00:00",
-                updated_at="2026-01-01T00:00:00+00:00",
-                metadata={},
-            )
-        ],
-    )
-    builder = PromptBuilder(
-        semantic_memory_tokens=18,
-        episodic_memory_tokens=16,
-        procedural_memory_tokens=16,
-        session_context_tokens=12,
-    )
-
-    messages = builder.build("Debug this", context)
-    context_prompt = cast(str, messages[1].get("content"))
-
-    assert "### User Facts" in context_prompt
-    assert "### Prior Episodes" in context_prompt
-    assert "### Relevant Procedures" in context_prompt
-    assert "..." in context_prompt
-    assert context_prompt.count("very detailed") < 5
-    assert context_prompt.count("extensive detail") < 5
-    assert context_prompt.count("complicated failures") < 5
-
-
-def test_prompt_applies_session_context_budget() -> None:
-    context = RetrievedContext(
-        semantic_memories=[],
-        episodic_memories=[],
-        procedural_memories=[],
-    )
-    projection = SessionContextProjection(
-        state=SessionContextState(
-            session_id="s1",
-            compressed_until_ordinal=1,
-            summary="Summary " + "long detail " * 30,
-            summary_source_message_ids=["msg_1"],
-            compression_version="test",
-            created_at="2026-01-01T00:00:00+00:00",
-            updated_at="2026-01-01T00:00:00+00:00",
-        ),
-        uncompressed_messages=[
-            ConversationMessage(
-                id="msg_2",
-                session_id="s1",
-                ordinal=2,
-                role="user",
-                raw_content="Prior " + "message detail " * 30,
-                model_content=None,
-                tool_call_id=None,
-                tool_calls=[],
-                tool_result_id=None,
-                provider_metadata={},
-                source_metadata={},
-                created_at="2026-01-01T00:00:01+00:00",
-            )
-        ],
-        before_ordinal=3,
-    )
-
-    messages = PromptBuilder(session_context_tokens=16).build(
-        "current question",
-        context,
-        session_context=projection,
-    )
-    rendered = "\n".join(str(message.get("content", "")) for message in messages)
-
-    assert "## Structured Session State" in rendered
-    assert "..." in rendered
-    assert rendered.count("long detail") < 5
-    assert rendered.count("message detail") < 5
-
-
-def test_session_context_budget_includes_preamble_and_omits_overflow_messages() -> None:
-    context = RetrievedContext(
-        semantic_memories=[],
-        episodic_memories=[],
-        procedural_memories=[],
-    )
-    projection = SessionContextProjection(
-        state=SessionContextState(
-            session_id="s1",
-            compressed_until_ordinal=1,
-            summary="Summary " + "long detail " * 30,
-            summary_source_message_ids=["msg_1"],
-            compression_version="test",
-            created_at="2026-01-01T00:00:00+00:00",
-            updated_at="2026-01-01T00:00:00+00:00",
-        ),
-        uncompressed_messages=[
-            ConversationMessage(
-                id="msg_2",
-                session_id="s1",
-                ordinal=2,
-                role="user",
-                raw_content="Prior message that must not fit tiny session budget.",
-                model_content=None,
-                tool_call_id=None,
-                tool_calls=[],
-                tool_result_id=None,
-                provider_metadata={},
-                source_metadata={},
-                created_at="2026-01-01T00:00:01+00:00",
-            )
-        ],
-        before_ordinal=3,
-    )
-
-    messages = PromptBuilder(session_context_tokens=8).build(
-        "current question",
-        context,
-        session_context=projection,
-    )
-    session_messages = messages[1:-1]
-    rendered_session = "\n".join(str(message.get("content", "")) for message in session_messages)
-
-    assert [message["role"] for message in messages] == ["system", "user", "user"]
-    assert len(rendered_session) <= 8 * 4
-    assert "Prior message" not in rendered_session
-
-
-def test_session_context_budget_counts_tool_call_metadata() -> None:
-    context = RetrievedContext(
-        semantic_memories=[],
-        episodic_memories=[],
-        procedural_memories=[],
-    )
-    projection = SessionContextProjection(
-        state=None,
-        uncompressed_messages=[
-            ConversationMessage(
-                id="msg_2",
-                session_id="s1",
-                ordinal=2,
-                role="assistant",
-                raw_content="",
-                model_content=None,
-                tool_call_id=None,
-                tool_calls=[
-                    {
-                        "id": "call_1",
-                        "type": "function",
-                        "function": {
-                            "name": "lookup",
-                            "arguments": '{"query":"' + ("large " * 200) + '"}',
-                        },
-                    }
-                ],
-                tool_result_id=None,
-                provider_metadata={},
-                source_metadata={},
-                created_at="2026-01-01T00:00:01+00:00",
-            ),
-            ConversationMessage(
-                id="msg_3",
-                session_id="s1",
-                ordinal=3,
-                role="tool",
-                raw_content="large result",
-                model_content=None,
-                tool_call_id="call_1" + ("x" * 200),
-                tool_calls=[],
-                tool_result_id="trace_1",
-                provider_metadata={},
-                source_metadata={},
-                created_at="2026-01-01T00:00:02+00:00",
-            ),
-        ],
-        before_ordinal=4,
-    )
-
-    messages = PromptBuilder(session_context_tokens=8).build(
-        "current question",
-        context,
-        session_context=projection,
-    )
-
-    assert [message["role"] for message in messages] == ["system", "user"]
-
-
-def test_prompt_projects_session_summary_and_prior_messages_before_current_user() -> None:
-    context = RetrievedContext(
-        semantic_memories=[],
-        episodic_memories=[],
-        procedural_memories=[],
-    )
-    projection = SessionContextProjection(
-        state=SessionContextState(
-            session_id="s1",
-            compressed_until_ordinal=2,
-            summary="Earlier turn summary.",
-            summary_source_message_ids=["msg_1", "msg_2"],
-            compression_version="stub",
-            created_at="2026-01-01T00:00:00+00:00",
-            updated_at="2026-01-01T00:00:00+00:00",
-        ),
-        uncompressed_messages=[
-            ConversationMessage(
-                id="msg_3",
-                session_id="s1",
-                ordinal=3,
-                role="user",
-                raw_content="prior question",
-                model_content=None,
-                tool_call_id=None,
-                tool_calls=[],
-                tool_result_id=None,
-                provider_metadata={},
-                source_metadata={},
-                created_at="2026-01-01T00:00:00+00:00",
-            ),
-            ConversationMessage(
-                id="msg_4",
-                session_id="s1",
-                ordinal=4,
-                role="assistant",
-                raw_content="prior answer",
-                model_content=None,
-                tool_call_id=None,
-                tool_calls=[],
-                tool_result_id=None,
-                provider_metadata={},
-                source_metadata={},
-                created_at="2026-01-01T00:00:01+00:00",
-            ),
-        ],
-        before_ordinal=5,
-    )
-
-    messages = PromptBuilder().build(
-        "current question",
-        context,
-        session_context=projection,
-    )
-
-    assert [message["role"] for message in messages] == [
-        "system",
-        "user",
-        "user",
-        "assistant",
-        "user",
-    ]
-    assert "## Structured Session State (Reference Only)" in cast(
-        str,
-        messages[1]["content"],
-    )
-    assert "Earlier turn summary." in cast(str, messages[1]["content"])
-    assert messages[2] == {"role": "user", "content": "prior question"}
-    assert messages[3] == {"role": "assistant", "content": "prior answer"}
-    assert messages[-1] == {"role": "user", "content": "current question"}
-
-
-def test_session_context_rewinds_boundary_inside_tool_replay_sequence(
-    tmp_path: Path,
-) -> None:
-    store = MemoryStore(tmp_path / "alpha.db")
-    store.initialize()
-    store.append_conversation_message(
-        session_id="s1",
-        role="user",
-        raw_content="look this up",
-    )
-    assistant_tool_call = store.append_conversation_message(
-        session_id="s1",
-        role="assistant",
-        raw_content="",
-        tool_calls=[
-            {
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "lookup", "arguments": '{"query":"alpha"}'},
-            }
-        ],
-    )
-    tool_result = store.append_conversation_message(
-        session_id="s1",
-        role="tool",
-        raw_content='{"content":"found alpha","metadata":{},"name":"lookup"}',
-        tool_call_id="call_1",
-        tool_result_id="trace_1",
-    )
-    current_user = store.append_conversation_message(
-        session_id="s1",
-        role="user",
-        raw_content="continue",
-    )
-    store.upsert_session_context_state(
-        SessionContextState(
-            session_id="s1",
-            compressed_until_ordinal=assistant_tool_call.ordinal,
-            summary="Compressed earlier user request.",
-            summary_source_message_ids=["msg_1", assistant_tool_call.id],
-            compression_version="test",
-            created_at="2026-01-01T00:00:00+00:00",
-            updated_at="2026-01-01T00:00:00+00:00",
-        )
-    )
-
-    projection = SessionContextManager(store).load(
-        "s1",
-        before_ordinal=current_user.ordinal,
-    )
-
-    assert [message.id for message in projection.uncompressed_messages] == [
-        assistant_tool_call.id,
-        tool_result.id,
-    ]
-
-
-def test_session_context_drops_incomplete_trailing_tool_call_sequence(
-    tmp_path: Path,
-) -> None:
-    store = MemoryStore(tmp_path / "alpha.db")
-    store.initialize()
-    store.append_conversation_message(
-        session_id="s1",
-        role="user",
-        raw_content="look this up",
-    )
-    assistant_tool_call = store.append_conversation_message(
-        session_id="s1",
-        role="assistant",
-        raw_content="",
-        tool_calls=[
-            {
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "lookup", "arguments": '{"query":"alpha"}'},
-            }
-        ],
-    )
-    current_user = store.append_conversation_message(
-        session_id="s1",
-        role="user",
-        raw_content="continue",
-    )
-
-    projection = SessionContextManager(store).load(
-        "s1",
-        before_ordinal=current_user.ordinal,
-    )
-
-    assert assistant_tool_call.id not in {
-        message.id for message in projection.uncompressed_messages
-    }
-    assert [message.role for message in projection.uncompressed_messages] == ["user"]
-
-
-def test_session_context_rejects_summary_that_reaches_current_user(
-    tmp_path: Path,
-) -> None:
-    store = MemoryStore(tmp_path / "alpha.db")
-    store.initialize()
-    store.append_conversation_message(
-        session_id="s1",
-        role="user",
-        raw_content="prior",
-    )
-    current_user = store.append_conversation_message(
-        session_id="s1",
-        role="user",
-        raw_content="current",
-    )
-    store.upsert_session_context_state(
-        SessionContextState(
-            session_id="s1",
-            compressed_until_ordinal=current_user.ordinal,
-            summary="Unsafe summary.",
-            summary_source_message_ids=["msg_1", "msg_2"],
-            compression_version="test",
-            created_at="2026-01-01T00:00:00+00:00",
-            updated_at="2026-01-01T00:00:00+00:00",
-        )
-    )
-
-    with pytest.raises(ValueError, match="compressed_until_ordinal"):
-        SessionContextManager(store).load("s1", before_ordinal=current_user.ordinal)
-
-
-def test_prompt_token_estimate_includes_tool_call_payloads_and_tool_schemas() -> None:
-    messages: list[ChatMessage] = [
-        {"role": "user", "content": "hello"},
-        {
-            "role": "assistant",
-            "content": None,
-            "tool_calls": [
+            content="",
+            tool_calls=[
                 {
                     "id": "call_1",
                     "type": "function",
-                    "function": {"name": "lookup_memory", "arguments": '{"query":"hello"}'},
+                    "function": {"name": "lookup", "arguments": "{}"},
                 }
             ],
-        },
-        {"role": "tool", "tool_call_id": "call_1", "content": "result"},
+        ),
+        _message(
+            message_id="msg_2",
+            ordinal=2,
+            role="tool",
+            content='{"ok": true}',
+            tool_call_id="call_1",
+        ),
     ]
-    tools = [
-        LLMToolDefinition(
-            name="lookup_memory",
-            description="Lookup memory.",
-            parameters={
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"],
-            },
-        )
-    ]
-    text_only_estimate = len("helloresult") // 4
-    message_estimate = PromptBuilder().estimate_prompt_tokens(messages)
-    estimate_with_tools = PromptBuilder().estimate_prompt_tokens(messages, tools=tools)
 
-    assert message_estimate > text_only_estimate
-    assert estimate_with_tools > message_estimate
-    assert PromptBuilder().rough_token_estimate(messages) == message_estimate
+    messages = builder.build("done?", history)
+
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["tool_calls"][0]["id"] == "call_1"  # type: ignore[index]
+    assert messages[2] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": '{"ok": true}',
+    }
+
+
+def test_wrap_system_reminder() -> None:
+    assert wrap_system_reminder("hello") == "<system-reminder>\nhello\n</system-reminder>"
+
+
+def test_session_context_loads_recent_tail_and_preserves_tool_pairs(tmp_path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    for role, content in [
+        ("user", "one"),
+        ("assistant", "two"),
+        ("user", "three"),
+    ]:
+        store.append_conversation_message(session_id="s1", role=role, raw_content=content)
+    assistant = store.append_conversation_message(
+        session_id="s1",
+        role="assistant",
+        raw_content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }
+        ],
+    )
+    store.append_conversation_message(
+        session_id="s1",
+        role="tool",
+        raw_content='{"ok": true}',
+        tool_call_id="call_1",
+    )
+
+    context = SessionContextManager(store, recent_tail_messages=2).load("s1")
+
+    assert [message.id for message in context.messages] == [
+        assistant.id,
+        store.list_conversation_messages("s1")[-1].id,
+    ]

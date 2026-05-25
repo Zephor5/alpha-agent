@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from alpha_agent.llm.base import LLMToolCall
-from alpha_agent.memory.models import RuntimeTrace
 from alpha_agent.runtime.events import deterministic_json
+from alpha_agent.state.models import RuntimeTrace
 from alpha_agent.tools.base import ToolCall, ToolResult
 from alpha_agent.tools.registry import ToolRegistry
 

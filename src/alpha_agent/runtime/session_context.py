@@ -4,38 +4,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from alpha_agent.memory.models import ConversationMessage, SessionContextState
-from alpha_agent.memory.store import MemoryStore
+from alpha_agent.state.models import ConversationMessage
+from alpha_agent.state.store import StateStore
 
 
 @dataclass(frozen=True)
 class SessionContextProjection:
-    """LLM-visible session context projected from durable transcript state."""
+    """LLM-visible session context projected from the recent transcript."""
 
-    state: SessionContextState | None
-    uncompressed_messages: list[ConversationMessage]
+    messages: list[ConversationMessage]
     before_ordinal: int | None = None
-
-    @property
-    def compressed_until_ordinal(self) -> int:
-        """Return the active compression boundary, or zero for uncompressed sessions."""
-
-        return self.state.compressed_until_ordinal if self.state is not None else 0
-
-    @property
-    def summary(self) -> str:
-        """Return the active compressed summary text, if any."""
-
-        if self.state is None:
-            return ""
-        return self.state.summary.strip()
 
 
 class SessionContextManager:
-    """Load stable session context without mutating the original transcript."""
+    """Load recent session context without mutating the transcript."""
 
-    def __init__(self, store: MemoryStore):
+    def __init__(self, store: StateStore, *, recent_tail_messages: int = 8):
         self.store = store
+        self.recent_tail_messages = max(0, recent_tail_messages)
 
     def load(
         self,
@@ -43,36 +29,20 @@ class SessionContextManager:
         *,
         before_ordinal: int | None = None,
     ) -> SessionContextProjection:
-        """Load compressed state and uncompressed transcript before an ordinal."""
+        """Load replay-safe recent transcript messages before an ordinal."""
 
-        state = self.store.get_session_context_state(session_id)
-        compressed_until = state.compressed_until_ordinal if state is not None else 0
-        if before_ordinal is not None and compressed_until >= before_ordinal:
-            raise ValueError(
-                "session context compressed_until_ordinal must be lower than "
-                f"before_ordinal for session {session_id!r}: "
-                f"{compressed_until} >= {before_ordinal}"
-            )
         messages = self.store.list_conversation_messages(
             session_id,
-            after_ordinal=compressed_until,
             before_ordinal=before_ordinal,
         )
-        messages = self._repair_tool_replay_head(
-            session_id=session_id,
-            messages=messages,
-            before_ordinal=before_ordinal,
-        )
+        if self.recent_tail_messages:
+            messages = messages[-self.recent_tail_messages :]
+        messages = self._repair_tool_replay_head(session_id, messages, before_ordinal)
         messages = self._drop_incomplete_tool_replay(messages)
-        return SessionContextProjection(
-            state=state,
-            uncompressed_messages=messages,
-            before_ordinal=before_ordinal,
-        )
+        return SessionContextProjection(messages=messages, before_ordinal=before_ordinal)
 
     def _repair_tool_replay_head(
         self,
-        *,
         session_id: str,
         messages: list[ConversationMessage],
         before_ordinal: int | None,
@@ -84,11 +54,14 @@ class SessionContextManager:
         if assistant is None:
             return self._drop_leading_tool_results(messages)
 
-        return self.store.list_conversation_messages(
+        repaired = self.store.list_conversation_messages(
             session_id,
             after_ordinal=assistant.ordinal - 1,
             before_ordinal=before_ordinal,
         )
+        if self.recent_tail_messages:
+            return repaired[-self.recent_tail_messages :]
+        return repaired
 
     def _find_assistant_for_tool_result(
         self,
@@ -102,9 +75,10 @@ class SessionContextManager:
             before_ordinal=tool_message.ordinal,
         )
         for message in reversed(prior_messages):
-            if message.role != "assistant" or not message.tool_calls:
-                continue
-            if tool_message.tool_call_id in self._tool_call_ids(message):
+            if (
+                message.role == "assistant"
+                and tool_message.tool_call_id in self._tool_call_ids(message)
+            ):
                 return message
         return None
 

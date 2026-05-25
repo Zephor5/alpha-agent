@@ -7,7 +7,7 @@ import pytest
 from alpha_agent.config import AlphaConfig
 from alpha_agent.daemon.runtime import AlphaDaemon, DaemonAlreadyRunningError
 from alpha_agent.daemon.status import DaemonRuntimeConfig, running_status, write_daemon_status
-from alpha_agent.memory.store import MemoryStore
+from alpha_agent.state.store import StateStore
 
 
 class _AgentResult:
@@ -77,7 +77,7 @@ def _config(tmp_path: Path) -> AlphaConfig:
 
 def test_daemon_handles_ask_with_session_guard_and_source_metadata(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     agent = _FakeAgent()
     daemon = AlphaDaemon(
@@ -123,7 +123,7 @@ def test_daemon_handles_ask_with_session_guard_and_source_metadata(tmp_path: Pat
 
 def test_daemon_returns_unknown_request_type_for_invalid_payload(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store)
 
@@ -135,7 +135,7 @@ def test_daemon_returns_unknown_request_type_for_invalid_payload(tmp_path: Path)
 
 def test_daemon_status_response_includes_runtime_paths(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store)
 
@@ -149,7 +149,7 @@ def test_daemon_status_response_includes_runtime_paths(tmp_path: Path) -> None:
 
 def test_daemon_stop_response_uses_current_graceful_stopping_status(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store)
 
@@ -164,7 +164,7 @@ def test_daemon_stop_response_uses_current_graceful_stopping_status(tmp_path: Pa
 
 def test_daemon_stop_response_accepts_immediate_policy(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store)
 
@@ -177,7 +177,7 @@ def test_daemon_stop_response_accepts_immediate_policy(tmp_path: Path) -> None:
 
 def test_daemon_stop_rejects_unknown_policy(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store)
 
@@ -190,7 +190,7 @@ def test_daemon_stop_rejects_unknown_policy(tmp_path: Path) -> None:
 
 def test_daemon_refuses_to_start_when_status_pid_is_alive(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     runtime = DaemonRuntimeConfig(
         socket_path=config.daemon_socket_path,
@@ -212,7 +212,7 @@ def test_daemon_disconnects_adapter_when_startup_connect_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     adapter = _FailingAdapter()
     monkeypatch.setattr("alpha_agent.daemon.runtime.configured_adapters", lambda: (adapter,))

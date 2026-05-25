@@ -2,6 +2,10 @@
 
 Status: completed
 Date: 2026-05-24
+Archive note: this record describes the completed pre-Phase-00
+memory-as-records work. Phase 00 later cleared that subsystem and reset the
+runtime to a state baseline; current long-term cognition work continues under
+`docs/todo/cognition-runtime/`.
 
 Active work: none. Phase 7 has been implemented and this execution ledger is
 kept only as the completed phase record.

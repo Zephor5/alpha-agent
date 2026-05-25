@@ -4,18 +4,19 @@ This document turns the Hermes implementation review into Alpha Agent's own
 near-term roadmap. The goal is practical usability parity where it matters:
 messaging access, reliable agent turns, observability, and operations. It is
 not a plan to copy Hermes internals. Alpha Agent's core direction remains its
-own explicit cognition-inspired memory runtime.
+own cognition runtime, rebuilt after the Phase 00 state baseline.
 
 ## Guiding Decisions
 
-- Keep memory native to Alpha Agent: working, episodic, semantic, procedural,
-  salience, retrieval, and consolidation stay as first-class internal services.
+- Memory-as-records has been removed by Phase 00. Long-term cognition is being
+  rebuilt as an event-sourced cognition runtime; see
+  `docs/todo/cognition-runtime/`.
 - Add messaging through a thin gateway layer, not by merging platform logic into
   the core agent runtime.
 - Normalize all platforms into one small internal message model before invoking
   the agent.
 - Prefer simple, inspectable sync/async boundaries. Platform adapters may need
-  async I/O, but the memory and agent core should remain understandable.
+  async I/O, but the state baseline and agent core should remain understandable.
 - Build for one human operator first. Avoid a broad plugin marketplace, massive
   slash-command surface, or multi-agent orchestration until the single-user path
   is useful.
@@ -85,10 +86,10 @@ These are prerequisites for making Alpha Agent usable outside `alpha chat`.
   - Thread session.
   - Thread per-user session.
 - [x] Store gateway session mappings in SQLite instead of ad hoc files.
-- [x] Decide how external platform identities map to Alpha memory scope:
-  - global user memory.
-  - platform-specific user memory.
-  - chat/thread-local session context.
+- [x] Preserve external platform identity metadata for the current state
+  baseline:
+  - platform user, chat, and thread fields remain source metadata.
+  - long-term cognition routing is deferred to `docs/todo/cognition-runtime/`.
 - [x] Add inbound message deduplication:
   - platform update/message id.
   - fallback text fingerprint with short TTL.
@@ -129,19 +130,15 @@ explicit while making it useful for real channels and longer tasks.
 - [x] Split the turn pipeline into named services without hiding flow:
   - append conversation message.
   - session context projection/compression.
-  - retrieval.
+  - recent session state loading.
   - prompt build.
   - model call.
   - assistant message write.
-  - extraction.
-  - consolidation trigger decision.
   - runtime diagnostic traces.
 - [x] Add structured runtime traces:
   - `llm.started`
   - `llm.completed`
-  - `memory.extracted`
   - `turn.failed`
-  - `context.compression.*`
 - [x] Add tool execution as an explicit subsystem:
   - keep tool registry small.
   - no hidden agent framework.
@@ -159,11 +156,7 @@ explicit while making it useful for real channels and longer tasks.
 - [x] Add prompt/debug inspection for channel turns:
   - `alpha debug prompt --session ...`
   - include gateway source context.
-  - include retrieved memory ids and ranking scores.
-- [x] Add memory review mode:
-  - show extracted candidates before storing.
-  - approve/reject/edit candidates.
-  - start with CLI.
+  - include the recent conversation state used to build the prompt.
 
 P1 Agent Loop implementation notes:
 
@@ -190,56 +183,17 @@ P1 Agent Loop implementation notes:
   model as deterministic JSON tool results so the next LLM round can correct.
 - Cancellation is synchronous and cooperative. The runtime checks session
   cancellation flags at safe boundaries before/after user message persistence,
-  retrieval, LLM, and tool stages. It cannot preempt a blocking provider or tool
-  call that does not return control.
+  state loading, LLM, and tool stages. It cannot preempt a blocking provider or
+  tool call that does not return control.
 - Retry is bounded around transient provider HTTP failures only; retry counts
   are recorded in turn debug metadata and runtime traces.
 - `alpha debug prompt MESSAGE` remains supported. `alpha debug prompt
-  --session ...` can include gateway source fields and prints the built prompt,
-  retrieved memory ids, retrieval score components, and selection reasons without
-  writing debug access rows.
-- Prompt construction keeps only the stable identity as a `system` message.
-  Optional reference-only retrieved memory and runtime reminders are sent as a
-  `user` message wrapped in `<system-reminder>...</system-reminder>`, followed
-  by optional compressed session summary, prior uncompressed transcript
-  messages, and the current user message as the final real chat message.
-  Procedural memories require explicit textual relevance before their procedure
-  bodies can enter the prompt.
-- `alpha memory review MESSAGE --session ...` previews extracted candidates
-  without writing durable semantic/episodic/procedural memory unless approved.
-  CLI flags support approve-all, reject-all, per-candidate approve/reject, and
-  selected candidate edit-and-approve. Rejected one-shot candidates are stored
-  as rejected candidates with decision rows for audit. Platform review commands
-  for Feishu/WeChat remain future adapter work tracked in the integration
-  sections.
-- Long-term memory now carries an explicit scope. CLI turns use the deterministic
-  `user:default` scope, gateway session metadata can derive chat/thread scopes,
-  and retrieval filters by the allowed scope set before ranking.
-- Retrieval now separates candidate generation from ranking. Selected memories
-  carry score components for keyword, FTS, recency, salience, stability, access,
-  scope priority, active status, and source confidence, and prompt construction
-  applies independent semantic, episodic, procedural, and session context
-  budgets.
-- Runtime extraction now persists `memory_candidates` first and records
-  `memory_decisions` for pending, auto-approve, approve, reject, edit, and
-  promotion outcomes. Stored candidate review is available through
-  `alpha memory review --list-pending`, `--list-stored`,
-  `--candidate-id ... --approve-stored`, `--reject-stored`, `--edit-stored`,
-  and `--inspect-stored`.
-- Memory operations are inspectable from the CLI: `alpha memory inspect`
-  answers "what do you remember about me?" with scope/status/confidence/source
-  evidence, `alpha memory diagnostics QUERY` explains score components and
-  PromptBuilder-aligned prompt budget impact by rendered section and budget
-  group, `alpha memory maintenance` handles stale candidate and scoped
-  inactive-index maintenance without transcript mutation, and `alpha memory
-  metrics` reports candidate volume, approval rate, conflict rate, retrieval hit
-  rate, and forgotten/deleted memory count.
-- Session compression now projects structured task state instead of deterministic
-  recap text and carries that state through `session_context_states.metadata`.
-  Consolidation can build source-backed `scene` and `persona` semantic
-  projections from reviewed active atomic evidence, with drill-down to active
-  atomic memories and transcript messages. Graph nodes/edges are limited to an
-  audit index over reviewed, source-backed non-user facts.
+  --session ...` can include gateway source fields and prints the built prompt
+  from the current state baseline without writing runtime access rows.
+- Prompt construction keeps only the stable identity as a `system` message,
+  followed by recent conversation messages and the current user message. There
+  is no long-term recall, extraction, candidate lifecycle, retrieval ranking, or
+  consolidation in the Phase 00 baseline.
 
 ## P1: Feishu Integration
 
@@ -269,7 +223,7 @@ implementation shows a mature and official-ish integration path.
   - apply allowlist before invoking agent.
 - [ ] Normalize identity carefully:
   - preserve `open_id`, `user_id`, and `union_id` in source metadata.
-  - prefer stable `union_id` for memory scope when available.
+  - preserve stable identity fields for future cognition counterpart routing.
   - do not leak raw IDs into prompt unless needed.
 - [ ] Add webhook security if webhook mode is implemented:
   - content-type check.
@@ -288,8 +242,8 @@ implementation shows a mature and official-ish integration path.
   - reply/thread context.
   - image/file receive.
   - file/image send.
-  - interactive card buttons for approve/deny memory candidates.
-  - expose memory review decisions through Feishu commands or cards.
+  - cognition review controls after the cognition runtime defines review
+    objects and decisions.
   - reaction events as command inputs only if genuinely useful.
 - [ ] Add tests:
   - webhook token/signature validation.
@@ -324,13 +278,13 @@ before writing code.
   - message id and fingerprint dedup.
   - text chunking for long replies.
   - basic typing status if supported.
-  - memory review command/buttons after the CLI review flow proves useful.
+  - cognition review command/buttons after the cognition review flow exists.
   - conservative media support later.
 - [ ] Keep Alpha's internal source model platform-neutral:
   - platform=`weixin`.
   - chat_id from peer/group id.
   - user_id from sender id.
-  - context_token stays adapter metadata, not agent memory.
+  - context_token stays adapter metadata, not cognition state.
 - [ ] Add WeChat tests:
   - update normalization.
   - context token cache behavior.
@@ -339,46 +293,24 @@ before writing code.
   - text chunking.
   - auth/allowlist.
 
-## P1: Memory-First Product Usability
+## P1: Cognition Product Usability
 
-These items make Alpha Agent feel different from a generic chat bot.
+These items make Alpha Agent feel different from a generic chat bot after the
+cognition runtime phases define the underlying objects.
 
-- [x] Add memory review commands:
-  - `alpha memory review --list-pending`
-  - `alpha memory review --candidate-id <id> --approve-stored`
-  - `alpha memory review --candidate-id <id> --reject-stored`
-  - `alpha memory review --candidate-id <id> --edit-stored`
-- [x] Store extracted candidates separately before promotion in the runtime
-  memory pipeline.
-- [x] Add confidence/source display to CLI memory inspection, audit, prompt
-  debug, and retrieval diagnostics. Platform reply decoration remains adapter UX
-  work after real adapters exist.
-- [x] Add "what do you remember about me?" command.
-- [x] Add "forget this" / "forget memory id" support.
-- [x] Add per-channel memory policy:
-  - DM can write semantic memory by default.
-  - group chats may require explicit "remember".
-  - platform/system messages should never become semantic facts.
-- [x] Add consolidation modes:
-  - manual.
-  - after N turns.
-  - scheduled only after gateway scheduler exists.
-- [x] Add extraction quality controls:
-  - deterministic extractor remains the offline default.
-  - LLM-assisted extractor validates returned JSON against a local strict
-    candidate schema with mock provider contract tests.
-  - recent session context and retrieved active memories are passed to the
-    extractor for update/contradiction detection.
-- [x] Add duplicate/contradiction handling:
-  - detect conflicting semantic facts by subject/predicate.
-  - mark older fact superseded instead of deleting immediately.
-  - expose lifecycle audit through `alpha memory audit <memory-id>`.
-- [x] Add memory operations reporting:
-  - stale candidate maintenance.
-  - inactive memory search-index cleanup.
-  - retrieval diagnostics with score and prompt budget impact.
-  - candidate volume, approval rate, conflict rate, retrieval hit rate, and
-    forgotten/deleted count.
+- [ ] Add cognition review commands once Phase 02+ defines durable review
+  records and decisions.
+- [ ] Add confidence/source display to cognition inspection, prompt debug, and
+  diagnostics after belief projection exists.
+- [ ] Add "what do you know about me?" inspection on top of projected beliefs.
+- [ ] Add correction/forget semantics on top of cognition events and belief
+  projection.
+- [ ] Add per-channel cognition policy:
+  - DM can create trusted observations under explicit rules.
+  - group chats require clear routing and write policy.
+  - platform/system messages should never become durable user facts.
+- [ ] Add consolidation/reporting only after the cognition event log and
+  reflection phases are in place.
 
 ## P2: Engineering And Operations
 
@@ -425,17 +357,20 @@ These items make Alpha Agent feel different from a generic chat bot.
 
 Keep channel commands small and operational.
 
-- [ ] `/status`: current session id, provider, memory counts, active turn state.
+- [ ] `/status`: current session id, provider, cognition status, active turn
+  state.
 - [ ] `/reset`: reset session context for this channel.
 - [ ] `/stop`: cancel active turn.
-- [ ] `/remember <text>`: explicit memory write candidate.
-- [ ] `/forget <id>`: mark memory inactive/superseded.
-- [ ] `/consolidate`: run manual consolidation if authorized.
+- [ ] `/remember <text>`: explicit cognition observation/review request after
+  the cognition review model exists.
+- [ ] `/forget <id>`: apply correction/forget semantics after belief projection
+  supports them.
+- [ ] `/consolidate`: run manual cognition consolidation if authorized.
 - [ ] `/debug prompt`: admin-only prompt inspection.
 
 Avoid adding broad model switching, plugin management, update commands, kanban
 commands, or multi-agent controls until Alpha Agent has stable messaging and
-memory review.
+cognition review.
 
 ## Suggested Build Order
 
@@ -446,11 +381,11 @@ memory review.
    - active-turn guard.
    - `/stop` cancellation path.
    - bounded provider retry.
-   - prompt/retrieval debug metadata for channel turns.
+   - prompt/state debug metadata for channel turns.
 4. Wire CLI `alpha daemon start/status/stop` and `alpha gateway status/doctor`.
 5. Add Feishu text MVP with allowlist, mention gating, and tests.
 6. Add channel commands `/status`, `/reset`, `/stop`, `/remember`.
-7. Add memory candidate review flow.
+7. Add cognition review flow after the cognition runtime phases define it.
 8. Decide WeChat target after confirming the real account/channel constraints.
 9. Add chosen WeChat adapter.
 10. Add service/runtime status and deployment templates.

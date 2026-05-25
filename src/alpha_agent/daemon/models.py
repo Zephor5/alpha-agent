@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-RequestType = Literal["ask", "chat_turn", "consolidate_memory", "status", "stop"]
+RequestType = Literal["ask", "chat_turn", "status", "stop"]
 StopPolicyValue = Literal["graceful", "immediate"]
 STOP_POLICIES: frozenset[str] = frozenset(("graceful", "immediate"))
 
@@ -38,7 +38,7 @@ def parse_request(payload: Any) -> DaemonRequest:
     request_type = payload.get("type")
     if not isinstance(request_type, str):
         raise DaemonProtocolError("INVALID_REQUEST", "Request type is required.")
-    if request_type not in {"ask", "chat_turn", "consolidate_memory", "status", "stop"}:
+    if request_type not in {"ask", "chat_turn", "status", "stop"}:
         raise DaemonProtocolError(
             "UNKNOWN_REQUEST_TYPE",
             f"Unknown daemon request type: {request_type}",

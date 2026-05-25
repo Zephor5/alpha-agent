@@ -14,7 +14,7 @@ from alpha_agent.daemon.status import (
     daemon_lock_path,
     read_daemon_status,
 )
-from alpha_agent.memory.store import MemoryStore
+from alpha_agent.state.store import StateStore
 
 
 class _FakeManager:
@@ -99,7 +99,7 @@ def test_daemon_runtime_lock_prevents_double_start_without_status_file(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     runtime = _runtime(config)
     owner = AlphaDaemon(config, store=store, runtime=runtime)
@@ -118,7 +118,7 @@ def test_daemon_runtime_lock_replaces_stale_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     runtime = _runtime(config)
     lock_path = daemon_lock_path(runtime)
@@ -141,7 +141,7 @@ def test_daemon_runtime_lock_replaces_stale_invalid_owner(
     contents: str,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     runtime = _runtime(config)
     lock_path = daemon_lock_path(runtime)
@@ -164,7 +164,7 @@ def test_daemon_runtime_lock_preserves_fresh_invalid_owner(
     contents: str,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     runtime = _runtime(config)
     lock_path = daemon_lock_path(runtime)
@@ -183,7 +183,7 @@ def test_daemon_runtime_lock_preserves_valid_live_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     runtime = _runtime(config)
     lock_path = daemon_lock_path(runtime)
@@ -203,7 +203,7 @@ def test_daemon_runtime_lock_is_released_after_server_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     manager = _FakeManager()
     monkeypatch.setattr("alpha_agent.daemon.runtime.configured_adapters", lambda: ())
@@ -229,7 +229,7 @@ def test_daemon_runtime_lock_is_released_after_server_failure(
 
 def test_daemon_stop_policy_is_explicit_and_graceful_by_default(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store, runtime=_runtime(config))
     server = _FailingServer(config.daemon_socket_path, daemon.handle_payload)
@@ -248,7 +248,7 @@ def test_daemon_stop_policy_is_explicit_and_graceful_by_default(tmp_path: Path) 
 
 def test_daemon_stop_policy_can_be_immediate(tmp_path: Path) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store, runtime=_runtime(config))
     server = _FailingServer(config.daemon_socket_path, daemon.handle_payload)
@@ -269,7 +269,7 @@ def test_daemon_signal_handlers_request_stop_and_restore_previous_handlers(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store, runtime=_runtime(config))
     fake_signals = _FakeSignalModule()
@@ -292,7 +292,7 @@ def test_daemon_cleanup_runs_before_signal_restore_error_is_raised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     manager = _FakeManager()
     monkeypatch.setattr("alpha_agent.daemon.runtime.configured_adapters", lambda: ())

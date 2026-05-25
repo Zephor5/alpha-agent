@@ -99,8 +99,8 @@ def test_deepseek_provider_sends_tools_and_tool_choice_wire_shape(
         [{"role": "user", "content": "ping"}],
         tools=[
             LLMToolDefinition(
-                name="lookup_memory",
-                description="Look up relevant memory.",
+                name="lookup_context",
+                description="Look up relevant context.",
                 parameters={
                     "type": "object",
                     "properties": {"query": {"type": "string"}},
@@ -108,15 +108,15 @@ def test_deepseek_provider_sends_tools_and_tool_choice_wire_shape(
                 },
             )
         ],
-        tool_choice={"type": "function", "function": {"name": "lookup_memory"}},
+        tool_choice={"type": "function", "function": {"name": "lookup_context"}},
     )
 
     assert captured["json"]["tools"] == [
         {
             "type": "function",
             "function": {
-                "name": "lookup_memory",
-                "description": "Look up relevant memory.",
+                "name": "lookup_context",
+                "description": "Look up relevant context.",
                 "parameters": {
                     "type": "object",
                     "properties": {"query": {"type": "string"}},
@@ -127,7 +127,7 @@ def test_deepseek_provider_sends_tools_and_tool_choice_wire_shape(
     ]
     assert captured["json"]["tool_choice"] == {
         "type": "function",
-        "function": {"name": "lookup_memory"},
+        "function": {"name": "lookup_context"},
     }
 
 
@@ -137,7 +137,7 @@ def test_deepseek_provider_parses_tool_calls(monkeypatch: pytest.MonkeyPatch) ->
             "id": "call_1",
             "type": "function",
             "function": {
-                "name": "lookup_memory",
+                "name": "lookup_context",
                 "arguments": '{"query":"alpha","limit":2}',
             },
         }
@@ -168,7 +168,7 @@ def test_deepseek_provider_parses_tool_calls(monkeypatch: pytest.MonkeyPatch) ->
     assert len(response.tool_calls) == 1
     tool_call = response.tool_calls[0]
     assert tool_call.id == "call_1"
-    assert tool_call.name == "lookup_memory"
+    assert tool_call.name == "lookup_context"
     assert tool_call.arguments == {"query": "alpha", "limit": 2}
     assert tool_call.raw_arguments == '{"query":"alpha","limit":2}'
     assert response.metadata["response_id"] == "chatcmpl-1"
@@ -199,7 +199,7 @@ def test_deepseek_provider_preserves_invalid_tool_call_arguments(
                                     "id": "call_bad",
                                     "type": "function",
                                     "function": {
-                                        "name": "lookup_memory",
+                                        "name": "lookup_context",
                                         "arguments": '{"query":',
                                     },
                                 }
@@ -255,7 +255,7 @@ def test_openai_compatible_provider_parses_tool_calls(monkeypatch: pytest.Monkey
             "id": "call_1",
             "type": "function",
             "function": {
-                "name": "lookup_memory",
+                "name": "lookup_context",
                 "arguments": '{"query":"alpha"}',
             },
         }
@@ -290,7 +290,7 @@ def test_openai_compatible_provider_parses_tool_calls(monkeypatch: pytest.Monkey
     assert response.content == ""
     assert response.finish_reason == "tool_calls"
     assert response.tool_calls[0].id == "call_1"
-    assert response.tool_calls[0].name == "lookup_memory"
+    assert response.tool_calls[0].name == "lookup_context"
     assert response.tool_calls[0].arguments == {"query": "alpha"}
     assert response.metadata["response_id"] == "chatcmpl-compat"
     assert response.metadata["finish_reason"] == "tool_calls"
@@ -333,7 +333,7 @@ def test_openai_compatible_provider_preserves_tool_messages_in_request(
                 {
                     "id": "call_1",
                     "type": "function",
-                    "function": {"name": "lookup_memory", "arguments": '{"query":"alpha"}'},
+                    "function": {"name": "lookup_context", "arguments": '{"query":"alpha"}'},
                 }
             ],
         },
@@ -372,8 +372,8 @@ def test_openai_compatible_provider_sends_tools_with_none_tool_choice(
         [{"role": "user", "content": "finalize"}],
         tools=[
             LLMToolDefinition(
-                name="lookup_memory",
-                description="Look up relevant memory.",
+                name="lookup_context",
+                description="Look up relevant context.",
                 parameters={
                     "type": "object",
                     "properties": {"query": {"type": "string"}},
@@ -389,8 +389,8 @@ def test_openai_compatible_provider_sends_tools_with_none_tool_choice(
         {
             "type": "function",
             "function": {
-                "name": "lookup_memory",
-                "description": "Look up relevant memory.",
+                "name": "lookup_context",
+                "description": "Look up relevant context.",
                 "parameters": {
                     "type": "object",
                     "properties": {"query": {"type": "string"}},

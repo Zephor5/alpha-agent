@@ -1,9 +1,9 @@
 # Alpha Agent
 
-Alpha Agent is a personal agent runtime with explicit memory layers inspired by
-human cognition. The first version is intentionally small and controllable: it
-runs from the CLI, stores experience in SQLite, retrieves memory without
-embeddings, builds a transparent prompt, and uses either a mock LLM or an
+Alpha Agent is a personal agent runtime for rebuilding cognition from first
+principles. The current baseline is intentionally small and controllable: it
+runs from the CLI, stores session-level state in SQLite, builds a transparent
+prompt from recent conversation state, and uses either a mock LLM or an
 OpenAI-compatible chat completions provider.
 
 This is not a LangChain, LangGraph, LlamaIndex, AutoGen, CrewAI, or similar
@@ -17,38 +17,21 @@ access, session routing, status reporting, and local operations. The intent is
 usability parity where it matters for daily use, not internal design parity.
 
 The core agent runtime remains Alpha's own design: explicit turn execution,
-SQLite-backed memory layers, deterministic retrieval, salience scoring, and
-policy-gated consolidation. Hermes' plugin/provider/gateway implementation is
-treated as reference material for integration decisions, not as code to copy
-wholesale.
+SQLite-backed state, transparent prompt assembly, and direct provider/tool
+wiring. Hermes' plugin/provider/gateway implementation is treated as reference
+material for integration decisions, not as code to copy wholesale.
 See `docs/todo/TODO.md` for the current Hermes-informed roadmap.
 
-## What Human-Like Memory Means Here
+## Cognition Status
 
-Human-like memory in this project means separating memory by role instead of
-putting everything into one transcript:
+Phase 00 has cleared the previous memory-as-records subsystem. The current
+runtime has no long-term memory, retrieval, extraction, candidate review, or
+consolidation layer. It keeps only state needed to run turns: conversation
+messages, runtime traces, gateway session mappings, and gateway deduplication.
 
-- Session context: append-only conversation messages plus optional compressed
-  summaries for long-running sessions.
-- Episodic memory: specific experiences and remembered events.
-- Semantic memory: durable facts, preferences, and user-specific knowledge.
-- Procedural memory: reusable ways of doing things, stored as skills.
-- Memory scope: long-term memory is stored and retrieved by explicit default,
-  platform-user, chat/thread, or project scopes.
-- Candidate lifecycle: extracted candidates are stored before promotion, with
-  auditable approve, reject, and auto-approve decisions.
-- Extraction policy: deterministic extraction remains the default offline path;
-  optional LLM-assisted extraction is locally schema-validated and must be
-  injected with a provider. The current provider interface does not enforce
-  structured output itself. Explicit do-not-remember requests, secrets, platform/system
-  messages, and ambient group-chat chatter are blocked before candidate writes.
-- Salience scoring: deterministic importance estimates for what should persist.
-- Consolidation: a manual or after-N-turn pass that promotes stable facts,
-  merges duplicates, supersedes corrections, and queues low-confidence conflicts
-  for review.
-
-The implementation is transparent and basic. It is designed to be inspected,
-changed, and extended.
+Long-term cognition is being rebuilt in the staged plan under
+`docs/todo/cognition-runtime/`. Future phases will introduce the cognition
+event log and higher-level reasoning structures on top of this state baseline.
 
 ## Install
 
@@ -100,40 +83,6 @@ Run a single turn:
 uv run alpha ask "hello"
 ```
 
-Inspect memory:
-
-```bash
-uv run alpha memory list
-uv run alpha memory inspect
-uv run alpha memory inspect --scope-key user:default --include-inactive
-uv run alpha memory search "sqlite preferences"
-uv run alpha memory diagnostics "why did tea preferences matter?"
-uv run alpha memory maintenance --stale-days 14 --cleanup-inactive-index
-uv run alpha memory metrics
-uv run alpha memory stats
-uv run alpha memory consolidate
-uv run alpha memory audit <memory-id>
-uv run alpha memory forget <memory-id>
-uv run alpha memory review "remember that I prefer concise answers"
-uv run alpha memory review --list-pending
-uv run alpha memory review --list-stored
-uv run alpha memory review --candidate-id <candidate-id> --inspect-stored
-uv run alpha memory review --candidate-id <candidate-id> --edit-stored --edit-content "User prefers concise answers"
-uv run alpha memory review --candidate-id <candidate-id> --approve-stored
-```
-
-Semantic memories use an auditable lifecycle. Duplicate facts merge source ids,
-corrected facts supersede stale active facts, and forgotten facts are marked
-`deleted` instead of being physically removed. Retrieval and prompt context only
-use active semantic memories. `alpha memory inspect` answers the operational
-version of "what do you remember about me?" and shows scope, status,
-confidence, and source ids for visible memories and reviewable candidates.
-`alpha memory audit <memory-id>` shows source ids, supersession chain,
-projection drill-down, and graph relation audit edges when present;
-`alpha memory forget <memory-id>` removes the memory from retrieval immediately
-while preserving evidence for audit. CLI forget uses the default local CLI
-memory scope visibility rules and refuses ids outside that scope.
-
 Inspect procedural skills:
 
 ```bash
@@ -143,8 +92,8 @@ uv run alpha skills list
 Print the prompt without calling the LLM:
 
 ```bash
-uv run alpha debug prompt "what do you remember about my preferences?"
-uv run alpha debug prompt "what do you remember here?" --session <session-id>
+uv run alpha debug prompt "summarize the current session"
+uv run alpha debug prompt "summarize this channel" --session <session-id>
 ```
 
 Inspect raw LLM request/response traces from CLI runs:
@@ -173,14 +122,12 @@ with `ALPHA_CONFIG_PATH`.
 
 Use `alpha config set <section.key> <value>` for supported keys such as
 `llm.provider`, `llm.model`, `llm.debug_logging`, `deepseek.api_key`,
-`codex.access_token`, `memory.retrieval_limit`, `context.max_prompt_tokens`,
-and the per-layer context budgets such as `context.semantic_memory_tokens`.
+`codex.access_token`, `context.max_prompt_tokens`, and
+`context.recent_tail_messages`.
 Secret values are masked by `alpha config get` unless you pass
 `--reveal-secret`.
 Config loading applies the same validation as `alpha config set`: token and
-count limits must be positive integers, and
-`context.compression_threshold_ratio` must be greater than `0` and no more than
-`1`.
+count limits must be positive integers.
 
 Environment variables and `.env` still work as overrides for one-off runs,
 deployment, and secrets. Precedence is:
@@ -214,24 +161,9 @@ reasoning_enabled = true
 [codex]
 access_token = ""
 
-[memory]
-retrieval_limit = 8
-capture_mode = "auto_approve_explicit"
-cli_capture_mode = ""
-gateway_capture_mode = "candidate_only"
-consolidation_mode = "manual"
-consolidation_after_turns = 20
-
 [context]
 max_prompt_tokens = 6000
-compression_threshold_ratio = 0.85
 recent_tail_messages = 8
-min_summary_tokens = 256
-max_summary_tokens = 1024
-semantic_memory_tokens = 512
-episodic_memory_tokens = 512
-procedural_memory_tokens = 512
-session_context_tokens = 2048
 ```
 
 Useful environment overrides:
@@ -257,27 +189,8 @@ Useful environment overrides:
 - `ALPHA_DEEPSEEK_API_KEY`: DeepSeek API key when `ALPHA_LLM_PROVIDER=deepseek`.
 - `ALPHA_CODEX_ACCESS_TOKEN`: Optional Codex OAuth bearer token. If omitted,
   Alpha tries `CODEX_HOME/auth.json` or `~/.codex/auth.json`.
-- `ALPHA_RETRIEVAL_LIMIT`: Retrieval limit per memory layer. Defaults to `8`.
-- `ALPHA_MEMORY_CAPTURE_MODE`: `disabled`, `candidate_only`, or
-  `auto_approve_explicit`.
-- `ALPHA_CLI_MEMORY_CAPTURE_MODE`: Optional CLI-channel override for
-  `ALPHA_MEMORY_CAPTURE_MODE`; empty inherits the global mode.
-- `ALPHA_GATEWAY_MEMORY_CAPTURE_MODE`: Optional gateway-channel override for
-  `ALPHA_MEMORY_CAPTURE_MODE`; empty inherits the global mode.
-- `ALPHA_MEMORY_CONSOLIDATION_MODE`: `manual`, `after_n_turns`, or `scheduled`.
-  Scheduled mode is a placeholder until a scheduler exists.
-- `ALPHA_MEMORY_CONSOLIDATION_AFTER_TURNS`: Turn interval for `after_n_turns`.
-- `ALPHA_CONTEXT_MAX_PROMPT_TOKENS`: Prompt budget before compression.
-- `ALPHA_CONTEXT_COMPRESSION_THRESHOLD_RATIO`: Ratio of the prompt budget that
-  triggers compression.
+- `ALPHA_CONTEXT_MAX_PROMPT_TOKENS`: Prompt budget for the current turn.
 - `ALPHA_CONTEXT_RECENT_TAIL_MESSAGES`: Uncompressed transcript tail to preserve.
-- `ALPHA_CONTEXT_MIN_SUMMARY_TOKENS`: Lower target for compressed summaries.
-- `ALPHA_CONTEXT_MAX_SUMMARY_TOKENS`: Upper target for compressed summaries.
-- `ALPHA_CONTEXT_SEMANTIC_MEMORY_TOKENS`: Prompt budget for semantic facts.
-- `ALPHA_CONTEXT_EPISODIC_MEMORY_TOKENS`: Prompt budget for prior episodes.
-- `ALPHA_CONTEXT_PROCEDURAL_MEMORY_TOKENS`: Prompt budget for procedures.
-- `ALPHA_CONTEXT_SESSION_CONTEXT_TOKENS`: Prompt budget for compressed summary
-  and uncompressed session context.
 
 The mock provider works without an API key:
 
@@ -296,117 +209,37 @@ Codex uses OAuth-style bearer credentials. The simplest path is to log in with
 Codex CLI first so `~/.codex/auth.json` exists; `ALPHA_CODEX_ACCESS_TOKEN` is
 only an override.
 
-## Retrieval
+## Runtime State
 
-This version deliberately avoids embeddings. Retrieval has two explicit stages:
+The current SQLite state baseline is deliberately narrow:
 
-1. Candidate generation from FTS/LIKE search plus recent memories, filtered by
-   allowed scope and active lifecycle status before prompt injection.
-2. Ranking with a score breakdown attached to each selected memory.
+- `conversation_messages`: append-only session transcript used for current
+  prompt context.
+- `runtime_traces`: operational turn, provider, and tool traces.
+- `gateway_session_mappings`: platform/session routing state.
+- `gateway_dedup`: inbound gateway deduplication state.
 
-Retrieval uses:
-
-- SQLite FTS5 when available.
-- LIKE-based fallback search when FTS5 is unavailable.
-- Keyword overlap.
-- Recency.
-- Salience.
-- Stability.
-- Access count.
-- Scope priority.
-- Active status.
-- Source confidence.
-- Lightweight entity hints from title-cased names.
-- Query expansion from current query entities, structured session state, and
-  high-confidence profile/preference memories.
-
-The ranking formula is explicit:
-
-```text
-score =
-  keyword_score * 0.30
-  + fts_match * 0.12
-  + recency_score * 0.16
-  + salience * 0.14
-  + stability * 0.10
-  + access_score * 0.08
-  + scope_priority * 0.08
-  + active_status * 0.06
-  + source_confidence * 0.06
-```
-
-`alpha memory search QUERY`, `alpha memory diagnostics QUERY`, and
-`alpha debug prompt QUERY` show retrieval scores and selection reasons.
-Diagnostics reports prompt budget impact from the same rendered memory sections
-used by `PromptBuilder`, including source/status/confidence/score prefixes,
-persona/scene/procedural formatting, section overhead, and truncation, without
-writing access-log rows. The diagnostics table distinguishes rendered sections
-from budget groups: persona and user-fact sections spend the semantic memory
-budget, scene and prior-episode sections spend the episodic budget, and
-procedure sections spend the procedural budget. Prompt construction applies
-independent budgets for semantic, episodic, procedural, and session context so
-one layer cannot consume the full context message.
-
-Memory operations commands are intentionally transcript-safe. `alpha memory
-maintenance` can list stale candidates, reject stale pending/edited candidates,
-remove visible-scope inactive semantic rows from the optional FTS index, run
-consolidation, and run retrieval diagnostics without editing append-only
-conversation history. `alpha memory metrics` reports candidate volume, approval
-rate, conflict rate, retrieval hit rate, and forgotten/deleted semantic memory
-count.
-
-Session compression now stores a structured session-state projection instead of
-message-clipping text. The projection tracks current goal, decisions, open
-questions, pending tasks, user constraints, relevant files/entities, and the
-last compressed action in `session_context_states.metadata["projection"]`.
-Subsequent compression reads that structured projection instead of recovering
-state from clipped Markdown.
-
-Consolidation can also create two source-backed higher-level semantic memory
-types:
-
-- `scene`: topic/project summaries built from reviewed active atomic semantic
-  memories that still resolve to transcript source messages.
-- `persona`: low-frequency profile summaries built only from active,
-  high-confidence, high-stability reviewed memories; scene summaries may inform
-  wording but are not exposed as persona source ids.
-
-Persona and scene items are reference-only prompt context. They include source
-memory ids and source message ids for active reviewed evidence only, and can be
-drilled down to active atomic semantic memories plus original transcript
-messages. Superseded projection rows retain older evidence for audit history,
-but stale source ids are not shown as active prompt evidence.
-
-Graph data remains auxiliary: consolidation only writes entity nodes and
-relation edges for reviewed, source-backed non-user facts. The graph is an audit
-index: relation search resolves active evidence memories and transcript source
-messages, while stale edge evidence is filtered out of active audit results.
+Prompt construction uses the system prompt plus the recent conversation tail.
+There is no long-term recall or cross-session cognition until the cognition
+runtime phases add those capabilities back on the new architecture.
 
 ## Current Limitations
 
-- No vector retrieval yet; non-vector retrieval remains the only active
-  retriever.
+- No long-term cognition runtime yet; Phase 00 is the state baseline.
 - No web UI.
-- No background scheduler; scheduled consolidation is only a config placeholder.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
-- Memory extraction defaults to deterministic heuristics; LLM-assisted
-  extraction is available as an injected component with local JSON schema
-  validation.
-- Graph memory is intentionally narrow and evidence-backed; it is not a general
-  graph aggregation layer.
 
 ## Roadmap
 
-1. Vector retrieval as an optional module.
-2. Richer graph consolidation.
-3. Background scheduler for scheduled consolidation.
-4. Broader LLM extraction UX and review controls.
-5. Tool execution system.
-6. Local files / notes ingestion.
-7. API server.
-8. Web UI.
-9. Channel integrations.
+1. Cognition runtime Phase 01: event log foundations.
+2. Cognition runtime Phase 02+: counterpart routing, belief projection, context
+   window, reflection, consolidation, value lens, and drive loop.
+3. Tool execution system.
+4. Local files / notes ingestion.
+5. API server.
+6. Web UI.
+7. Channel integrations.
 
 ## Development
 

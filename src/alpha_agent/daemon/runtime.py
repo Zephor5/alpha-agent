@@ -42,9 +42,8 @@ from alpha_agent.gateway.config import (
 )
 from alpha_agent.gateway.runner import ActiveTurnGuard, GatewayRuntimeBridge
 from alpha_agent.gateway.session import GatewayDeduplicator, GatewaySessionStore, SessionMode
-from alpha_agent.memory.consolidation import ConsolidationService
-from alpha_agent.memory.store import MemoryStore
 from alpha_agent.runtime.session import new_session_id
+from alpha_agent.state.store import StateStore
 
 LOCAL_BUSY_MESSAGE = "This session already has an active Alpha turn."
 
@@ -67,7 +66,7 @@ class AlphaDaemon:
         self,
         config: AlphaConfig,
         *,
-        store: MemoryStore | None = None,
+        store: StateStore | None = None,
         agent_manager: AgentManager | None = None,
         turn_guard: ActiveTurnGuard | None = None,
         runtime: DaemonRuntimeConfig | None = None,
@@ -97,9 +96,6 @@ class AlphaDaemon:
         if request.type == "stop":
             self.stop(StopPolicy(request.stop_policy))
             return ok_response(status=self.status().to_json())
-        if request.type == "consolidate_memory":
-            report = ConsolidationService(self.store).consolidate()
-            return ok_response(response=report.render())
         if request.type in {"ask", "chat_turn"}:
             return self._handle_turn(request)
         return error_response("UNKNOWN_REQUEST_TYPE", f"Unknown request type: {request.type}")

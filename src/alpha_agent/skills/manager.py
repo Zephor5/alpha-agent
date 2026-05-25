@@ -1,15 +1,13 @@
-"""Load and rank procedural skill definitions.
+"""Load and rank built-in skill definitions.
 
 The manager deliberately keeps skill loading simple: builtin skills are Markdown
-files with a small metadata header, and the returned dataclass can later be
-converted into a procedural-memory storage record.
+files with a small metadata header.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,24 +29,6 @@ class SkillDefinition:
     failure_count: int = 0
     confidence: float = 0.75
     metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_procedural_memory_dict(self) -> dict[str, Any]:
-        """Return values shaped like the planned ProceduralMemory model."""
-        now = datetime.now(UTC).isoformat()
-        return {
-            "id": self.id,
-            "name": self.name,
-            "description": self.description,
-            "trigger": self.trigger,
-            "procedure_markdown": self.procedure_markdown,
-            "success_count": self.success_count,
-            "failure_count": self.failure_count,
-            "confidence": self.confidence,
-            "created_at": now,
-            "updated_at": now,
-            "metadata": dict(self.metadata),
-        }
-
 
 class SkillManager:
     """Load builtin procedural skills and rank them by lexical relevance."""

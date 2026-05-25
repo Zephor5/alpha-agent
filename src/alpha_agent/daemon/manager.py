@@ -14,10 +14,8 @@ from alpha_agent.llm.codex import CodexResponsesProvider
 from alpha_agent.llm.deepseek import DeepSeekProvider
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
-from alpha_agent.memory.procedural import ProceduralMemoryManager
-from alpha_agent.memory.retrieval import MemoryRetriever
-from alpha_agent.memory.store import MemoryStore
 from alpha_agent.runtime.agent import AlphaAgent
+from alpha_agent.state.store import StateStore
 
 
 @dataclass(slots=True)
@@ -42,10 +40,10 @@ def build_provider(config: AlphaConfig) -> LLMProvider:
     raise ValueError(f"Unknown ALPHA_LLM_PROVIDER: {config.llm_provider}")
 
 
-def initialize_store(config: AlphaConfig) -> MemoryStore:
-    """Initialize and return the daemon-owned memory store."""
+def initialize_store(config: AlphaConfig) -> StateStore:
+    """Initialize and return the daemon-owned state store."""
 
-    store = MemoryStore(config.db_path)
+    store = StateStore(config.db_path)
     store.initialize()
     return store
 
@@ -53,41 +51,22 @@ def initialize_store(config: AlphaConfig) -> MemoryStore:
 class AgentFactory:
     """Build AlphaAgent instances sharing daemon-owned infrastructure."""
 
-    def __init__(self, config: AlphaConfig, store: MemoryStore):
+    def __init__(self, config: AlphaConfig, store: StateStore):
         self.config = config
         self.store = store
-        self._builtin_skills_loaded = False
         self._lock = Lock()
 
     def create(self) -> AlphaAgent:
         """Create one session-scoped AlphaAgent."""
 
         with self._lock:
-            if not self._builtin_skills_loaded:
-                ProceduralMemoryManager(self.store).load_builtin_skills()
-                self._builtin_skills_loaded = True
+            provider = build_provider(self.config)
         return AlphaAgent(
             store=self.store,
-            llm_provider=build_provider(self.config),
-            retriever=MemoryRetriever(self.store),
-            retrieval_limit=self.config.retrieval_limit,
-            memory_capture_mode=self.config.memory_capture_mode,
-            memory_channel_capture_modes=self.config.memory_channel_capture_modes,
-            memory_consolidation_mode=self.config.memory_consolidation_mode,
-            memory_consolidation_after_turns=self.config.memory_consolidation_after_turns,
+            llm_provider=provider,
             llm_debug_logging=self.config.llm_debug_logging,
             llm_trace_log_path=Path(self.config.log_dir) / "llm.jsonl",
-            context_max_prompt_tokens=self.config.context_max_prompt_tokens,
-            context_compression_threshold_ratio=(
-                self.config.context_compression_threshold_ratio
-            ),
             context_recent_tail_messages=self.config.context_recent_tail_messages,
-            context_min_summary_tokens=self.config.context_min_summary_tokens,
-            context_max_summary_tokens=self.config.context_max_summary_tokens,
-            context_semantic_memory_tokens=self.config.context_semantic_memory_tokens,
-            context_episodic_memory_tokens=self.config.context_episodic_memory_tokens,
-            context_procedural_memory_tokens=self.config.context_procedural_memory_tokens,
-            context_session_context_tokens=self.config.context_session_context_tokens,
         )
 
 

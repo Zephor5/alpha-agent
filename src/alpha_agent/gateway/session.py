@@ -16,9 +16,8 @@ from alpha_agent.gateway.models import (
     OutboundMessage,
     Visibility,
 )
-from alpha_agent.memory.models import MemoryScope
-from alpha_agent.memory.store import MemoryStore
 from alpha_agent.runtime.session import new_session_id
+from alpha_agent.state.store import StateStore
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now
 
@@ -44,7 +43,7 @@ class GatewaySessionMapping:
     session_key: str
     session_id: str
     session_mode: SessionMode
-    memory_scope: dict[str, Any]
+    source_context: dict[str, Any]
     created_at: str
     updated_at: str
 
@@ -69,8 +68,8 @@ def generate_session_key(source: ConversationSource, mode: SessionMode) -> str:
 class GatewaySessionStore:
     """Persistence for external gateway conversation scopes and Alpha session ids."""
 
-    def __init__(self, memory_store: MemoryStore):
-        self.memory_store = memory_store
+    def __init__(self, state_store: StateStore):
+        self.state_store = state_store
 
     def get_or_create(
         self,
@@ -80,16 +79,16 @@ class GatewaySessionStore:
         """Return the existing Alpha session mapping for source and mode, or create one."""
 
         session_key = generate_session_key(source, mode)
-        with self.memory_store.transaction() as conn:
+        with self.state_store.transaction() as conn:
             now = _iso(utc_now())
-            memory_scope = _memory_scope(source, mode, session_key)
+            source_context = _source_context(source, mode, session_key)
             mapping_id = new_id("gateway_session")
             session_id = new_session_id()
             conn.execute(
                 """
                 INSERT OR IGNORE INTO gateway_session_mappings
                     (id, platform, chat_id, chat_type, user_id, thread_id, session_mode,
-                     session_key, session_id, memory_scope, created_at, updated_at, metadata)
+                     session_key, session_id, source_context, created_at, updated_at, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -102,7 +101,7 @@ class GatewaySessionStore:
                     mode.value,
                     session_key,
                     session_id,
-                    _dumps(memory_scope),
+                    _dumps(source_context),
                     now,
                     now,
                     _dumps(source.metadata),
@@ -125,7 +124,7 @@ class GatewaySessionStore:
             session_key=row["session_key"],
             session_id=row["session_id"],
             session_mode=SessionMode(row["session_mode"]),
-            memory_scope=_loads_dict(row["memory_scope"]),
+            source_context=_loads_dict(row["source_context"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -136,10 +135,10 @@ class GatewayDeduplicator:
 
     def __init__(
         self,
-        memory_store: MemoryStore,
+        state_store: StateStore,
         fallback_ttl: timedelta = timedelta(minutes=2),
     ):
-        self.memory_store = memory_store
+        self.state_store = state_store
         self.fallback_ttl = fallback_ttl
 
     def check_and_record(
@@ -163,7 +162,7 @@ class GatewayDeduplicator:
             dedup_key = f"fallback:{fingerprint}"
             expires_at = _iso(current + self.fallback_ttl)
 
-        with self.memory_store.transaction() as conn:
+        with self.state_store.transaction() as conn:
             self._prune_expired_fallbacks(conn, current)
             try:
                 conn.execute(
@@ -192,7 +191,7 @@ class GatewayDeduplicator:
     def cache_outbound(self, dedup_key: str, outbound: OutboundMessage) -> None:
         """Persist outbound data for retrying delivery without rerunning Alpha."""
 
-        with self.memory_store.transaction() as conn:
+        with self.state_store.transaction() as conn:
             row = conn.execute(
                 "SELECT metadata FROM gateway_dedup WHERE dedup_key = ?",
                 (dedup_key,),
@@ -209,7 +208,7 @@ class GatewayDeduplicator:
     def mark_outbound_delivered(self, dedup_key: str) -> None:
         """Mark cached outbound as delivered so later duplicates remain suppressed."""
 
-        with self.memory_store.transaction() as conn:
+        with self.state_store.transaction() as conn:
             row = conn.execute(
                 "SELECT metadata FROM gateway_dedup WHERE dedup_key = ?",
                 (dedup_key,),
@@ -230,7 +229,7 @@ class GatewayDeduplicator:
     def cached_outbound(self, dedup_key: str) -> OutboundMessage | None:
         """Return cached outbound that still needs delivery retry."""
 
-        with self.memory_store.connect() as conn:
+        with self.state_store.connect() as conn:
             row = conn.execute(
                 "SELECT metadata FROM gateway_dedup WHERE dedup_key = ?",
                 (dedup_key,),
@@ -283,7 +282,7 @@ def _session_components(source: ConversationSource, mode: SessionMode) -> dict[s
     raise ValueError(f"unsupported session mode: {mode}")
 
 
-def _memory_scope(
+def _source_context(
     source: ConversationSource,
     mode: SessionMode,
     session_key: str,
@@ -292,75 +291,17 @@ def _memory_scope(
     chat_id = _norm_required(source.chat_id, "chat_id")
     user_id = _norm_required(source.user_id, "user_id")
     thread_id = _norm_optional(source.thread_id)
-    metadata = {
-        "session_mode": mode.value,
+    return {
+        "platform": platform,
+        "chat_id": chat_id,
         "chat_type": source.chat_type.strip().lower(),
-        "session_key": session_key,
-        "source_user_id": user_id,
+        "user_id": user_id,
         "user_name": source.user_name,
+        "thread_id": thread_id,
+        "session_mode": mode.value,
+        "session_key": session_key,
         "external_metadata": dict(source.metadata),
     }
-    if mode == SessionMode.DM:
-        scope = MemoryScope(
-            kind="platform_user",
-            scope_key=f"platform:{platform}:user:{user_id}",
-            platform=platform,
-            user_id=user_id,
-            metadata=metadata,
-        )
-    elif mode == SessionMode.GROUP_PER_USER:
-        scope = MemoryScope(
-            kind="chat_thread",
-            scope_key=f"platform:{platform}:chat:{chat_id}:thread:main:user:{user_id}",
-            platform=platform,
-            chat_id=chat_id,
-            user_id=user_id,
-            metadata=metadata,
-        )
-    elif mode == SessionMode.THREAD_PER_USER:
-        if thread_id is None:
-            raise ValueError("thread_id is required for thread_per_user session mode")
-        scope = MemoryScope(
-            kind="chat_thread",
-            scope_key=f"platform:{platform}:chat:{chat_id}:thread:{thread_id}:user:{user_id}",
-            platform=platform,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            metadata=metadata,
-        )
-    elif mode == SessionMode.THREAD:
-        if thread_id is None:
-            raise ValueError("thread_id is required for thread session mode")
-        scope = MemoryScope(
-            kind="chat_thread",
-            scope_key=f"platform:{platform}:chat:{chat_id}:thread:{thread_id}",
-            platform=platform,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            user_id=None,
-            metadata=metadata,
-        )
-    else:
-        scope = MemoryScope(
-            kind="chat_thread",
-            scope_key=f"platform:{platform}:chat:{chat_id}:thread:main",
-            platform=platform,
-            chat_id=chat_id,
-            user_id=None,
-            metadata=metadata,
-        )
-    record = scope.to_record()
-    record.update(
-        {
-            "session_mode": mode.value,
-            "chat_type": source.chat_type.strip().lower(),
-            "source_user_id": user_id,
-            "user_name": source.user_name,
-            "external_metadata": dict(source.metadata),
-        }
-    )
-    return record
 
 
 def _platform_message_key(source: ConversationSource, platform_message_id: str) -> str:

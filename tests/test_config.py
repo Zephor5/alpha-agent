@@ -29,24 +29,8 @@ debug_logging = true
 base_url = "https://compatible.example/v1"
 api_key = "compatible-key"
 
-[memory]
-retrieval_limit = 3
-capture_mode = "candidate_only"
-cli_capture_mode = "disabled"
-gateway_capture_mode = "auto_approve_explicit"
-consolidation_mode = "after_n_turns"
-consolidation_after_turns = 4
-
 [context]
-max_prompt_tokens = 4096
-compression_threshold_ratio = 0.75
 recent_tail_messages = 6
-min_summary_tokens = 128
-max_summary_tokens = 512
-semantic_memory_tokens = 300
-episodic_memory_tokens = 220
-procedural_memory_tokens = 180
-session_context_tokens = 1600
 
 [deepseek]
 api_key = "deepseek-key"
@@ -64,23 +48,7 @@ reasoning_effort = "high"
     assert config.daemon_socket_path == Path("~/custom-alpha/daemon.sock").expanduser()
     assert config.daemon_status_path == Path("~/custom-alpha/daemon-status.json").expanduser()
     assert config.llm_provider == "deepseek"
-    assert config.retrieval_limit == 3
-    assert config.memory_capture_mode == "candidate_only"
-    assert config.memory_channel_capture_modes == {
-        "cli": "disabled",
-        "gateway": "auto_approve_explicit",
-    }
-    assert config.memory_consolidation_mode == "after_n_turns"
-    assert config.memory_consolidation_after_turns == 4
-    assert config.context_max_prompt_tokens == 4096
-    assert config.context_compression_threshold_ratio == 0.75
     assert config.context_recent_tail_messages == 6
-    assert config.context_min_summary_tokens == 128
-    assert config.context_max_summary_tokens == 512
-    assert config.context_semantic_memory_tokens == 300
-    assert config.context_episodic_memory_tokens == 220
-    assert config.context_procedural_memory_tokens == 180
-    assert config.context_session_context_tokens == 1600
     assert config.deepseek_api_key == "deepseek-key"
     assert config.llm_model == "deepseek-v4-pro"
     assert config.compatible_base_url == "https://compatible.example/v1"
@@ -151,8 +119,7 @@ def test_config_cli_init_and_show(
     assert config_path.exists()
     assert str(config_path) in show_result.output
     assert "llm_provider" in show_result.output
-    assert "context_max_prompt_tokens" in show_result.output
-    assert "working_memory_limit" not in show_result.output
+    assert "context_recent_tail_messages" in show_result.output
     assert "compatible_base_url" not in show_result.output
 
 
@@ -181,42 +148,18 @@ def test_config_cli_set_and_get(
 
     set_provider = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
     set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
-    set_limit = runner.invoke(app, ["config", "set", "memory.retrieval_limit", "5"])
-    set_capture = runner.invoke(app, ["config", "set", "memory.capture_mode", "disabled"])
-    set_cli_capture = runner.invoke(
-        app,
-        ["config", "set", "memory.cli_capture_mode", "candidate_only"],
-    )
-    set_consolidation = runner.invoke(
-        app,
-        ["config", "set", "memory.consolidation_mode", "after_n_turns"],
-    )
-    set_context = runner.invoke(app, ["config", "set", "context.max_prompt_tokens", "4096"])
-    set_semantic_budget = runner.invoke(
-        app,
-        ["config", "set", "context.semantic_memory_tokens", "256"],
-    )
+    set_context = runner.invoke(app, ["config", "set", "context.recent_tail_messages", "6"])
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
 
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
-    assert set_limit.exit_code == 0
-    assert set_capture.exit_code == 0
-    assert set_cli_capture.exit_code == 0
-    assert set_consolidation.exit_code == 0
     assert set_context.exit_code == 0
-    assert set_semantic_budget.exit_code == 0
     assert get_provider.exit_code == 0
     assert "codex" in get_provider.output
     config = load_config(env_file=None, config_file=config_path)
     assert config.llm_provider == "codex"
     assert config.llm_debug_logging is True
-    assert config.retrieval_limit == 5
-    assert config.memory_capture_mode == "disabled"
-    assert config.memory_channel_capture_modes == {"cli": "candidate_only"}
-    assert config.memory_consolidation_mode == "after_n_turns"
-    assert config.context_max_prompt_tokens == 4096
-    assert config.context_semantic_memory_tokens == 256
+    assert config.context_recent_tail_messages == 6
 
 
 def test_config_set_rejects_unknown_key(
@@ -295,96 +238,20 @@ def test_config_set_rejects_non_positive_limits(
     monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
     runner = CliRunner()
 
-    result = runner.invoke(app, ["config", "set", "memory.retrieval_limit", "0"])
+    result = runner.invoke(app, ["config", "set", "context.recent_tail_messages", "0"])
 
     assert result.exit_code != 0
     assert "must be greater than 0" in result.output
 
 
-def test_config_set_rejects_invalid_memory_capture_mode(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = tmp_path / "config.toml"
-    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
-    runner = CliRunner()
-
-    result = runner.invoke(app, ["config", "set", "memory.capture_mode", "always"])
-
-    assert result.exit_code != 0
-    assert "Invalid value for memory.capture_mode" in result.output
-
-
-def test_load_config_rejects_invalid_memory_capture_mode(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        """
-[memory]
-capture_mode = "always"
-""",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="Invalid value for memory.capture_mode"):
-        load_config(env_file=None, config_file=config_path)
-
-
-def test_load_config_rejects_invalid_memory_capture_mode_env(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        """
-[memory]
-capture_mode = "candidate_only"
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("ALPHA_MEMORY_CAPTURE_MODE", "always")
-
-    with pytest.raises(ValueError, match="Invalid value for memory.capture_mode"):
-        load_config(env_file=None, config_file=config_path)
-
-
-def test_load_config_rejects_invalid_memory_consolidation_mode(tmp_path: Path) -> None:
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(
-        """
-[memory]
-consolidation_mode = "always"
-""",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="Invalid value for memory.consolidation_mode"):
-        load_config(env_file=None, config_file=config_path)
-
-
 @pytest.mark.parametrize(
     ("toml", "match"),
     [
-        ("[memory]\nretrieval_limit = 0\n", "memory.retrieval_limit must be greater than 0"),
         (
-            "[context]\ncompression_threshold_ratio = 1.5\n",
-            "context.compression_threshold_ratio must be greater than 0",
+            "[context]\nrecent_tail_messages = 0\n",
+            "context.recent_tail_messages must be greater than 0",
         ),
-        (
-            "[context]\nsession_context_tokens = 0\n",
-            "context.session_context_tokens must be greater than 0",
-        ),
-        (
-            '[context]\nsession_context_tokens = "abc"\n',
-            "Expected integer value",
-        ),
-        (
-            '[memory]\nretrieval_limit = "abc"\n',
-            "Expected integer value",
-        ),
-        (
-            '[context]\ncompression_threshold_ratio = "abc"\n',
-            "Expected decimal value",
-        ),
+        ('[context]\nrecent_tail_messages = "abc"\n', "Expected integer value"),
     ],
 )
 def test_load_config_rejects_invalid_toml_values(
@@ -402,16 +269,10 @@ def test_load_config_rejects_invalid_toml_values(
 @pytest.mark.parametrize(
     ("env_name", "env_value", "match"),
     [
-        ("ALPHA_RETRIEVAL_LIMIT", "0", "memory.retrieval_limit must be greater than 0"),
         (
-            "ALPHA_CONTEXT_COMPRESSION_THRESHOLD_RATIO",
-            "1.5",
-            "context.compression_threshold_ratio must be greater than 0",
-        ),
-        (
-            "ALPHA_CONTEXT_SESSION_CONTEXT_TOKENS",
+            "ALPHA_CONTEXT_RECENT_TAIL_MESSAGES",
             "0",
-            "context.session_context_tokens must be greater than 0",
+            "context.recent_tail_messages must be greater than 0",
         ),
     ],
 )
@@ -428,20 +289,6 @@ def test_load_config_rejects_invalid_env_values(
 
     with pytest.raises(ValueError, match=match):
         load_config(env_file=None, config_file=config_path)
-
-
-def test_config_set_rejects_invalid_context_ratio(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    config_path = tmp_path / "config.toml"
-    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
-    runner = CliRunner()
-
-    result = runner.invoke(app, ["config", "set", "context.compression_threshold_ratio", "1.5"])
-
-    assert result.exit_code != 0
-    assert "less than or equal to 1" in result.output
 
 
 def test_read_config_value_masks_secret(tmp_path: Path) -> None:

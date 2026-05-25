@@ -97,11 +97,10 @@ def test_ask_reports_daemon_not_running(tmp_path: Path, monkeypatch) -> None:
     assert "Daemon is not running. Run alpha daemon start." in result.output
 
 
-def test_chat_sends_turns_and_consolidation_over_ipc(tmp_path: Path, monkeypatch) -> None:
+def test_chat_sends_turns_over_ipc(tmp_path: Path, monkeypatch) -> None:
     _reset_fake_client()
     _FakeDaemonClient.responses = [
         {"ok": True, "session_id": "daemon-s1", "response": "first response"},
-        {"ok": True, "response": "consolidated"},
         {"ok": True, "session_id": "daemon-s2", "response": "second response"},
     ]
     monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
@@ -110,13 +109,12 @@ def test_chat_sends_turns_and_consolidation_over_ipc(tmp_path: Path, monkeypatch
     result = runner.invoke(
         app,
         ["chat", "--session", "local-s1"],
-        input="hello\n/consolidate\nagain\n/exit\n",
+        input="hello\nagain\n/exit\n",
         env=_env(tmp_path),
     )
 
     assert result.exit_code == 0
     assert "first response" in result.output
-    assert "consolidated" in result.output
     assert "second response" in result.output
     assert _FakeDaemonClient.requests == [
         {
@@ -125,7 +123,6 @@ def test_chat_sends_turns_and_consolidation_over_ipc(tmp_path: Path, monkeypatch
             "session_id": "local-s1",
             "source_metadata": {"channel": "cli", "command": "chat"},
         },
-        {"type": "consolidate_memory"},
         {
             "type": "chat_turn",
             "message": "again",
