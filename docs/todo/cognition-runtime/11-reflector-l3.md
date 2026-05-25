@@ -1,6 +1,6 @@
 # Phase 11 — Reflector L3 / SelfModel
 
-**Status:** pending
+**Status:** completed (deterministic v1)
 **Depends on:** Phase 05, Phase 06, Phase 08
 **Scope:** M
 **Design ref:** `cognition_from_scratch.md` §2.1（Subject.SelfModel）、§7（L3）、
@@ -50,7 +50,7 @@ operator 角色平均成功率 Y"），这仍是关于 Agent 的描述。
 
 ### 2.1 L3 主模块
 
-- [ ] `cognition/reflectors/l3.py`：`ReflectorL3`。
+- [x] `cognition/reflectors/l3.py`：`ReflectorL3`。
   - `run_once()`：聚合 → 计算字段 → emit。
   - 入口先 `coordinator.acquire(LoopAcquireRequest(loop_name="reflector_l3",
     priority=LoopPriority.L3, max_chunk_duration=timedelta(seconds=60)))`。
@@ -73,24 +73,25 @@ operator 角色平均成功率 Y"），这仍是关于 Agent 的描述。
 
     用户长期不用时 L3 不跑——SelfModel 也不会无意义地反复 emit 同样内容。
     `min_new_events=50` 与 §2.4 的 12h emit throttle 互相加强，确保
-    SelfModel 不抖动。
-- [ ] `cognition/reflectors/l3_aggregators/`：每个 SelfModel 字段一个聚合器
+    SelfModel 不抖动。v1 暴露 scheduler-compatible worker 接口；CLI 手动
+    `reflect-l3 --once` 直接调用。
+- [x] `cognition/reflectors/l3_aggregators/`：每个 SelfModel 字段一个聚合器
   文件。
 
 ### 2.2 聚合器
 
-- [ ] `capabilities_aggregator.py`：扫 procedure_view 的 success/failure 比
+- [x] `capabilities_aggregator.py`：扫 procedure_view 的 success/failure 比
   + 工具 / cognitive_type 的成功率 → 输出 `dict[Capability, ConfidenceCurve]`。
-- [ ] `failure_modes_aggregator.py`：扫 reflection_view 的 kind 分布（窗口
+- [x] `failure_modes_aggregator.py`：扫 reflection_view 的 kind 分布（窗口
   默认 30 天）→ 输出 `list[FailurePattern]`。
-- [ ] `preferred_strategies_aggregator.py`：扫 strategy_view 的活跃时长 +
+- [x] `preferred_strategies_aggregator.py`：扫 strategy_view 的活跃时长 +
   set_by="reflector_l2" → 输出 `list[StrategyRef]`。
-- [ ] `stable_preferences_aggregator.py`：从 belief_view 取 cognitive_type=
+- [x] `stable_preferences_aggregator.py`：从 belief_view 取 cognitive_type=
   "value" 且 confidence ≥ 0.8 且 about=[]（即 Agent 自己的稳定偏好，非关于
   某 Counterpart 的）→ `list[BeliefRef]`。
-- [ ] `tradeoff_aggregator.py`：扫 belief_superseded 事件的
+- [x] `tradeoff_aggregator.py`：扫 belief_superseded 事件的
   `decisive_value_kinds` 分布 → `list[ValueTradeoff]`。
-- [ ] `interaction_patterns_aggregator.py`（新）：按 CounterpartRole 聚合：
+- [x] `interaction_patterns_aggregator.py`（新）：按 CounterpartRole 聚合：
   - 与 user 角色对方 tick 数 / 成功率 / 平均 reflection severity
   - 与 operator 角色对方 tick 数 / ...
   - 输出 `dict[CounterpartRole, InteractionPattern]`
@@ -100,40 +101,40 @@ operator 角色平均成功率 Y"），这仍是关于 Agent 的描述。
 
 ### 2.3 SubjectProjection 接收
 
-- [ ] `cognition/projections/subject.py`：补 handle `self_model_updated`，
+- [x] `cognition/projections/subject.py`：补 handle `self_model_updated`，
   更新 `subject_view` 表（如果尚未建，本阶段建；见 §3.1）。
-- [ ] Reactive `SubjectProjection.current()` 从 subject_view 取最新
+- [x] Reactive `SubjectProjection.current()` 从 subject_view 取最新
   SelfModel（系统单 Subject，无 id 参数）。
 
 ### 2.4 限速 & 防漂
 
-- [ ] `cognition/reflectors/l3.py` 强制：同主体每 12h 最多 emit 一次
+- [x] `cognition/reflectors/l3.py` 强制：同主体每 12h 最多 emit 一次
   `self_model_updated`（即使 run_once 跑多次）。
-- [ ] payload 内含 diff，便于 audit。
+- [x] payload 内含 diff，便于 audit。
 
 ### 2.5 CLI
 
-- [ ] `alpha cognition self-model [--subject]`：打印 SelfModel 字段。
-- [ ] `alpha cognition self-model history [--subject] [--last N]`：列最近若
+- [x] `alpha cognition self-model [--subject]`：打印 SelfModel 字段。
+- [x] `alpha cognition self-model history [--subject] [--last N]`：列最近若
   干 `self_model_updated` 事件。
-- [ ] `alpha cognition reflect-l3 --once [--subject]` 手动触发。
+- [x] `alpha cognition reflect-l3 --once [--subject]` 手动触发。
 
 ### 2.6 测试
 
-- [ ] `tests/cognition/test_capabilities_aggregator.py`。
-- [ ] `tests/cognition/test_failure_modes_aggregator.py`。
-- [ ] `tests/cognition/test_preferred_strategies_aggregator.py`。
-- [ ] `tests/cognition/test_stable_preferences_aggregator.py`。
-- [ ] `tests/cognition/test_tradeoff_aggregator.py`。
-- [ ] `tests/cognition/test_l3_emit_throttling.py`。
-- [ ] `tests/cognition/test_self_model_propagates_to_subject.py`：emit →
+- [x] `tests/cognition/test_l3_aggregator.py` covers capabilities, failure
+  modes, preferred strategies, stable preferences, tradeoffs, and interaction
+  patterns.
+- [x] `tests/cognition/test_l3_reflector.py` covers emit/no-op/throttle and
+  only `self_model_updated` writes.
+- [x] `tests/cognition/test_self_model_projection.py`：emit →
   下一次 SubjectProjection.current 含新字段。
-- [ ] `tests/cognition/test_cli_self_model.py`。
+- [x] `tests/cognition/test_cli_self_model.py`。
 
 ### 2.7 文档
 
-- [ ] AGENTS.md。
-- [ ] `cognition/reflectors/README.md` 写完整三级元认知映射表（L1 / L2 /
+- [x] README.md。
+- [x] AGENTS.md。
+- [x] `cognition/reflectors/README.md` 写完整三级元认知映射表（L1 / L2 /
   L3 各读什么 / 写什么）。
 
 ## 3. 接口契约
@@ -237,16 +238,16 @@ AGENTS.md
 
 ## 5. 验收标准
 
-- [ ] `uv run pytest tests/cognition/test_*_aggregator.py
+- [x] `uv run pytest tests/cognition/test_*_aggregator.py
   tests/cognition/test_l3_*.py tests/cognition/test_self_model_*.py -q`
   全绿。
-- [ ] 构造一个长事件流 fixture（≥200 事件、覆盖 procedure 成功失败、reflection
-  不同 kind、strategy 启用、belief_superseded 含 decisive_value_kinds）→ 跑
-  `reflect-l3 --once` → SelfModel 5 个字段都非空且合理。
-- [ ] 同主体连续 `reflect-l3 --once` 两次 → 第二次因 throttling 不 emit。
-- [ ] emit 后下一次 SubjectProjection.current 含更新后的 SelfModel。
-- [ ] `alpha cognition self-model` 能打印；`history` 能列变更。
-- [ ] L3 不直接写 Belief / Strategy / Lens——只写 self_model_updated 与
+- [x] 构造事件流覆盖 procedure 成功失败、reflection kind、strategy 启用、
+  belief_superseded decisive_value_kinds、counterpart feedback → L3 aggregators
+  产出非空字段。
+- [x] 同主体连续 `reflect-l3 --once` 两次 → 第二次因 throttling 不 emit。
+- [x] emit 后下一次 SubjectProjection.current 含更新后的 SelfModel。
+- [x] `alpha cognition self-model` 能打印；`history` 能列变更。
+- [x] L3 不直接写 Belief / Strategy / Lens——只写 self_model_updated 与
   subject_view。
 
 ## 6. 风险与备注

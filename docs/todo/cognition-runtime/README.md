@@ -154,18 +154,18 @@ checkpoint 表）。
 
 | Phase | Title                          | Depends on   | Scope  | Status  |
 | ----- | ------------------------------ | ------------ | ------ | ------- |
-| 00    | 清理现有 memory 机制           | —            | L (大) | pending |
-| 01    | 类型与事件日志                 | 00           | L (大) | pending |
-| 02    | Reactive 单 tick 跑通          | 01           | L (大) | pending |
-| 03    | BeliefProjection v1            | 01, 02       | M (中) | pending |
-| 04    | ContextWindowProjection（前景）| 01, 02       | S (小) | pending |
-| 05    | Reflector L1                   | 02, 03       | S (小) | pending |
-| 06    | Consolidation Loop + 背景压缩  | 03, 04, 05   | L (大) | pending |
-| 07    | ValueLens 与冲突解决           | 03, 05, 06   | M (中) | pending |
-| 08    | Reflector L2                   | 05, 07       | M (中) | pending |
-| 09    | Renderer 解耦                  | 02, 03, 04   | M (中) | pending |
-| 10    | Drive Loop                     | 02, 06       | M (中) | pending |
-| 11    | Reflector L3 / SelfModel       | 05, 06, 08   | M (中) | pending |
+| 00    | 清理现有 memory 机制           | —            | L (大) | completed |
+| 01    | 类型与事件日志                 | 00           | L (大) | completed |
+| 02    | Reactive 单 tick 跑通          | 01           | L (大) | completed |
+| 03    | BeliefProjection v1            | 01, 02       | M (中) | completed |
+| 04    | ContextWindowProjection（前景）| 01, 02       | S (小) | completed |
+| 05    | Reflector L1                   | 02, 03       | S (小) | completed |
+| 06    | Consolidation Loop + 背景压缩  | 03, 04, 05   | L (大) | completed |
+| 07    | ValueLens 与冲突解决           | 03, 05, 06   | M (中) | completed |
+| 08    | Reflector L2                   | 05, 07       | M (中) | completed |
+| 09    | Renderer 解耦                  | 02, 03, 04   | M (中) | completed |
+| 10    | Drive Loop                     | 02, 06       | M (中) | completed |
+| 11    | Reflector L3 / SelfModel       | 05, 06, 08   | M (中) | completed |
 
 Phase 01 是 L 而非 M，因为它一次落齐所有 first-class 类型 + 事件日志 +
 LoopCoordinator + Counterpart projection——这套地基所有后续阶段都依

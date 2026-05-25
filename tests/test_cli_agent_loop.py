@@ -51,6 +51,7 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
                 "procedure_view",
                 "strategy_view",
                 "goal_view",
+                "subject_view",
                 "subject_value_lens",
                 "cognition_worker_checkpoint",
             }

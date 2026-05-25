@@ -49,6 +49,7 @@ class ScheduledWorker(Protocol):
     name: ClassVar[str]
     trigger: ClassVar[ScheduleTrigger]
     handles_event_kinds: ClassVar[frozenset[CognitiveEventKind]]
+    priority: ClassVar[LoopPriority]
 
     def run(
         self,
@@ -218,14 +219,14 @@ class Scheduler:
         max_chunk_duration: timedelta = timedelta(seconds=30),
     ) -> list[WorkerReport]:
         reports: list[WorkerReport] = []
-        req = LoopAcquireRequest(
-            loop_name=loop_name,
-            priority=priority,
-            max_chunk_duration=max_chunk_duration,
-        )
         for worker in self.workers():
             if not force and not self.should_run(worker, now):
                 continue
+            req = LoopAcquireRequest(
+                loop_name=loop_name,
+                priority=getattr(worker, "priority", priority),
+                max_chunk_duration=max_chunk_duration,
+            )
             with coordinator.acquire(req):
                 checkpoint = self.checkpoints.load(worker.name)
                 report = worker.run(

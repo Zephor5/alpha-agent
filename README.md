@@ -63,7 +63,9 @@ deterministic control v1 adds temporary strategy overrides:
 expired strategies are cleared by consolidation, and Reactive stages honor the
 implemented strategy names. Phase 10 Drive Loop v1 adds event-sourced goals in
 `goal_view` and a disabled-by-default synchronous manual loop that turns one
-eligible active goal into a cognition-thread `self_signal`.
+eligible active goal into a cognition-thread `self_signal`. Phase 11 Reflector
+L3 v1 deterministically aggregates long-window cognition history into
+`Subject.self_model` and materializes it in `subject_view`.
 
 ## Install
 
@@ -144,6 +146,9 @@ uv run alpha cognition goals list --active
 uv run alpha cognition goals satisfy <goal-id> --evidence "accepted"
 uv run alpha cognition goals abandon <goal-id> --reason "obsolete"
 uv run alpha cognition drive --once
+uv run alpha cognition self-model
+uv run alpha cognition self-model history --last 5
+uv run alpha cognition reflect-l3 --once
 ```
 
 Inspect raw LLM request/response traces from CLI runs:
@@ -294,6 +299,8 @@ The current SQLite state baseline is deliberately narrow:
   manual expiry.
 - `goal_view`: Phase 10 active/satisfied/abandoned goal materialization for the
   Drive Loop.
+- `subject_view`: Phase 11 current Subject materialization, including
+  `SelfModel`.
 - `cognition_worker_checkpoint`: Phase 06 consolidation worker progress.
 - `subject_value_lens`: Phase 07 current subject ValueLens priority and
   sensitivity.
@@ -304,6 +311,7 @@ ReflectionProjection, ProcedureProjection, and renderer-driven prompt assembly
 are now in place. Subject ValueLens persistence, deterministic conflict
 resolution, queued conflict consumption, and temporary strategy overrides are
 also in place. GoalProjection and manual DriveLoop self-signals are in place.
+SubjectProjection now persists the L3 SelfModel from `self_model_updated`.
 Semantic strategy/lens diff remains pending.
 
 ## Current Limitations
@@ -317,6 +325,8 @@ Semantic strategy/lens diff remains pending.
   and CLI inspection/expiry.
 - Drive Loop v1 is synchronous and disabled by default: no daemon-owned drive
   cadence, no autonomous goal generation, and one self-signal per manual pass.
+- Reflector L3 v1 is deterministic: no LLM self-narration, no direct
+  belief/strategy/lens writes, and no daemon-owned L3 cadence.
 - Semantic strategy/lens diff is still pending.
 - No web UI.
 - No multi-agent system.
@@ -337,12 +347,14 @@ Semantic strategy/lens diff remains pending.
    Completed.
 10. Cognition runtime Phase 10: goal projection and synchronous Drive Loop v1.
     Completed.
-11. Cognition runtime Phase 09+: semantic strategy/lens diff.
-12. Tool execution system.
-13. Local files / notes ingestion.
-14. API server.
-15. Web UI.
-16. Channel integrations.
+11. Cognition runtime Phase 11: deterministic Reflector L3 SelfModel v1.
+    Completed.
+12. Cognition runtime Phase 09+: semantic strategy/lens diff.
+13. Tool execution system.
+14. Local files / notes ingestion.
+15. API server.
+16. Web UI.
+17. Channel integrations.
 
 ## Development
 

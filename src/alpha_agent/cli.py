@@ -43,6 +43,7 @@ from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.cognition.projections.reflection import ReflectionProjection, target_to_parts
 from alpha_agent.cognition.projections.strategy import StrategyProjection
 from alpha_agent.cognition.projections.subject import SubjectProjection
+from alpha_agent.cognition.reflectors.l3 import ReflectorL3
 from alpha_agent.cognition.render import (
     CognitionView,
     DiffRenderer,
@@ -103,6 +104,7 @@ daemon_app = typer.Typer(help="Daemon runtime commands.")
 cognition_app = typer.Typer(help="Cognition inspection commands.")
 lens_app = typer.Typer(help="Subject value lens commands.")
 goals_app = typer.Typer(help="Drive Loop goal commands.")
+self_model_app = typer.Typer(help="Subject self-model commands.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(debug_app, name="debug")
 app.add_typer(gateway_app, name="gateway")
@@ -111,6 +113,7 @@ app.add_typer(daemon_app, name="daemon")
 app.add_typer(cognition_app, name="cognition")
 cognition_app.add_typer(lens_app, name="lens")
 cognition_app.add_typer(goals_app, name="goals")
+cognition_app.add_typer(self_model_app, name="self-model")
 
 DAEMON_START_TIMEOUT_SECONDS = 5.0
 DAEMON_START_POLL_INTERVAL_SECONDS = 0.1
@@ -972,6 +975,108 @@ def _goal_registry_from_config() -> tuple[GoalProjection, GoalRegistry]:
             active_limit=config.cognition_drive_active_goal_limit,
         ),
     )
+
+
+@self_model_app.callback(invoke_without_command=True)
+def cognition_self_model(
+    ctx: typer.Context,
+    subject: Annotated[
+        str | None,
+        typer.Option("--subject", help="Reserved for the single agent subject."),
+    ] = None,
+) -> None:
+    """Show the current subject self-model."""
+
+    if ctx.invoked_subcommand is not None:
+        return
+    del subject
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    subject_value = SubjectProjection(log, store).current()
+    record = subject_value.self_model.to_record()
+    table = Table(title="Subject SelfModel")
+    table.add_column("Field")
+    table.add_column("Value")
+    for key in sorted(record):
+        value = record[key]
+        table.add_row(key, _compact_record(value))
+    console.print(table)
+    for key in sorted(record):
+        typer.echo(f"{key}={_compact_record(record[key])}")
+
+
+@self_model_app.command("history")
+def cognition_self_model_history(
+    subject: Annotated[
+        str | None,
+        typer.Option("--subject", help="Reserved for the single agent subject."),
+    ] = None,
+    last: Annotated[int, typer.Option("--last", min=1, help="Number of updates.")] = 10,
+) -> None:
+    """List recent self-model updates."""
+
+    del subject
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    events = list(log.iter(kinds=[CognitiveEventKind.SELF_MODEL_UPDATED]))[-last:]
+    table = Table(title="SelfModel History")
+    table.add_column("Timestamp")
+    table.add_column("Event")
+    table.add_column("Changed Fields")
+    for event in events:
+        diff = event.payload.get("diff")
+        changed = ",".join(sorted(diff)) if isinstance(diff, dict) else ""
+        table.add_row(str(event.timestamp), str(event.id), changed)
+    console.print(table)
+    for event in events:
+        diff = event.payload.get("diff")
+        changed = ",".join(sorted(diff)) if isinstance(diff, dict) else ""
+        typer.echo(f"self_model_updated event_id={event.id} changed={changed}")
+    if not events:
+        typer.echo("self_model_history=0")
+
+
+@cognition_app.command("reflect-l3")
+def cognition_reflect_l3(
+    once: Annotated[
+        bool,
+        typer.Option("--once", help="Run one manual Reflector L3 pass."),
+    ] = False,
+    subject: Annotated[
+        str | None,
+        typer.Option("--subject", help="Reserved for the single agent subject."),
+    ] = None,
+) -> None:
+    """Run the Phase 11 L3 self-model reflector once."""
+
+    del subject
+    if not once:
+        raise typer.BadParameter("Only --once is supported by the v1 Reflector L3 CLI.")
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projections = default_projection_registry(log)
+    report = ReflectorL3().run_once(log=log, projections=projections)
+    typer.echo(
+        "reflect_l3 "
+        f"emitted={report.emitted} "
+        f"status={report.new_checkpoint.last_status} "
+        f"notes={','.join(report.notes)}"
+    )
+
+
+def _compact_record(value: object) -> str:
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        return ",".join(f"{key}:{value[key]}" for key in sorted(value))
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        return ",".join(str(item) for item in value)
+    return str(value)
 
 
 @lens_app.command("show")

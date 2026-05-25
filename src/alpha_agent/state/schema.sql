@@ -228,6 +228,19 @@ CREATE INDEX IF NOT EXISTS idx_strategy_status_validity
 CREATE INDEX IF NOT EXISTS idx_strategy_for_counterpart
     ON strategy_view(for_counterpart, status);
 
+CREATE TABLE IF NOT EXISTS subject_view (
+    id TEXT PRIMARY KEY,
+    role TEXT,
+    capabilities TEXT NOT NULL DEFAULT '[]',
+    declared_needs TEXT NOT NULL DEFAULT '[]',
+    value_lens_id TEXT,
+    self_model TEXT NOT NULL DEFAULT '{}',
+    served_counterparts TEXT NOT NULL DEFAULT '[]',
+    known_biases TEXT NOT NULL DEFAULT '[]',
+    held_at TEXT NOT NULL,
+    last_event_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS goal_view (
     id TEXT PRIMARY KEY,
     description TEXT NOT NULL,

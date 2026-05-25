@@ -14,6 +14,8 @@ from alpha_agent.cognition.loops.workers.summarize_counterpart import SummarizeC
 
 
 def default_workers():
+    from alpha_agent.cognition.reflectors.l3 import ReflectorL3
+
     return [
         PromoteJudgmentWorker(),
         MergeBeliefsWorker(),
@@ -24,6 +26,7 @@ def default_workers():
         ResolveQueuedConflictsWorker(),
         LearnValueLensWorker(),
         ExpireStrategiesWorker(),
+        ReflectorL3(),
     ]
 
 
