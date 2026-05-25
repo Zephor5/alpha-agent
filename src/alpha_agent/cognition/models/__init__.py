@@ -52,6 +52,7 @@ from alpha_agent.cognition.models._ids import (
     SituationId,
     SituationRef,
     Step,
+    StrategyId,
     StrategyRef,
     StructuredClaim,
     SubjectId,
@@ -90,6 +91,7 @@ from alpha_agent.cognition.models.perception import Perception, Stimulus
 from alpha_agent.cognition.models.procedure import Procedure
 from alpha_agent.cognition.models.reflection import Reflection
 from alpha_agent.cognition.models.situation import AuthorityHint, Situation, SocialContext
+from alpha_agent.cognition.models.strategy import StrategyOverride
 from alpha_agent.cognition.models.subject import SUBJECT_SELF, Subject
 from alpha_agent.cognition.models.thread import ThreadId
 from alpha_agent.cognition.models.value import ValueLens, ValueProfile
@@ -168,6 +170,8 @@ __all__ = [
     "Stimulus",
     "StimulusKind",
     "StrategyRef",
+    "StrategyId",
+    "StrategyOverride",
     "StructuredClaim",
     "StyleHint",
     "Subject",

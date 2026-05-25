@@ -13,6 +13,10 @@ from alpha_agent.cognition.loops.workers._common import report, trigger
 from alpha_agent.cognition.models import CognitiveEvent, CognitiveEventKind, ValueKind
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
+from alpha_agent.cognition.projections.strategy import (
+    StrategyProjection,
+    strategy_is_active_for_stage,
+)
 from alpha_agent.cognition.value.lens import load_lens, normalize_lens, save_lens
 
 
@@ -37,6 +41,15 @@ class LearnValueLensWorker:
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
+        if _lens_learning_frozen(projections):
+            return report(
+                self.name,
+                checkpoint,
+                inspected=0,
+                emitted=0,
+                notes=["lens learning frozen by active strategy"],
+                metadata={},
+            )
         event_log_order = list(log.iter(kinds=[CognitiveEventKind.BELIEF_SUPERSEDED]))
         post_checkpoint = _events_after_processed_checkpoint(
             event_log_order,
@@ -117,6 +130,18 @@ def _decisive_kinds(raw: object) -> list[ValueKind]:
     if not isinstance(raw, list):
         return []
     return [ValueKind(str(item)) for item in raw if item is not None]
+
+
+def _lens_learning_frozen(projections: ProjectionRegistry) -> bool:
+    try:
+        projection = projections.get_typed(StrategyProjection)
+    except KeyError:
+        return False
+    return strategy_is_active_for_stage(
+        projection.active(stage="lens_learning"),
+        "freeze_lens_learning_for_24h",
+        "lens_learning",
+    )
 
 
 def _events_after_processed_checkpoint(

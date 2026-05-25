@@ -18,6 +18,7 @@ JudgmentId = NewType("JudgmentId", str)
 DecisionId = NewType("DecisionId", str)
 ReflectionId = NewType("ReflectionId", str)
 ProcedureId = NewType("ProcedureId", str)
+StrategyId = NewType("StrategyId", str)
 
 Capability = NewType("Capability", str)
 Need = NewType("Need", str)

@@ -25,6 +25,7 @@ from alpha_agent.cognition.loops import (
 )
 from alpha_agent.cognition.models import (
     CognitiveEvent,
+    CognitiveEventKind,
     ContextWindow,
     Instant,
     Situation,
@@ -36,6 +37,7 @@ from alpha_agent.cognition.models import (
     subject_ref,
 )
 from alpha_agent.cognition.projections.reflection import ReflectionProjection, target_to_parts
+from alpha_agent.cognition.projections.strategy import StrategyProjection
 from alpha_agent.cognition.projections.subject import SubjectProjection
 from alpha_agent.cognition.render import (
     CognitionView,
@@ -869,6 +871,67 @@ def _parse_lens_priority(raw: str) -> list[ValueKind]:
     except ValueError as exc:
         allowed = ", ".join(value.value for value in ValueKind)
         raise typer.BadParameter(f"unknown ValueKind; allowed: {allowed}") from exc
+
+
+@cognition_app.command("strategies")
+def cognition_strategies(
+    active: Annotated[
+        bool,
+        typer.Option("--active", help="Show active strategies."),
+    ] = True,
+    all_: Annotated[
+        bool,
+        typer.Option("--all", help="Show all strategies."),
+    ] = False,
+) -> None:
+    """List strategy overrides."""
+
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projection = StrategyProjection(store, event_log=log, auto_rebuild=True)
+    rows = projection.list_all() if all_ else projection.active()
+    table = Table(title="Cognition Strategies")
+    table.add_column("ID")
+    table.add_column("Name")
+    table.add_column("Stages")
+    table.add_column("Counterpart")
+    table.add_column("Valid Until")
+    for strategy in rows:
+        table.add_row(
+            str(strategy.id),
+            strategy.name,
+            ",".join(strategy.target_stages),
+            strategy.for_counterpart.id if strategy.for_counterpart else "global",
+            str(strategy.valid_until),
+        )
+    console.print(table)
+    for strategy in rows:
+        typer.echo(
+            f"strategy={strategy.id} name={strategy.name} "
+            f"stages={','.join(strategy.target_stages)}"
+        )
+    if not rows:
+        typer.echo("strategies=0 active=" + str(active and not all_).lower())
+
+
+@cognition_app.command("strategy-expire")
+def cognition_strategy_expire(
+    strategy_id: Annotated[str, typer.Argument(help="Strategy id to expire.")],
+) -> None:
+    """Manually expire a strategy override."""
+
+    config = load_config()
+    store = _store(config)
+    log = SQLiteEventLog(store)
+    projection = StrategyProjection(store, event_log=log, auto_rebuild=True)
+    emitter = EventEmitter(log)
+    event = emitter.emit(
+        CognitiveEventKind.STRATEGY_EXPIRED,
+        payload={"strategy_id": strategy_id, "reason": "manual"},
+    )
+    projection.apply(event)
+    typer.echo(f"strategy_expired event_id={event.id} strategy={strategy_id}")
 
 
 @cognition_app.command("reflections")

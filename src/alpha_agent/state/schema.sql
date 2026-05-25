@@ -210,6 +210,24 @@ CREATE INDEX IF NOT EXISTS idx_reflection_severity
 CREATE INDEX IF NOT EXISTS idx_reflection_kind
     ON reflection_view(kind, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS strategy_view (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '{}',
+    target_stages TEXT NOT NULL DEFAULT '[]',
+    for_counterpart TEXT,
+    set_by TEXT NOT NULL,
+    set_at TEXT NOT NULL,
+    valid_until TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    last_event_id TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_status_validity
+    ON strategy_view(status, valid_until);
+CREATE INDEX IF NOT EXISTS idx_strategy_for_counterpart
+    ON strategy_view(for_counterpart, status);
+
 CREATE TABLE IF NOT EXISTS subject_value_lens (
     subject_id TEXT PRIMARY KEY,
     priority TEXT NOT NULL,

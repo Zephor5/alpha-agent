@@ -43,6 +43,7 @@ class Interpretation:
     ambiguity_notes: list[str]
     source_text: str = ""
     proposed_resolution: Any | None = None
+    requires_confirmation: bool = False
 
 
 @dataclass(frozen=True)

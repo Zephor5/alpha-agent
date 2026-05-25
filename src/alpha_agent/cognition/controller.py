@@ -15,6 +15,10 @@ from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.projections.procedure import ProcedureProjection
 from alpha_agent.cognition.projections.reflection import ReflectionProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
+from alpha_agent.cognition.projections.strategy import (
+    StrategyProjection,
+    strategy_applies_to_counterpart,
+)
 from alpha_agent.cognition.projections.subject import SubjectProjection
 from alpha_agent.cognition.render.build_view import build_view, situation_from_ref
 from alpha_agent.cognition.stages import (
@@ -87,6 +91,7 @@ class CognitiveController:
             tick_id=tick_id,
         )
         self._apply_projection(perceived.event)
+        active_strategies = self._active_strategies(perceived.value.from_counterpart)
         attended = self.attender.focus(
             perceived.value,
             subject,
@@ -114,6 +119,7 @@ class CognitiveController:
             emitter=self.emitter,
             tick_id=tick_id,
             causal_parent=attended.event.id,
+            strategies=active_strategies,
         )
         self._apply_projection(interpreted.event)
         judged = self.judger.judge(
@@ -126,11 +132,13 @@ class CognitiveController:
             causal_parent=interpreted.event.id,
         )
         self._apply_projection(judged.event)
-        procedures = self.projections.get_typed(ProcedureProjection).match(
-            interpreted.value,
-            subject=subject,
-            window=context_window,
-        )
+        procedures = []
+        if not _disable_procedure_match(active_strategies, interpreted.value.source_text):
+            procedures = self.projections.get_typed(ProcedureProjection).match(
+                interpreted.value,
+                subject=subject,
+                window=context_window,
+            )
         decided = self.decider.decide(
             judged.value,
             procedures,
@@ -190,6 +198,8 @@ class CognitiveController:
             emitter=self.emitter,
             tick_id=tick_id,
             causal_parent=reflected.event.id,
+            interpretation=interpreted.value,
+            strategies=active_strategies,
         )
         self._apply_projection(revised.event)
 
@@ -221,6 +231,30 @@ class CognitiveController:
             if event.kind in projection.handles:
                 projection.apply(event)
 
+    def _active_strategies(self, counterpart: Any) -> list[Any]:
+        try:
+            projection = self.projections.get_typed(StrategyProjection)
+        except KeyError:
+            return []
+        return [
+            strategy
+            for strategy in projection.active()
+            if strategy_applies_to_counterpart(strategy, counterpart)
+        ]
+
+
+def _disable_procedure_match(strategies: list[Any], source_text: str) -> bool:
+    text = source_text.casefold()
+    for strategy in strategies:
+        if strategy.name != "disable_auto_procedure_match_for_trigger":
+            continue
+        if strategy.target_stages and "decide" not in strategy.target_stages:
+            continue
+        trigger = str(strategy.payload.get("trigger") or "").casefold()
+        if not trigger or trigger in text:
+            return True
+    return False
+
 
 def default_projection_registry(event_log: EventLog) -> ProjectionRegistry:
     registry = ProjectionRegistry()
@@ -245,6 +279,13 @@ def default_projection_registry(event_log: EventLog) -> ProjectionRegistry:
     registry.register(ContextWindowProjection(event_log))
     registry.register(
         ReflectionProjection(
+            store,
+            event_log=event_log,
+            auto_rebuild=True,
+        )
+    )
+    registry.register(
+        StrategyProjection(
             store,
             event_log=event_log,
             auto_rebuild=True,

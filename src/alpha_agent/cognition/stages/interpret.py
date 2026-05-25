@@ -15,6 +15,7 @@ from alpha_agent.cognition.models import (
     Subject,
     belief_ref,
 )
+from alpha_agent.cognition.projections.strategy import strategy_is_active_for_stage
 from alpha_agent.cognition.stages._payload import ref_ids
 from alpha_agent.cognition.stages.types import AttentionFocus, Emitted, Interpretation
 from alpha_agent.cognition.value.resolver import resolve_conflict
@@ -33,6 +34,7 @@ class Interpreter:
         emitter: EventEmitter,
         tick_id: str,
         causal_parent: EventId,
+        strategies: list[object] | None = None,
     ) -> Emitted[Interpretation]:
         text = "\n".join(str(claim) for claim in focus.salient_claims)
         recalled_beliefs = [item for item in recalled if isinstance(item, Belief)]
@@ -66,6 +68,14 @@ class Interpreter:
             support_refs = recalled_refs
         else:
             stance = "ambiguous"
+        requires_confirmation = (
+            stance == "novel"
+            and strategy_is_active_for_stage(
+                list(strategies or []),
+                "require_confirm_before_novel_form",
+                "interpret",
+            )
+        )
         interpretation = Interpretation(
             stance=stance,
             supporting_beliefs=support_refs,
@@ -74,6 +84,7 @@ class Interpreter:
             ambiguity_notes=[] if text else ["empty stimulus"],
             source_text=text,
             proposed_resolution=proposed_resolution,
+            requires_confirmation=requires_confirmation,
         )
         resolution_payload = (
             proposed_resolution.to_payload() if proposed_resolution is not None else None
@@ -91,6 +102,7 @@ class Interpreter:
                 "contradict_ids": ref_ids(interpretation.contradicting_beliefs),
                 "novel_claim_count": len(interpretation.novel_claims),
                 "proposed_resolution": resolution_payload,
+                "requires_confirmation": interpretation.requires_confirmation,
             },
         )
         return Emitted(interpretation, event)

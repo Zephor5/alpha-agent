@@ -58,7 +58,11 @@ Phase 07 deterministic ValueLens v1 is also in place: subject lenses persist in
 SQLite, queued conflicts resolve through lens-shaped scoring, ties are kept for
 human review, and a conservative consolidation worker can nudge lens
 sensitivity from repeated resolved tradeoffs. Semantic strategy/lens diff and
-drive loop remain staged under `docs/todo/cognition-runtime/`.
+drive loop remain staged under `docs/todo/cognition-runtime/`. Phase 08
+Reflector L2 deterministic control v1 adds temporary strategy overrides:
+`strategy_view` stores active controls, L2 rules can emit `strategy_changed`,
+expired strategies are cleared by consolidation, and Reactive stages honor the
+implemented strategy names.
 
 ## Install
 
@@ -132,6 +136,8 @@ uv run alpha cognition evidence <belief-id>
 uv run alpha cognition consolidate --now --dry-run
 uv run alpha cognition lens show
 uv run alpha cognition lens set --priority safety,honesty,efficiency
+uv run alpha cognition strategies --active
+uv run alpha cognition strategy-expire <strategy-id>
 ```
 
 Inspect raw LLM request/response traces from CLI runs:
@@ -267,6 +273,8 @@ The current SQLite state baseline is deliberately narrow:
   compressed foreground context.
 - `reflection_view`: Phase 05 materialized view for L1 reflection findings.
 - `procedure_view`: Phase 06 minimal learned procedure projection.
+- `strategy_view`: Phase 08 temporary strategy overrides emitted by L2 or
+  manual expiry.
 - `cognition_worker_checkpoint`: Phase 06 consolidation worker progress.
 - `subject_value_lens`: Phase 07 current subject ValueLens priority and
   sensitivity.
@@ -275,8 +283,8 @@ Successful user turns now enter the Reactive tick before producing a response.
 BeliefProjection, ContextWindowProjection with background compression,
 ReflectionProjection, ProcedureProjection, and renderer-driven prompt assembly
 are now in place. Subject ValueLens persistence, deterministic conflict
-resolution, and queued conflict consumption are also in place. Semantic
-strategy/lens diff remains pending.
+resolution, queued conflict consumption, and temporary strategy overrides are
+also in place. Semantic strategy/lens diff remains pending.
 
 ## Current Limitations
 
@@ -284,6 +292,9 @@ strategy/lens diff remains pending.
   summarization policy, and no daemon-owned worker cadence.
 - ValueLens v1 is deterministic: it uses explicit `ValueKind` weights and
   sensitivity, not semantic moral reasoning or full adaptive learning.
+- Reflector L2 v1 is deterministic: no strategy DSL, no semantic clustering,
+  and no daemon-owned L2 scheduler. It provides scheduler-compatible work units
+  and CLI inspection/expiry.
 - Semantic strategy/lens diff and drive loop are still pending.
 - No web UI.
 - No multi-agent system.
@@ -300,12 +311,14 @@ strategy/lens diff remains pending.
 7. Cognition runtime Phase 06: deterministic consolidation loop v1. Completed.
 8. Cognition runtime Phase 07: deterministic ValueLens conflict resolution v1.
    Completed.
-9. Cognition runtime Phase 08+: semantic strategy/lens diff and drive loop.
-10. Tool execution system.
-11. Local files / notes ingestion.
-12. API server.
-13. Web UI.
-14. Channel integrations.
+9. Cognition runtime Phase 08: deterministic Reflector L2 control v1.
+   Completed.
+10. Cognition runtime Phase 09+: semantic strategy/lens diff and drive loop.
+11. Tool execution system.
+12. Local files / notes ingestion.
+13. API server.
+14. Web UI.
+15. Channel integrations.
 
 ## Development
 

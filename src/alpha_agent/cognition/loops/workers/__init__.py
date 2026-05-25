@@ -2,6 +2,7 @@
 
 from alpha_agent.cognition.loops.workers.archive_expired import ArchiveExpiredWorker
 from alpha_agent.cognition.loops.workers.compress_context import CompressContextWorker
+from alpha_agent.cognition.loops.workers.expire_strategies import ExpireStrategiesWorker
 from alpha_agent.cognition.loops.workers.learn_procedure import LearnProcedureWorker
 from alpha_agent.cognition.loops.workers.learn_value_lens import LearnValueLensWorker
 from alpha_agent.cognition.loops.workers.merge_beliefs import MergeBeliefsWorker
@@ -22,12 +23,14 @@ def default_workers():
         SummarizeCounterpartWorker(),
         ResolveQueuedConflictsWorker(),
         LearnValueLensWorker(),
+        ExpireStrategiesWorker(),
     ]
 
 
 __all__ = [
     "ArchiveExpiredWorker",
     "CompressContextWorker",
+    "ExpireStrategiesWorker",
     "LearnProcedureWorker",
     "LearnValueLensWorker",
     "MergeBeliefsWorker",
