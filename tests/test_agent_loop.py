@@ -116,8 +116,11 @@ def test_llm_debug_payloads_are_written_to_jsonl_not_database(tmp_path) -> None:
     assert [entry["event"] for entry in log_entries] == ["llm.request", "llm.response"]
     log_json = json.dumps(log_entries, sort_keys=True)
     assert "secret input" in log_json
-    assert "secret prompt payload" in log_json
     assert "secret response payload" in log_json
+    response_log_json = json.dumps(log_entries[1], sort_keys=True)
+    assert "secret prompt payload" not in response_log_json
+    assert "request_payload" not in response_log_json
+    assert "secret response payload" in response_log_json
 
 
 def test_agent_cancel_before_turn_raises_and_clears_flag(tmp_path) -> None:
