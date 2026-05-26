@@ -158,6 +158,10 @@ uv run alpha config set llm.debug_logging true
 tail -f ~/.alpha-agent/logs/llm.jsonl
 ```
 
+SQLite `runtime_traces` keep LLM summaries and correlation ids; full LLM
+request/response payloads are written only to the JSONL debug log when
+`llm.debug_logging` is enabled.
+
 Inspect the gateway operational shell:
 
 ```bash

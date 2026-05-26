@@ -539,7 +539,11 @@ class AlphaAgent:
                 "max_retries": self.llm_completion.max_retries,
                 "tool_count": len(tools) if tools is not None else 0,
                 "tool_choice": tool_choice,
-                "request": request_log,
+                "request_summary": _llm_request_summary(
+                    messages=messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                ),
             },
         )
         if request_log is not None:
@@ -572,6 +576,15 @@ class AlphaAgent:
             )
             raise
         self._check_canceled(session_id, "after_llm")
+        if request_log is not None:
+            self._append_llm_trace(
+                event="llm.response",
+                metadata={
+                    "llm_call_id": llm_call_id,
+                    "session_id": session_id,
+                    "response": _llm_response_log(completion.response),
+                },
+            )
         self.store.append_runtime_trace(
             session_id=session_id,
             event_type="llm.completed",
@@ -585,10 +598,7 @@ class AlphaAgent:
                 "started_trace_id": started_trace.id,
                 "finish_reason": completion.response.finish_reason,
                 "tool_call_count": len(completion.response.tool_calls),
-                "response_metadata": _llm_metadata_for_event(
-                    completion.response.metadata,
-                    include_raw_payloads=self.llm_debug_logging,
-                ),
+                "response_metadata": _llm_metadata_summary(completion.response.metadata),
             },
         )
         return completion
@@ -620,10 +630,7 @@ class AlphaAgent:
                 "provider": llm_response.provider,
                 "model": llm_response.model,
                 "finish_reason": llm_response.finish_reason,
-                "metadata": _llm_metadata_for_event(
-                    llm_response.metadata,
-                    include_raw_payloads=self.llm_debug_logging,
-                ),
+                "metadata": _llm_metadata_summary(llm_response.metadata),
             },
         )
 
@@ -643,10 +650,7 @@ class AlphaAgent:
                 "provider": llm_response.provider,
                 "model": llm_response.model,
                 "finish_reason": llm_response.finish_reason,
-                "metadata": _llm_metadata_for_event(
-                    llm_response.metadata,
-                    include_raw_payloads=self.llm_debug_logging,
-                ),
+                "metadata": _llm_metadata_summary(llm_response.metadata),
             },
             metadata={"tool_call_ids": [self._required_tool_call_id(call) for call in calls]},
         )
@@ -808,20 +812,56 @@ def _llm_request_log(
     }
 
 
-def _llm_metadata_for_event(
-    metadata: dict[str, Any],
+def _llm_request_summary(
     *,
-    include_raw_payloads: bool,
+    messages: list[ChatMessage],
+    tools: Sequence[LLMToolDefinitionInput] | None,
+    tool_choice: LLMToolChoice | None,
 ) -> dict[str, Any]:
-    if include_raw_payloads:
-        return _json_safe(metadata)
+    return {
+        "message_count": len(messages),
+        "roles": [str(message.get("role", "")) for message in messages],
+        "tool_count": len(tools) if tools is not None else 0,
+        "tool_names": [_llm_tool_name(tool) for tool in tools or []],
+        "tool_choice": _json_safe(tool_choice),
+    }
+
+
+def _llm_response_log(response: LLMResponse) -> dict[str, Any]:
+    return {
+        "content": response.content,
+        "finish_reason": response.finish_reason,
+        "metadata": _json_safe(response.metadata),
+        "model": response.model,
+        "provider": response.provider,
+        "tool_calls": [tool_call.to_dict() for tool_call in response.tool_calls],
+    }
+
+
+def _llm_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
     return _json_safe(
         {
             key: value
             for key, value in metadata.items()
-            if key not in {"request_payload", "response_payload"}
+            if key
+            not in {
+                "request_payload",
+                "response_payload",
+                "raw_tool_calls",
+                "normalized_tool_calls",
+                "tool_calls",
+            }
         }
     )
+
+
+def _llm_tool_name(tool: LLMToolDefinitionInput) -> str:
+    if isinstance(tool, Mapping):
+        function = tool.get("function")
+        if isinstance(function, Mapping) and function.get("name") is not None:
+            return str(function["name"])
+        return str(tool.get("name", ""))
+    return str(getattr(tool, "name", ""))
 
 
 def _json_safe(value: Any) -> Any:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
 from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolChoice, LLMToolDefinitionInput
@@ -81,6 +82,44 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
     ]
 
 
+def test_llm_debug_payloads_are_written_to_jsonl_not_database(tmp_path) -> None:
+    store = _store(tmp_path)
+    trace_log = tmp_path / "llm.jsonl"
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=_RawMetadataProvider(),
+        llm_debug_logging=True,
+        llm_trace_log_path=trace_log,
+    )
+
+    agent.respond("secret input", session_id="s1")
+
+    traces = store.list_runtime_traces("s1")
+    trace_json = json.dumps([trace.metadata for trace in traces], sort_keys=True)
+    assert "secret input" not in trace_json
+    assert "secret prompt payload" not in trace_json
+    assert "secret response payload" not in trace_json
+    assert "request_payload" not in trace_json
+    assert "response_payload" not in trace_json
+
+    assistant = [
+        message
+        for message in store.list_conversation_messages("s1")
+        if message.role == "assistant"
+    ][0]
+    provider_metadata_json = json.dumps(assistant.provider_metadata, sort_keys=True)
+    assert "secret response payload" not in provider_metadata_json
+    assert "request_payload" not in provider_metadata_json
+    assert "response_payload" not in provider_metadata_json
+
+    log_entries = [json.loads(line) for line in trace_log.read_text(encoding="utf-8").splitlines()]
+    assert [entry["event"] for entry in log_entries] == ["llm.request", "llm.response"]
+    log_json = json.dumps(log_entries, sort_keys=True)
+    assert "secret input" in log_json
+    assert "secret prompt payload" in log_json
+    assert "secret response payload" in log_json
+
+
 def test_agent_cancel_before_turn_raises_and_clears_flag(tmp_path) -> None:
     import pytest
 
@@ -111,6 +150,32 @@ class _RecordingProvider:
     ) -> LLMResponse:
         self.calls.append(messages)
         return LLMResponse(content=self.response, model="test", provider=self.name)
+
+
+class _RawMetadataProvider:
+    name = "raw-provider"
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        return LLMResponse(
+            content="final answer",
+            model="test",
+            provider=self.name,
+            finish_reason="stop",
+            metadata={
+                "response_id": "resp-1",
+                "finish_reason": "stop",
+                "request_payload": {
+                    "messages": [{"role": "user", "content": "secret prompt payload"}],
+                },
+                "response_payload": {"output_text": "secret response payload"},
+            },
+        )
 
 
 class _ToolCallingProvider:
