@@ -25,6 +25,7 @@ from alpha_agent.cognition.projections.reflection import ReflectionProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.projections.subject import SubjectProjection
 from alpha_agent.cognition.render.view import CognitionView
+from alpha_agent.llm.base import ChatMessage
 from alpha_agent.utils.time import utc_now_iso
 
 
@@ -41,6 +42,7 @@ def build_view(
     active_strategies: Sequence[Any] | None = None,
     recent_reflections: Sequence[Reflection] | None = None,
     current_query: str | None = None,
+    chat_history: Sequence[ChatMessage] | None = None,
 ) -> CognitionView:
     """Build the renderer-facing view for one thread.
 
@@ -76,6 +78,7 @@ def build_view(
         recent_reflections=reflections,
         assembled_at=Instant(clock()),
         current_query=current_query,
+        chat_history=list(chat_history or []),
     )
 
 

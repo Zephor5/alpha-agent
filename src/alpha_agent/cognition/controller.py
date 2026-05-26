@@ -34,7 +34,7 @@ from alpha_agent.cognition.stages import (
     Reviser,
 )
 from alpha_agent.cognition.stages.types import Outcome
-from alpha_agent.llm.base import LLMProvider
+from alpha_agent.llm.base import ChatMessage, LLMProvider
 from alpha_agent.tools.registry import ToolRegistry
 
 
@@ -81,7 +81,13 @@ class CognitiveController:
         self.reflector = reflector or ReflectorL1(self.projections)
         self.reviser = reviser or Reviser()
 
-    def reactive_tick(self, stimulus: Stimulus, thread_id: ThreadId) -> LoopResult:
+    def reactive_tick(
+        self,
+        stimulus: Stimulus,
+        thread_id: ThreadId,
+        *,
+        chat_history: list[ChatMessage] | None = None,
+    ) -> LoopResult:
         tick_id = str(uuid.uuid4())
         subject = self.projections.get_typed(SubjectProjection).current()
 
@@ -160,6 +166,7 @@ class CognitiveController:
             current_query=str(decided.value.payload.get("message", ""))
             if isinstance(decided.value.payload, dict)
             else None,
+            chat_history=chat_history,
         )
         acted = self.effector.execute(
             decided.value,

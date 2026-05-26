@@ -68,7 +68,6 @@ class TextChatRenderer:
             ("counterpart_digest", self._counterpart_digest(view)),
             ("recalled_beliefs", self._recalled_beliefs(view)),
             ("background", self._background(view)),
-            ("foreground", self._foreground(view)),
         ]
         for section, content in sections:
             if not content:
@@ -77,7 +76,7 @@ class TextChatRenderer:
             if clipped is None:
                 dropped.append(section)
                 continue
-            messages.append({"role": "system", "content": wrap_system_reminder(clipped)})
+            messages.append({"role": "user", "content": wrap_system_reminder(clipped)})
         messages.append({"role": "user", "content": self._current_query(view)})
         used_tokens = estimate_chat_tokens(messages)
         while used_tokens > budget.max_tokens and len(messages) > 2:
@@ -123,10 +122,6 @@ class TextChatRenderer:
 
     def _background(self, view: CognitionView) -> str:
         return f"Context background: {view.window.background}" if view.window.background else ""
-
-    def _foreground(self, view: CognitionView) -> str:
-        lines = [str(item.raw) for item in view.window.foreground if item.raw is not None]
-        return "Foreground:\n" + "\n".join(f"- {line}" for line in lines) if lines else ""
 
     def _current_query(self, view: CognitionView) -> str:
         if view.current_query:
@@ -191,8 +186,6 @@ def _section_name_from_message(message: ChatMessage) -> str:
     content = str(message.get("content") or "")
     if "Recalled beliefs:" in content:
         return "recalled_beliefs"
-    if "Foreground:" in content:
-        return "foreground"
     if "Context background:" in content:
         return "background"
     if "Counterpart digest:" in content:

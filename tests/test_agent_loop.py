@@ -36,23 +36,35 @@ def test_agent_responds_and_persists_conversation_messages(tmp_path) -> None:
     ]
 
 
-def test_agent_uses_context_window_foreground_for_llm_input(tmp_path) -> None:
+def test_agent_replays_transcript_without_foreground_duplicate_for_llm_input(tmp_path) -> None:
     store = _store(tmp_path)
-    provider = _RecordingProvider("context response")
-    agent = AlphaAgent(
-        store=store,
-        llm_provider=provider,
-        context_recent_tail_messages=1,
+    provider = _QueuedRecordingProvider(
+        [
+            "Hello! How can I assist you today?",
+            "Let's find something interesting to do.",
+        ]
     )
-    agent.respond("first", session_id="s1")
+    agent = AlphaAgent(store=store, llm_provider=provider)
+    agent.respond("hello", session_id="s1")
 
-    result = agent.respond("current", session_id="s1")
+    result = agent.respond("I'm bored", session_id="s1")
 
-    assert result.response == "context response"
-    rendered_contents = "\n".join(str(message.get("content", "")) for message in provider.calls[-1])
-    assert "Foreground:" in rendered_contents
-    assert "first" in rendered_contents
-    assert provider.calls[-1][-1] == {"role": "user", "content": "current"}
+    assert result.response == "Let's find something interesting to do."
+    second_call = provider.calls[-1]
+    assert [message["role"] for message in second_call] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert str(second_call[0]["content"]).startswith("Identity: Alpha Agent")
+    assert second_call[1:] == [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hello! How can I assist you today?"},
+        {"role": "user", "content": "I'm bored"},
+    ]
+    rendered_contents = "\n".join(str(message.get("content", "")) for message in second_call)
+    assert "Foreground:" not in rendered_contents
 
 
 def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> None:
@@ -153,6 +165,26 @@ class _RecordingProvider:
     ) -> LLMResponse:
         self.calls.append(messages)
         return LLMResponse(content=self.response, model="test", provider=self.name)
+
+
+class _QueuedRecordingProvider:
+    name = "recording"
+
+    def __init__(self, responses: Sequence[str]):
+        self.responses = list(responses)
+        self.calls: list[list[ChatMessage]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        del tools, tool_choice
+        self.calls.append(messages)
+        response = self.responses.pop(0)
+        return LLMResponse(content=response, model="test", provider=self.name)
 
 
 class _RawMetadataProvider:

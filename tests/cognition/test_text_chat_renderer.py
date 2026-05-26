@@ -46,14 +46,16 @@ def test_renderer_orders_system_sections_and_current_user_message() -> None:
     )
 
     messages = rendered.payload
-    assert [message["role"] for message in messages] == ["system", "system", "system", "user"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
     assert "Identity: Alpha Agent" in messages[0]["content"]
     assert "Recalled beliefs:" in messages[1]["content"]
-    assert "Foreground:" in messages[2]["content"]
+    assert "<system-reminder>" in messages[1]["content"]
+    assert "<context-reminder>" not in messages[1]["content"]
+    assert "Foreground:" not in "\n".join(str(message["content"]) for message in messages)
     assert messages[-1]["content"] == "what now?"
 
 
-def test_renderer_preserves_history_and_duplicate_current_input() -> None:
+def test_renderer_preserves_history_and_appends_current_input_once() -> None:
     history = [
         conversation_message_to_chat(
             _message(message_id="msg_1", ordinal=1, role="user", content="hello")
@@ -69,6 +71,23 @@ def test_renderer_preserves_history_and_duplicate_current_input() -> None:
     assert [message["role"] for message in messages[:2]] == ["system", "user"]
     assert messages[1]["content"] == "hello"
     assert messages[-1]["content"] == "hello"
+    assert [message["content"] for message in messages].count("hello") == 2
+
+
+def test_renderer_uses_user_role_for_non_transcript_context() -> None:
+    rendered = TextChatRenderer().render(
+        view(
+            recalled_beliefs=[belief("belief:1", "User prefers Python.")],
+            current_query="what now?",
+        ),
+        RenderBudget(),
+    )
+
+    context_messages = rendered.payload[1:-1]
+    assert context_messages
+    assert {message["role"] for message in context_messages} == {"user"}
+    assert all("<system-reminder>" in str(message["content"]) for message in context_messages)
+    assert all("<context-reminder>" not in str(message["content"]) for message in context_messages)
 
 
 def test_conversation_tool_round_converts_to_chat_messages() -> None:

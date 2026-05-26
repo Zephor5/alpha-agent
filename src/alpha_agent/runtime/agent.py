@@ -268,6 +268,14 @@ class AlphaAgent:
             )
             debug["user_message_id"] = user_record.id
             debug["user_message_ordinal"] = user_record.ordinal
+            session_context = self.session_context.load(
+                session_id,
+                before_ordinal=user_record.ordinal,
+            )
+            chat_history = [
+                conversation_message_to_chat(message) for message in session_context.messages
+            ]
+            debug["chat_history_message_count"] = len(chat_history)
 
             model_tools = self.tool_registry.to_llm_tool_definitions()
 
@@ -308,6 +316,7 @@ class AlphaAgent:
             loop_result = controller.reactive_tick(
                 stimulus=stimulus,
                 thread_id=stimulus.thread_id,
+                chat_history=chat_history,
             )
             debug.update(loop_result.debug)
             llm_response = loop_result.outcome.raw_llm_response
