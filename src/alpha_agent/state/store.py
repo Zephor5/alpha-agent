@@ -112,6 +112,7 @@ class StateStore:
         llm_role: LLMRole | None,
         raw_content: str,
         model_content: str | None = None,
+        reasoning_content: str | None = None,
         tool_call_id: str | None = None,
         tool_calls: list[dict[str, Any]] | None = None,
         tool_result_id: str | None = None,
@@ -137,6 +138,7 @@ class StateStore:
                 llm_role=llm_role,
                 raw_content=raw_content,
                 model_content=model_content,
+                reasoning_content=reasoning_content,
                 tool_call_id=tool_call_id,
                 tool_calls=tool_calls or [],
                 tool_result_id=tool_result_id,
@@ -430,10 +432,10 @@ class StateStore:
             """
             INSERT INTO session_messages
                 (id, session_id, ordinal, kind, llm_role, raw_content, model_content,
-                 tool_call_id, tool_calls, tool_result_id, provider_metadata,
+                 reasoning_content, tool_call_id, tool_calls, tool_result_id, provider_metadata,
                  source_metadata, compression_point_ordinal, compression_version,
                  metadata, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.id,
@@ -443,6 +445,7 @@ class StateStore:
                 message.llm_role,
                 message.raw_content,
                 message.model_content,
+                message.reasoning_content,
                 message.tool_call_id,
                 _dumps(message.tool_calls),
                 message.tool_result_id,
@@ -466,6 +469,7 @@ class StateStore:
             llm_role=row["llm_role"],
             raw_content=row["raw_content"],
             model_content=row["model_content"],
+            reasoning_content=row["reasoning_content"],
             tool_call_id=row["tool_call_id"],
             tool_calls=_loads_dict_list(row["tool_calls"]),
             tool_result_id=row["tool_result_id"],

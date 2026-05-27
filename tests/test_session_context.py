@@ -71,6 +71,7 @@ def test_tool_replay_fields_survive_source_schema_refactor(tmp_path) -> None:
         llm_role="assistant",
         raw_content="",
         model_content=None,
+        reasoning_content="I need the lookup result.",
         tool_calls=tool_calls,
         provider_metadata={"provider": "test", "model": "m1"},
         source_metadata={"channel": "cli"},
@@ -93,6 +94,7 @@ def test_tool_replay_fields_survive_source_schema_refactor(tmp_path) -> None:
 
     assert reloaded[0] == assistant
     assert reloaded[1] == tool
+    assert reloaded[0].reasoning_content == "I need the lookup result."
     assert reloaded[0].tool_calls == tool_calls
     assert reloaded[0].provider_metadata == {"provider": "test", "model": "m1"}
     assert reloaded[0].source_metadata == {"channel": "cli"}
@@ -101,6 +103,65 @@ def test_tool_replay_fields_survive_source_schema_refactor(tmp_path) -> None:
     assert reloaded[1].model_content == '{"visible": true}'
     assert reloaded[1].tool_call_id == "call_1"
     assert reloaded[1].tool_result_id == "trace_1"
+
+
+def test_reasoning_content_persists_and_replays_for_assistant_messages(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="I will check.",
+        reasoning_content="The user is asking for current context.",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="",
+        reasoning_content="A tool is needed.",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }
+        ],
+    )
+
+    projection = SessionContextAssembler(store).load("s1")
+
+    assert [message.reasoning_content for message in projection.source_messages] == [
+        None,
+        "The user is asking for current context.",
+        "A tool is needed.",
+    ]
+    assert projection.chat_messages == [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "content": "I will check.",
+            "reasoning_content": "The user is asking for current context.",
+        },
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "A tool is needed.",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        },
+    ]
 
 
 def test_assembler_uses_all_source_messages_when_no_compression(tmp_path) -> None:

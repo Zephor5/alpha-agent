@@ -14,6 +14,7 @@ from alpha_agent.llm.base import (
     LLMResponse,
     LLMToolChoice,
     LLMToolDefinitionInput,
+    chat_completion_messages_payload,
     openai_compatible_response,
     openai_compatible_tool_choice_payload,
     openai_compatible_tool_payload,
@@ -48,7 +49,13 @@ class DeepSeekProvider:
     ) -> LLMResponse:
         """Call DeepSeek and normalize the chat completion response."""
 
-        body: dict[str, Any] = {"model": self.model, "messages": messages}
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": chat_completion_messages_payload(
+                messages,
+                include_reasoning_content=True,
+            ),
+        }
         if tools is not None:
             body["tools"] = [openai_compatible_tool_payload(tool) for tool in tools]
         if tool_choice is not None:
@@ -78,6 +85,7 @@ class DeepSeekProvider:
         )
         return replace(
             normalized,
+            reasoning_content=_deepseek_reasoning_content(payload),
             metadata={
                 **normalized.metadata,
                 "request_payload": body,
@@ -120,3 +128,17 @@ def _model_supports_thinking(model: str | None) -> bool:
     if value.startswith("deepseek-v") and not value.startswith("deepseek-v3"):
         return True
     return value == "deepseek-reasoner"
+
+
+def _deepseek_reasoning_content(payload: dict[str, Any]) -> str | None:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        return None
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        return None
+    reasoning_content = message.get("reasoning_content")
+    return reasoning_content if isinstance(reasoning_content, str) else None

@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS session_messages (
     llm_role TEXT CHECK (llm_role IN ('user', 'assistant', 'tool')),
     raw_content TEXT NOT NULL,
     model_content TEXT,
+    reasoning_content TEXT,
     tool_call_id TEXT,
     tool_calls TEXT NOT NULL DEFAULT '[]',
     tool_result_id TEXT,

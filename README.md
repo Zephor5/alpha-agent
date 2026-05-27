@@ -321,7 +321,8 @@ uv run alpha daemon restart
 The current SQLite state baseline is deliberately narrow:
 
 - `session_messages`: append-only source stream for user, assistant, tool, and
-  compressed handover messages used to assemble LLM-visible session context.
+  compressed handover messages used to assemble LLM-visible session context,
+  including assistant `reasoning_content` when a provider supplies it.
 - `runtime_traces`: operational turn, provider, and tool traces.
 - `gateway_session_mappings`: platform/session routing state.
 - `gateway_dedup`: inbound gateway deduplication state.

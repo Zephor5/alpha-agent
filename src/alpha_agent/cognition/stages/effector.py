@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.models import (
@@ -141,11 +141,14 @@ def _assistant_tool_call_message(
     response: LLMResponse,
     tool_calls: Sequence[ToolCall],
 ) -> ChatMessage:
-    return {
+    message: dict[str, Any] = {
         "role": "assistant",
         "content": response.content or None,
         "tool_calls": [_wire_tool_call(call) for call in tool_calls],
     }
+    if response.reasoning_content is not None:
+        message["reasoning_content"] = response.reasoning_content
+    return cast(ChatMessage, message)
 
 
 def _tool_result_message(call: ToolCall, result: ToolResult) -> ChatMessage:

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
 
 from alpha_agent.config import AlphaConfig
 from alpha_agent.llm.base import ChatMessage, LLMToolDefinition
-from alpha_agent.llm.codex import CodexResponsesProvider, resolve_codex_access_token
+from alpha_agent.llm.codex import (
+    CodexResponsesProvider,
+    codex_responses_payload,
+    resolve_codex_access_token,
+)
 from alpha_agent.llm.deepseek import DEEPSEEK_BASE_URL, DeepSeekProvider
 from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
 
@@ -39,6 +43,45 @@ def test_deepseek_provider_uses_deepseek_defaults_and_api_key() -> None:
     assert provider.base_url == DEEPSEEK_BASE_URL
     assert provider.model == "deepseek-chat"
     assert provider.api_key == "deepseek-key"
+
+
+def test_deepseek_provider_replays_assistant_reasoning_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs["json"]
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-1",
+                "model": "deepseek-chat",
+                "choices": [{"message": {"content": "pong"}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+    messages: list[ChatMessage] = [
+        cast(ChatMessage, {"role": "user", "content": "ping", "reasoning_content": "drop"}),
+        {
+            "role": "assistant",
+            "content": "pong",
+            "reasoning_content": "prior reasoning",
+        },
+    ]
+
+    DeepSeekProvider(config).complete(messages)
+
+    assert captured["json"]["messages"] == [
+        {"role": "user", "content": "ping"},
+        {
+            "role": "assistant",
+            "content": "pong",
+            "reasoning_content": "prior reasoning",
+        },
+    ]
 
 
 def test_deepseek_v4_request_includes_thinking_wire_shape(
@@ -152,7 +195,11 @@ def test_deepseek_provider_parses_tool_calls(monkeypatch: pytest.MonkeyPatch) ->
                 "choices": [
                     {
                         "finish_reason": "tool_calls",
-                        "message": {"content": None, "tool_calls": raw_tool_calls},
+                        "message": {
+                            "content": None,
+                            "reasoning_content": "I should look this up.",
+                            "tool_calls": raw_tool_calls,
+                        },
                     }
                 ],
             },
@@ -164,6 +211,7 @@ def test_deepseek_provider_parses_tool_calls(monkeypatch: pytest.MonkeyPatch) ->
     response = DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
 
     assert response.content == ""
+    assert response.reasoning_content == "I should look this up."
     assert response.finish_reason == "tool_calls"
     assert len(response.tool_calls) == 1
     tool_call = response.tool_calls[0]
@@ -222,6 +270,28 @@ def test_deepseek_provider_preserves_invalid_tool_call_arguments(
     assert tool_call.metadata["raw_arguments"] == '{"query":'
     assert response.metadata["tool_calls"][0]["metadata"]["raw_arguments"] == '{"query":'
     assert "arguments_parse_error" in response.metadata["tool_calls"][0]["metadata"]
+
+
+def test_deepseek_response_without_reasoning_content_leaves_field_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-1",
+                "model": "deepseek-chat",
+                "choices": [{"message": {"content": "pong"}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+
+    response = DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
+
+    assert response.content == "pong"
+    assert response.reasoning_content is None
 
 
 def test_deepseek_chat_omits_thinking_for_v3(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -345,6 +415,69 @@ def test_openai_compatible_provider_preserves_tool_messages_in_request(
     assert captured["json"]["messages"] == messages
 
 
+def test_openai_compatible_provider_strips_internal_reasoning_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs["json"]
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-compat",
+                "model": "gpt-compatible",
+                "choices": [{"message": {"content": "done"}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(
+        compatible_base_url="https://compatible.example",
+        compatible_api_key="compatible-key",
+        llm_model="gpt-compatible",
+    )
+    messages: list[ChatMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "internal reasoning",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_context",
+                        "arguments": '{"query":"alpha"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"result":"ok"}'},
+    ]
+
+    OpenAICompatibleProvider(config).complete(messages)
+
+    assert captured["json"]["messages"] == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup_context",
+                        "arguments": '{"query":"alpha"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"result":"ok"}'},
+    ]
+    assert messages[0]["reasoning_content"] == "internal reasoning"
+
+
 def test_openai_compatible_provider_sends_tools_with_none_tool_choice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -457,6 +590,36 @@ def test_codex_provider_uses_responses_payload(monkeypatch: pytest.MonkeyPatch) 
         {"role": "user", "content": [{"type": "input_text", "text": "ping"}]}
     ]
     assert captured["json"]["store"] is False
+
+
+def test_codex_responses_payload_strips_internal_assistant_reasoning_content() -> None:
+    messages: list[ChatMessage] = [
+        {"role": "system", "content": "You are Alpha."},
+        {
+            "role": "assistant",
+            "content": "Visible prior answer.",
+            "reasoning_content": "private reasoning must not leave runtime",
+        },
+        {"role": "user", "content": "Continue."},
+    ]
+
+    payload = codex_responses_payload(model="gpt-5.3-codex", messages=messages)
+
+    assert payload == {
+        "model": "gpt-5.3-codex",
+        "input": [
+            {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Visible prior answer."}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Continue."}],
+            },
+        ],
+        "store": False,
+        "instructions": "You are Alpha.",
+    }
 
 
 def test_codex_response_parser_reads_output_content(monkeypatch: pytest.MonkeyPatch) -> None:

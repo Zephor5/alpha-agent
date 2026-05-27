@@ -14,6 +14,7 @@ from alpha_agent.llm.base import (
     LLMResponse,
     LLMToolChoice,
     LLMToolDefinitionInput,
+    chat_completion_messages_payload,
     openai_compatible_response,
     openai_compatible_tool_choice_payload,
     openai_compatible_tool_payload,
@@ -46,7 +47,10 @@ class OpenAICompatibleProvider:
     ) -> LLMResponse:
         """Call the configured compatible chat completions API."""
 
-        body: dict[str, Any] = {"model": self.model, "messages": messages}
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": chat_completion_messages_payload(messages),
+        }
         if tools is not None:
             body["tools"] = [openai_compatible_tool_payload(tool) for tool in tools]
         if tool_choice is not None:

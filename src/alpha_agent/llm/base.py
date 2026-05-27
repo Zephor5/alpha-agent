@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Literal, NotRequired, Protocol, TypedDict
+from typing import Any, Literal, NotRequired, Protocol, TypedDict, cast
 
 
 class SystemChatMessage(TypedDict):
@@ -42,6 +42,7 @@ class AssistantChatMessage(TypedDict):
 
     role: Literal["assistant"]
     content: NotRequired[str | None]
+    reasoning_content: NotRequired[str]
     tool_calls: NotRequired[list[ChatCompletionToolCall]]
 
 
@@ -61,6 +62,7 @@ class ChatCompletionAssistantToolMessage(TypedDict):
 
     role: Literal["assistant"]
     content: str | None
+    reasoning_content: NotRequired[str]
     tool_calls: list[ChatCompletionToolCall]
 
 
@@ -186,6 +188,52 @@ class LLMResponse:
     metadata: dict[str, Any] = field(default_factory=dict)
     tool_calls: list[LLMToolCall] = field(default_factory=list)
     finish_reason: str | None = None
+    reasoning_content: str | None = None
+
+
+def chat_completion_messages_payload(
+    messages: Sequence[ChatMessage],
+    *,
+    include_reasoning_content: bool = False,
+) -> list[dict[str, Any]]:
+    """Return provider wire messages with only supported chat-completions fields.
+
+    ``reasoning_content`` is a runtime-level assistant field. Providers opt in to
+    receiving it explicitly; compatible APIs that do not understand it get a clean
+    OpenAI-style payload.
+    """
+
+    return [
+        _chat_completion_message_payload(
+            cast(Mapping[str, Any], message),
+            include_reasoning_content=include_reasoning_content,
+        )
+        for message in messages
+    ]
+
+
+def _chat_completion_message_payload(
+    message: Mapping[str, Any],
+    *,
+    include_reasoning_content: bool,
+) -> dict[str, Any]:
+    role = message.get("role")
+    if role == "assistant":
+        payload = _copy_message_fields(message, ("role", "content", "tool_calls"))
+        reasoning_content = message.get("reasoning_content")
+        if include_reasoning_content and reasoning_content is not None:
+            payload["reasoning_content"] = str(reasoning_content)
+        return payload
+    if role == "tool":
+        return _copy_message_fields(message, ("role", "content", "tool_call_id"))
+    return _copy_message_fields(message, ("role", "content"))
+
+
+def _copy_message_fields(
+    message: Mapping[str, Any],
+    fields: Sequence[str],
+) -> dict[str, Any]:
+    return {field: message[field] for field in fields if field in message}
 
 
 def openai_compatible_response(

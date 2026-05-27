@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from alpha_agent.cognition.models import CounterpartRole
 from alpha_agent.cognition.render.base import RenderBudget, RenderResult
@@ -38,15 +38,18 @@ def source_message_to_chat(message: SessionMessage) -> ChatMessage:
     if message.llm_role == "user":
         return {"role": "user", "content": content}
     if message.llm_role == "assistant":
+        assistant_content = (content or None) if message.tool_calls else content
+        assistant_message: dict[str, Any] = {
+            "role": "assistant",
+            "content": assistant_content,
+        }
+        if message.reasoning_content is not None:
+            assistant_message["reasoning_content"] = message.reasoning_content
         if message.tool_calls:
-            return {
-                "role": "assistant",
-                "content": content or None,
-                "tool_calls": [
-                    _source_tool_call(tool_call) for tool_call in message.tool_calls
-                ],
-            }
-        return {"role": "assistant", "content": content}
+            assistant_message["tool_calls"] = [
+                _source_tool_call(tool_call) for tool_call in message.tool_calls
+            ]
+        return cast(ChatMessage, assistant_message)
     if message.llm_role != "tool":
         raise ValueError(f"session message {message.id!r} is missing llm_role")
     if not message.tool_call_id:

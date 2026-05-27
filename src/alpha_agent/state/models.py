@@ -34,6 +34,7 @@ class SessionMessage:
     compression_version: str | None
     created_at: str
     updated_at: str | None = None
+    reasoning_content: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

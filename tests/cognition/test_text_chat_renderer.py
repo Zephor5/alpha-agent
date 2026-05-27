@@ -20,6 +20,7 @@ def _message(
     ordinal: int,
     role: str,
     content: str,
+    reasoning_content: str | None = None,
     tool_call_id: str | None = None,
     tool_calls: list[dict] | None = None,
 ) -> SessionMessage:
@@ -40,6 +41,7 @@ def _message(
         compression_version=None,
         created_at="2026-01-01T00:00:00+00:00",
         updated_at=None,
+        reasoning_content=reasoning_content,
     )
 
 
@@ -150,6 +152,22 @@ def test_source_tool_round_converts_to_chat_messages() -> None:
         "role": "tool",
         "tool_call_id": "call_1",
         "content": '{"ok": true}',
+    }
+
+
+def test_source_assistant_message_preserves_reasoning_content() -> None:
+    assistant = _message(
+        message_id="msg_1",
+        ordinal=1,
+        role="assistant",
+        content="answer",
+        reasoning_content="thinking trace",
+    )
+
+    assert source_message_to_chat(assistant) == {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "thinking trace",
     }
 
 

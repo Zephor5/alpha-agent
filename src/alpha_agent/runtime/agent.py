@@ -920,6 +920,7 @@ class AlphaAgent:
             kind="assistant_message",
             llm_role="assistant",
             raw_content=llm_response.content,
+            reasoning_content=llm_response.reasoning_content,
             provider_metadata={
                 "provider": llm_response.provider,
                 "model": llm_response.model,
@@ -940,6 +941,7 @@ class AlphaAgent:
             kind="assistant_message",
             llm_role="assistant",
             raw_content=llm_response.content,
+            reasoning_content=llm_response.reasoning_content,
             tool_calls=[dict(self._wire_tool_call(call)) for call in calls],
             provider_metadata={
                 "provider": llm_response.provider,

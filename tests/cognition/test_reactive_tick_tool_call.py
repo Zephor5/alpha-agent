@@ -35,12 +35,15 @@ def test_reactive_tick_tool_call_path_emits_acted_and_feedback(tmp_path) -> None
     result = agent.respond("use tool", session_id="s1")
 
     assert result.response == "final answer"
-    assert [message.kind for message in store.list_session_messages("s1")] == [
+    messages = store.list_session_messages("s1")
+    assert [message.kind for message in messages] == [
         "user_message",
         "assistant_message",
         "tool_message",
         "assistant_message",
     ]
+    assert messages[1].reasoning_content == "Need to call echo."
+    assert messages[3].reasoning_content is None
     events = list(SQLiteEventLog(store).iter())
     acted = [event for event in events if event.kind == CognitiveEventKind.ACTED][0]
     feedback = [event for event in events if event.kind == CognitiveEventKind.RECEIVED_FEEDBACK][0]
@@ -78,6 +81,7 @@ def test_default_effector_executes_tool_and_final_llm_round() -> None:
     assert result.outcome.tool_results[0].content == "hello"
     assert result.debug["llm_round_count"] == 2
     assert [message["role"] for message in provider.messages[1][-2:]] == ["assistant", "tool"]
+    assert provider.messages[1][-2]["reasoning_content"] == "Need to call echo."
     acted = [event for event in log.iter(kinds=[CognitiveEventKind.ACTED])][0]
     assert acted.payload["tool_call_count"] == 1
     assert acted.payload["tool_result_count"] == 1
@@ -105,6 +109,7 @@ class _ToolCallingProvider:
                 model="test",
                 provider=self.name,
                 finish_reason="tool_calls",
+                reasoning_content="Need to call echo.",
                 tool_calls=[
                     LLMToolCall(
                         id="call_1",
