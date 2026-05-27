@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from typing import cast
 
 import pytest
 
 from alpha_agent.config import LLMContextConfig
-from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolChoice, LLMToolDefinitionInput
+from alpha_agent.llm.base import (
+    AssistantChatMessage,
+    ChatMessage,
+    LLMResponse,
+    LLMToolCall,
+    LLMToolChoice,
+    LLMToolDefinitionInput,
+    ToolChatMessage,
+)
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.runtime.context_handover import DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION
@@ -19,6 +28,10 @@ def _store(tmp_path) -> StateStore:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
     return store
+
+
+def _copy_chat_message(message: ChatMessage) -> ChatMessage:
+    return cast(ChatMessage, dict(message))
 
 
 def test_agent_responds_and_persists_session_messages(tmp_path) -> None:
@@ -304,9 +317,11 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
     ]
     assert compression_call[0] == first_call[0]
     assert compression_call[1]["content"] == "use tool"
-    assert compression_call[2]["tool_calls"][0]["id"] == "call_1"
-    assert compression_call[3]["tool_call_id"] == "call_1"
-    compression_tool_payload = json.loads(str(compression_call[3]["content"]))
+    compression_assistant = cast(AssistantChatMessage, compression_call[2])
+    compression_tool = cast(ToolChatMessage, compression_call[3])
+    assert compression_assistant["tool_calls"][0]["id"] == "call_1"
+    assert compression_tool["tool_call_id"] == "call_1"
+    compression_tool_payload = json.loads(str(compression_tool["content"]))
     assert compression_tool_payload == {
         "content": "complete tool result: hello",
         "metadata": {},
@@ -452,12 +467,12 @@ class _ToolCallingProvider:
                 provider=self.name,
                 finish_reason="tool_calls",
                 tool_calls=[
-                    {
-                        "id": "call_1",
-                        "name": "echo",
-                        "arguments": {"text": "hello"},
-                        "raw_arguments": '{"text":"hello"}',
-                    }
+                    LLMToolCall(
+                        id="call_1",
+                        name="echo",
+                        arguments={"text": "hello"},
+                        raw_arguments='{"text":"hello"}',
+                    )
                 ],
             )
         return LLMResponse(content="final answer", model="test", provider=self.name)
@@ -477,7 +492,7 @@ class _ToolLoopCompressionProvider:
         tool_choice: LLMToolChoice | None = None,
     ) -> LLMResponse:
         del tools, tool_choice
-        self.calls.append([dict(message) for message in messages])
+        self.calls.append([_copy_chat_message(message) for message in messages])
         if len(self.calls) == 1:
             return LLMResponse(
                 content="",
@@ -485,12 +500,12 @@ class _ToolLoopCompressionProvider:
                 provider=self.name,
                 finish_reason="tool_calls",
                 tool_calls=[
-                    {
-                        "id": "call_1",
-                        "name": "echo",
-                        "arguments": {"text": "hello"},
-                        "raw_arguments": '{"text":"hello"}',
-                    }
+                    LLMToolCall(
+                        id="call_1",
+                        name="echo",
+                        arguments={"text": "hello"},
+                        raw_arguments='{"text":"hello"}',
+                    )
                 ],
             )
         if DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in str(messages[-1].get("content")):

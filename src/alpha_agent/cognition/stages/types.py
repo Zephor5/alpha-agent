@@ -18,6 +18,8 @@ from alpha_agent.cognition.models import (
 )
 from alpha_agent.tools.base import ToolCall, ToolResult
 
+InterpretationStance = Literal["consistent", "contradicting", "novel", "ambiguous"]
+
 
 @dataclass(frozen=True)
 class Emitted[T]:
@@ -36,7 +38,7 @@ class AttentionFocus:
 
 @dataclass(frozen=True)
 class Interpretation:
-    stance: Literal["consistent", "contradicting", "novel", "ambiguous"]
+    stance: InterpretationStance
     supporting_beliefs: list[BeliefRef]
     contradicting_beliefs: list[BeliefRef]
     novel_claims: list[NLStatement]

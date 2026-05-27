@@ -4,8 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime, timedelta
+from typing import Any, TypedDict
 
 from alpha_agent.cognition.models import CognitiveEvent, Reflection, StrategyOverride
+
+
+class StrategyCandidate(TypedDict):
+    rule: str
+    strategy_name: str
+    target_stages: list[str]
+    payload: dict[str, Any]
+    triggered_by_reflection_ids: list[str]
 
 
 def parse_time(value: object) -> datetime:

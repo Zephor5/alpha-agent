@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, cast, get_args, get_origin, get_type_hints
 
 
 def to_record_value(value: Any) -> Any:
@@ -63,7 +63,7 @@ def dataclass_from_record[T](cls: type[T], record: dict[str, Any]) -> T:
 
     kwargs: dict[str, Any] = {}
     type_hints = get_type_hints(cls)
-    for field in fields(cls):
+    for field in fields(cast(Any, cls)):
         if field.name in record:
             kwargs[field.name] = from_record_value(
                 type_hints.get(field.name, field.type),

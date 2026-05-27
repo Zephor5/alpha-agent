@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger, WorkerCheckpoint, WorkerReport
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers._common import report
 from alpha_agent.cognition.models import (
     CognitiveEvent,
@@ -61,7 +66,7 @@ class ReflectorL3:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
@@ -100,7 +105,7 @@ class ReflectorL3:
                     metadata={},
                 )
 
-        after = replace(before, **updates)
+        after = replace(before, **cast(Any, updates))
         if before == after:
             return report(
                 self.name,
@@ -141,7 +146,7 @@ class ReflectorL3:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter | None = None,
-        coordinator: object | None = None,
+        coordinator: YieldingCoordinator | None = None,
         config: object | None = None,
     ) -> WorkerReport:
         class _NoYieldCoordinator:

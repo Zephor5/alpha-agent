@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from typing import cast
+
 from alpha_agent.cognition.render import (
     RenderBudget,
     TextChatRenderer,
     source_message_to_chat,
     wrap_system_reminder,
 )
+from alpha_agent.llm.base import AssistantChatMessage
 from alpha_agent.state.models import SessionMessage
 from tests.cognition.render_helpers import view
 from tests.cognition.test_belief_projection_apply import belief
@@ -141,7 +144,8 @@ def test_source_tool_round_converts_to_chat_messages() -> None:
         tool_call_id="call_1",
     )
 
-    assert source_message_to_chat(assistant)["tool_calls"][0]["id"] == "call_1"
+    assistant_chat = cast(AssistantChatMessage, source_message_to_chat(assistant))
+    assert assistant_chat["tool_calls"][0]["id"] == "call_1"
     assert source_message_to_chat(tool) == {
         "role": "tool",
         "tool_call_id": "call_1",

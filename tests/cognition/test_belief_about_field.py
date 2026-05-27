@@ -3,6 +3,8 @@ from alpha_agent.cognition.models import (
     Belief,
     BeliefId,
     CognitiveType,
+    CounterpartId,
+    Instant,
     Lifecycle,
     NLStatement,
     Role,
@@ -18,7 +20,7 @@ from alpha_agent.cognition.models.subject import SUBJECT_SELF
 
 
 def test_belief_about_field_round_trips_reference_order() -> None:
-    about = [counterpart_ref("counterpart:user-a"), entity_ref("repo:alpha-agent")]
+    about = [counterpart_ref(CounterpartId("counterpart:user-a")), entity_ref("repo:alpha-agent")]
     belief = Belief(
         id=BeliefId("belief:1"),
         subject=subject_ref(SUBJECT_SELF),
@@ -37,7 +39,7 @@ def test_belief_about_field_round_trips_reference_order() -> None:
         action_orientation=[],
         update_policy=UpdatePolicy("revise_on_conflict"),
         status=Lifecycle("active"),
-        held_since="2026-01-01T00:00:00+00:00",
+        held_since=Instant("2026-01-01T00:00:00+00:00"),
     )
 
     round_tripped = Belief.from_record(belief.to_record())

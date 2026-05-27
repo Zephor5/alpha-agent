@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Protocol
+from typing import Any, Protocol
 
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.models import Instant, SubjectRef
@@ -17,7 +17,7 @@ class AggregationWindow:
 
 
 class SelfModelAggregator(Protocol):
-    field_name: ClassVar[str]
+    field_name: str
 
     def compute(
         self,

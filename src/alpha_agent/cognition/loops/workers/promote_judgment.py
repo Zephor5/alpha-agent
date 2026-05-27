@@ -7,7 +7,12 @@ from typing import ClassVar
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger, WorkerCheckpoint, WorkerReport
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers._common import (
     active_belief,
     after_cursor_wrap,
@@ -34,7 +39,7 @@ class PromoteJudgmentWorker:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
@@ -67,7 +72,7 @@ class PromoteJudgmentWorker:
                         sources=[],
                         held_since=first_event.timestamp,
                     )
-                    event = emit_projected(
+                    formed = emit_projected(
                         emitter,
                         projections,
                         CognitiveEventKind.BELIEF_FORMED,
@@ -79,7 +84,7 @@ class PromoteJudgmentWorker:
                         rationale="Promoted repeated judgment into belief.",
                     )
                     emitted += (
-                        1 if event is not None or getattr(config, "dry_run", False) else 0
+                        1 if formed is not None or getattr(config, "dry_run", False) else 0
                     )
             if coordinator.yield_to_higher_priority():
                 return report(

@@ -7,7 +7,12 @@ from typing import ClassVar
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger, WorkerCheckpoint, WorkerReport
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers._common import (
     after_cursor_wrap,
     emit_projected,
@@ -34,7 +39,7 @@ class MergeBeliefsWorker:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:

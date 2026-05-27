@@ -24,6 +24,7 @@ def test_counterpart_router_first_observed_no_duplicate_and_perception_source() 
     first = router.upsert_from_source_metadata(source_metadata, emitter=emitter)
     second = router.upsert_from_source_metadata(source_metadata, emitter=emitter)
 
+    assert first is not None
     assert first == second
     assert [
         event.kind for event in log.iter(kinds=[CognitiveEventKind.COUNTERPART_FIRST_OBSERVED])

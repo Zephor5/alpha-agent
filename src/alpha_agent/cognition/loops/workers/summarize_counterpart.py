@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import ClassVar
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger, WorkerCheckpoint, WorkerReport
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers._common import (
     active_belief,
     after_cursor_wrap,
@@ -17,6 +23,7 @@ from alpha_agent.cognition.loops.workers._common import (
     trigger,
 )
 from alpha_agent.cognition.models import (
+    Belief,
     CognitiveEventKind,
     CognitiveType,
     CounterpartId,
@@ -46,7 +53,7 @@ class SummarizeCounterpartWorker:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
@@ -137,13 +144,13 @@ class SummarizeCounterpartWorker:
         )
 
 
-def _active_digest(beliefs: list[object], counterpart_id: str):
+def _active_digest(beliefs: Sequence[Belief], counterpart_id: str) -> Belief | None:
     object_id = f"{DIGEST_OBJECT_PREFIX}{counterpart_id}"
     digests = [belief for belief in beliefs if str(belief.object) == object_id]
     return max(digests, key=lambda item: str(item.held_since)) if digests else None
 
 
-def _should_digest(source_ids: list[str], old_digest: object | None, config: object) -> bool:
+def _should_digest(source_ids: list[str], old_digest: Belief | None, config: object) -> bool:
     if old_digest is None:
         return len(source_ids) >= int(getattr(config, "counterpart_digest_min_beliefs", 5))
     old_source_ids = {source.id for source in old_digest.sources if source.kind == "belief"}
@@ -151,7 +158,7 @@ def _should_digest(source_ids: list[str], old_digest: object | None, config: obj
     return new_count >= int(getattr(config, "counterpart_digest_min_new_beliefs", 3))
 
 
-def _digest_content(beliefs: list[object]) -> str:
+def _digest_content(beliefs: Sequence[Belief]) -> str:
     ordered = sorted(
         beliefs,
         key=lambda item: (item.cognitive_type.value, -float(item.confidence), str(item.id)),

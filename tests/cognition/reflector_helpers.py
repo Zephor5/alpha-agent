@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import cast
 
 from alpha_agent.cognition.models import (
     Action,
@@ -53,7 +54,10 @@ def judgment(
         undermined_by=undermined_by or [],
         applicable_under=Applicability(applicable_under),
         confidence=confidence,
-        value_weights=value_weights or {ValueKind.HELPFULNESS: 1.0},
+        value_weights=cast(
+            dict[ValueKind, float],
+            value_weights or {ValueKind.HELPFULNESS: 1.0},
+        ),
         formed_in=SITUATION,
         expires_at=None,
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any, Self
 
 from alpha_agent.cognition.models._ids import (
     ActionHint,
@@ -58,9 +59,9 @@ class Belief:
     supersedes: BeliefRef | None = None
     self_audit: list[ReflectionRef] = field(default_factory=list)
 
-    def to_record(self) -> dict[str, object]:
+    def to_record(self) -> dict[str, Any]:
         return dataclass_to_record(self)
 
     @classmethod
-    def from_record(cls, record: dict[str, object]) -> Belief:
+    def from_record(cls, record: dict[str, Any]) -> Self:
         return dataclass_from_record(cls, record)

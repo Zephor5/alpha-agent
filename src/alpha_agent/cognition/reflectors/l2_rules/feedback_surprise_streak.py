@@ -8,7 +8,10 @@ from alpha_agent.cognition.models import (
     Reflection,
     StrategyOverride,
 )
-from alpha_agent.cognition.reflectors.l2_rules._common import has_active_strategy
+from alpha_agent.cognition.reflectors.l2_rules._common import (
+    StrategyCandidate,
+    has_active_strategy,
+)
 
 RULE_NAME = "feedback-surprise-streak"
 STRATEGY_NAME = "disable_auto_procedure_match_for_trigger"
@@ -18,7 +21,7 @@ def feedback_surprise_streak(
     reflections: list[Reflection],
     events: list[CognitiveEvent],
     active_strategies: list[StrategyOverride],
-) -> dict[str, object] | None:
+) -> StrategyCandidate | None:
     del reflections
     if has_active_strategy(active_strategies, STRATEGY_NAME):
         return None
@@ -44,7 +47,7 @@ def feedback_surprise_streak(
     return _candidate(trigger, group)
 
 
-def _candidate(trigger: str, group: list[CognitiveEvent]) -> dict[str, object]:
+def _candidate(trigger: str, group: list[CognitiveEvent]) -> StrategyCandidate:
     return {
         "rule": RULE_NAME,
         "strategy_name": STRATEGY_NAME,

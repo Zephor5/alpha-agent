@@ -168,6 +168,15 @@ def test_real_reactive_tick_populates_recalled_and_recent_judgments(tmp_path) ->
     context_projection = ContextWindowProjection(log)
     captured_windows = []
 
+    def capture_window(_decision, view, _rendered):
+        captured_windows.append(view.window)
+        return Outcome(
+            text="ok",
+            tool_calls=[],
+            tool_results=[],
+            raw_llm_response=LLMResponse(content="ok", model="test", provider="static"),
+        )
+
     registry = ProjectionRegistry()
     registry.register(SubjectProjection(log))
     registry.register(belief_projection)
@@ -181,15 +190,7 @@ def test_real_reactive_tick_populates_recalled_and_recent_judgments(tmp_path) ->
         effector=Effector(
             llm_provider=_StaticProvider(),
             tool_registry=ToolRegistry(),
-            completion_runner=lambda _decision, view, _rendered: captured_windows.append(
-                view.window
-            )
-            or Outcome(
-                text="ok",
-                tool_calls=[],
-                tool_results=[],
-                raw_llm_response=LLMResponse(content="ok", model="test", provider="static"),
-            ),
+            completion_runner=capture_window,
         ),
     )
 

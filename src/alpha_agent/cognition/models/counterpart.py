@@ -19,6 +19,9 @@ class ServiceCommitment:
     status: str = "committed"
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def to_record(self) -> dict[str, object]:
+        return dataclass_to_record(self)
+
 
 @dataclass(frozen=True)
 class Relationship:

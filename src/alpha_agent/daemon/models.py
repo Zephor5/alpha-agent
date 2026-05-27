@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 RequestType = Literal["ask", "chat_turn", "status", "stop"]
 StopPolicyValue = Literal["graceful", "immediate"]
@@ -76,11 +76,11 @@ def parse_request(payload: Any) -> DaemonRequest:
         )
 
     return DaemonRequest(
-        type=request_type,  # type: ignore[arg-type]
+        type=cast(RequestType, request_type),
         message=message,
         session_id=session_id,
         source_metadata=dict(source_metadata) if source_metadata is not None else None,
-        stop_policy=stop_policy,  # type: ignore[arg-type]
+        stop_policy=cast(StopPolicyValue, stop_policy),
     )
 
 

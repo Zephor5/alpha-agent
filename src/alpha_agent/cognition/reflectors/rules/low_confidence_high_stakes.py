@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import ClassVar
+from collections.abc import Iterator, Mapping
+from typing import Any, ClassVar
 
 from alpha_agent.cognition.models import Reflection, ValueKind
 from alpha_agent.cognition.reflectors.l1 import AuditContext
@@ -28,7 +28,7 @@ class LowConfidenceHighStakesRule:
             )
 
 
-def _high_stakes_weight(weights: dict[object, float]) -> float:
+def _high_stakes_weight(weights: Mapping[Any, float]) -> float:
     candidates = ("existence", "safety", ValueKind.SAFETY)
     values = []
     for key in candidates:

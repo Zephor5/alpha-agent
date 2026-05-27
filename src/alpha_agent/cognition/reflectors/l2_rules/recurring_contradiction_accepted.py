@@ -6,6 +6,7 @@ from collections import Counter
 
 from alpha_agent.cognition.models import CognitiveEvent, Reflection, StrategyOverride
 from alpha_agent.cognition.reflectors.l2_rules._common import (
+    StrategyCandidate,
     has_active_strategy,
     within_window,
 )
@@ -18,7 +19,7 @@ def recurring_contradiction_accepted(
     reflections: list[Reflection],
     events: list[CognitiveEvent],
     active_strategies: list[StrategyOverride],
-) -> dict[str, object] | None:
+) -> StrategyCandidate | None:
     del events
     if has_active_strategy(active_strategies, STRATEGY_NAME):
         return None

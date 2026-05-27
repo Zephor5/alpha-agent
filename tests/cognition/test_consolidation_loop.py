@@ -30,8 +30,8 @@ from alpha_agent.cognition.loops.workers import (
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
     CounterpartId,
-    ExpectedFeedback,
     Instant,
+    NLStatement,
     Procedure,
     ProcedureId,
     Step,
@@ -447,7 +447,7 @@ def test_procedure_projection_rebuilds_from_event_log(tmp_path) -> None:
         id=ProcedureId("procedure:test"),
         trigger=TriggerPattern("respond:summarize"),
         steps=[Step("repeat action pattern: respond:summarize")],
-        expected_outcome=ExpectedFeedback("matched_expected_feedback"),
+        expected_outcome=NLStatement("matched_expected_feedback"),
         learned_from=[],
         success_count=3,
         failure_count=0,

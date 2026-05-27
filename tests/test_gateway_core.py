@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from alpha_agent.gateway.adapters import InboundHandler, PlatformAdapter
 from alpha_agent.gateway.models import (
     ConversationSource,
     DeliveryResult,
     InboundMessage,
+    OutboundMessage,
 )
 from alpha_agent.gateway.runner import ActiveTurnGuard, GatewayDeliveryError, GatewayRuntimeBridge
 from alpha_agent.gateway.session import (
@@ -81,7 +83,7 @@ class _FakeAgentManager:
         return self.agent
 
 
-class _FakeAdapter:
+class _FakeAdapter(PlatformAdapter):
     name = "fake"
 
     def __init__(
@@ -101,7 +103,7 @@ class _FakeAdapter:
         self.sent: list[tuple[ConversationSource, str]] = []
         self.hooks: list[str] = []
 
-    def connect(self, handler):
+    def connect(self, handler: InboundHandler) -> None:
         self.connected = True
         for message in self.messages:
             handler(message)
@@ -109,7 +111,7 @@ class _FakeAdapter:
     def disconnect(self) -> None:
         self.disconnected = True
 
-    def send(self, source: ConversationSource, outbound):
+    def send(self, source: ConversationSource, outbound: OutboundMessage) -> DeliveryResult:
         self.sent.append((source, outbound.text))
         error = None if self.delivery_success else "denied"
         return DeliveryResult(success=self.delivery_success, error=error)
@@ -406,7 +408,7 @@ def test_gateway_bridge_constructor_requires_agent_manager(tmp_path: Path) -> No
             deduplicator=GatewayDeduplicator(store),
             turn_guard=ActiveTurnGuard(),
             session_mode=SessionMode.GROUP_PER_USER,
-        )
+        )  # type: ignore[call-arg]
 
 
 def test_gateway_bridge_suppresses_duplicate_inbound_without_runtime_or_send(

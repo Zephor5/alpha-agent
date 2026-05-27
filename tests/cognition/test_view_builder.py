@@ -3,6 +3,7 @@ from __future__ import annotations
 from alpha_agent.cognition.controller import default_projection_registry
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import (
+    BeliefId,
     CognitiveEventKind,
     ContextWindow,
     CounterpartId,
@@ -65,7 +66,7 @@ def test_build_view_resolves_subject_counterpart_and_beliefs(tmp_path) -> None:
         counterpart=counterpart,
         foreground=[],
         background=None,
-        recalled=[belief_ref("belief:1")],
+        recalled=[belief_ref(BeliefId("belief:1"))],
         recent_judgments=[],
         matched_procedures=[],
         subject_at=subject_ref(subject.id),

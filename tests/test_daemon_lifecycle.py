@@ -274,7 +274,7 @@ def test_daemon_signal_handlers_request_stop_and_restore_previous_handlers(
     daemon = AlphaDaemon(config, store=store, runtime=_runtime(config))
     fake_signals = _FakeSignalModule()
 
-    restore = daemon._install_signal_handlers(fake_signals)  # type: ignore[arg-type]
+    restore = daemon._install_signal_handlers(fake_signals)
     fake_signals.handlers[fake_signals.SIGTERM](fake_signals.SIGTERM, None)
 
     assert daemon.stop_policy is StopPolicy.GRACEFUL

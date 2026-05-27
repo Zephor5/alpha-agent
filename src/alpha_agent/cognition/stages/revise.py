@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from alpha_agent.cognition.emitter import EventEmitter
-from alpha_agent.cognition.models import CognitiveEventKind, EventId, Judgment, NLStatement
+from alpha_agent.cognition.models import (
+    CognitiveEventKind,
+    EventId,
+    Judgment,
+    NLStatement,
+    StrategyOverride,
+)
 from alpha_agent.cognition.projections.strategy import strategy_is_active_for_stage
 from alpha_agent.cognition.stages.types import (
     Emitted,
@@ -27,7 +33,7 @@ class Reviser:
         tick_id: str,
         causal_parent: EventId,
         interpretation: Interpretation | None = None,
-        strategies: list[object] | None = None,
+        strategies: list[StrategyOverride] | None = None,
     ) -> Emitted[list[Revision]]:
         revisions: list[Revision] = []
         pending_confirmation = False
@@ -35,7 +41,7 @@ class Reviser:
             interpretation is not None
             and interpretation.stance == "contradicting"
             and strategy_is_active_for_stage(
-                list(strategies or []),
+                strategies or [],
                 "require_explicit_confirm_on_contradiction",
                 "revise",
             )

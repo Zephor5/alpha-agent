@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.models import (
     Belief,
@@ -12,12 +14,18 @@ from alpha_agent.cognition.models import (
     EventId,
     NLStatement,
     Reference,
+    StrategyOverride,
     Subject,
     belief_ref,
 )
 from alpha_agent.cognition.projections.strategy import strategy_is_active_for_stage
 from alpha_agent.cognition.stages._payload import ref_ids
-from alpha_agent.cognition.stages.types import AttentionFocus, Emitted, Interpretation
+from alpha_agent.cognition.stages.types import (
+    AttentionFocus,
+    Emitted,
+    Interpretation,
+    InterpretationStance,
+)
 from alpha_agent.cognition.value.resolver import resolve_conflict
 
 
@@ -28,13 +36,13 @@ class Interpreter:
         self,
         focus: AttentionFocus,
         window: ContextWindow,
-        recalled: list[Belief | BeliefRef],
+        recalled: Sequence[Belief | BeliefRef],
         subject: Subject,
         *,
         emitter: EventEmitter,
         tick_id: str,
         causal_parent: EventId,
-        strategies: list[object] | None = None,
+        strategies: list[StrategyOverride] | None = None,
     ) -> Emitted[Interpretation]:
         text = "\n".join(str(claim) for claim in focus.salient_claims)
         recalled_beliefs = [item for item in recalled if isinstance(item, Belief)]
@@ -56,7 +64,7 @@ class Interpreter:
             proposed_resolution = resolve_conflict(left, right, subject.value_lens)
             contradict_refs.extend([belief_ref(left.id), belief_ref(right.id)])
         if support_refs:
-            stance = "consistent"
+            stance: InterpretationStance = "consistent"
         elif contradict_refs or proposed_resolution is not None:
             stance = "contradicting"
         elif not claim_texts:
@@ -71,7 +79,7 @@ class Interpreter:
         requires_confirmation = (
             stance == "novel"
             and strategy_is_active_for_stage(
-                list(strategies or []),
+                strategies or [],
                 "require_confirm_before_novel_form",
                 "interpret",
             )

@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError, is_dataclass
+from typing import Any, cast
 
 import pytest
 
@@ -53,11 +54,11 @@ from alpha_agent.cognition.models import (
 )
 def test_model_types_are_frozen_dataclasses(model_cls) -> None:
     assert is_dataclass(model_cls)
-    assert model_cls.__dataclass_params__.frozen is True
+    assert cast(Any, model_cls).__dataclass_params__.frozen is True
     assert getattr(model_cls, "__hash__", None) is not None
 
 
 def test_frozen_instances_reject_mutation() -> None:
     subject = Subject()
     with pytest.raises(FrozenInstanceError):
-        subject.role = "other"
+        cast(Any, subject).role = "other"

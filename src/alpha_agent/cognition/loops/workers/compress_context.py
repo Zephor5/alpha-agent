@@ -7,7 +7,12 @@ from typing import ClassVar
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger, WorkerCheckpoint, WorkerReport
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers._common import (
     after_cursor_wrap,
     emit_projected,
@@ -15,7 +20,7 @@ from alpha_agent.cognition.loops.workers._common import (
     stable_id,
     trigger,
 )
-from alpha_agent.cognition.models import CognitiveEventKind, Subject
+from alpha_agent.cognition.models import CognitiveEventKind, Subject, ThreadId
 from alpha_agent.cognition.projections.context_window import ContextWindowProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 
@@ -32,7 +37,7 @@ class CompressContextWorker:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
@@ -53,7 +58,7 @@ class CompressContextWorker:
             foreground_ids = projection.foreground_ids(thread_id)
             if len(foreground_ids) > max_foreground:
                 window = projection.get(thread_id, Subject())
-                anchored_ids = set(window.metadata.get("anchored_ids", []))
+                anchored_ids = _string_set(window.metadata.get("anchored_ids"))
                 absorbable = [item for item in foreground_ids if item not in anchored_ids]
                 take = min(absorb_batch, max(0, len(foreground_ids) - max_foreground))
                 absorbed_ids = absorbable[:take]
@@ -108,5 +113,11 @@ def _summary(lines: list[str], limit: int) -> str:
     return joined[: max(0, limit - 3)].rstrip() + "..."
 
 
-def _thread_cursor(thread_id) -> str:
+def _thread_cursor(thread_id: ThreadId) -> str:
     return json.dumps(thread_id.to_record(), ensure_ascii=False, sort_keys=True)
+
+
+def _string_set(value: object) -> set[str]:
+    if not isinstance(value, list | tuple | set):
+        return set()
+    return {str(item) for item in value}

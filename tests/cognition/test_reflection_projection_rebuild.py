@@ -7,6 +7,8 @@ from alpha_agent.cognition.models import (
     NLStatement,
     Reflection,
     ReflectionId,
+    ReflectionKind,
+    ReflectionTarget,
     RemedyHint,
     Severity,
 )
@@ -93,9 +95,9 @@ def _reflection(
     return Reflection(
         id=ReflectionId(reflection_id),
         level="L1",
-        kind=kind,
+        kind=ReflectionKind(kind),
         severity=Severity(severity),
-        target=target,
+        target=ReflectionTarget(target),
         finding=NLStatement("finding"),
         suggested_remedy=RemedyHint("remedy"),
         created_at=Instant(f"2026-01-01T00:00:0{reflection_id[-1]}+00:00"),

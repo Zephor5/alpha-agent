@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
+from collections.abc import Mapping
+from datetime import datetime, timedelta
 from typing import ClassVar
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger, WorkerCheckpoint, WorkerReport
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers._common import emit_projected, report
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
@@ -21,6 +27,7 @@ from alpha_agent.cognition.projections.reflection import ReflectionProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.projections.strategy import StrategyProjection
 from alpha_agent.cognition.reflectors.l2_rules import RULES
+from alpha_agent.cognition.reflectors.l2_rules._common import StrategyCandidate
 from alpha_agent.utils.time import utc_now_iso
 
 
@@ -41,7 +48,7 @@ class ReflectorL2:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
@@ -99,12 +106,11 @@ class ReflectorL2:
         )
 
 
-def _strategy_from_candidate(candidate: dict[str, object], now: Instant) -> StrategyOverride:
+def _strategy_from_candidate(candidate: StrategyCandidate, now: Instant) -> StrategyOverride:
     valid_until = Instant(str(_parse_time(now) + timedelta(hours=24)))
-    payload = candidate.get("payload")
-    record = {
+    record: dict[str, object] = {
         "name": candidate["strategy_name"],
-        "payload": payload if isinstance(payload, dict) else {},
+        "payload": candidate["payload"],
         "target_stages": candidate["target_stages"],
         "set_at": str(now),
         "valid_until": str(valid_until),
@@ -112,22 +118,20 @@ def _strategy_from_candidate(candidate: dict[str, object], now: Instant) -> Stra
     return StrategyOverride(
         id=StrategyId(_stable_strategy_id(candidate["rule"], record)),
         name=str(candidate["strategy_name"]),
-        payload=record["payload"],
-        target_stages=list(record["target_stages"]),
+        payload=candidate["payload"],
+        target_stages=list(candidate["target_stages"]),
         set_by="reflector_l2",
         set_at=now,
         valid_until=valid_until,
     )
 
 
-def _stable_strategy_id(rule: object, record: dict[str, object]) -> str:
+def _stable_strategy_id(rule: object, record: Mapping[str, object]) -> str:
     digest = hashlib.sha1(
         json.dumps([rule, record], ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()[:16]
     return f"strategy:{digest}"
 
 
-def _parse_time(value: Instant):
-    from datetime import datetime
-
+def _parse_time(value: Instant) -> datetime:
     return datetime.fromisoformat(str(value).replace("Z", "+00:00"))

@@ -5,6 +5,7 @@ from __future__ import annotations
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
+    CounterpartId,
     CounterpartRef,
     NLStatement,
     Perception,
@@ -77,4 +78,4 @@ class Perceiver:
 def _raised_entities(source: CounterpartRef | None) -> list[Reference]:
     if source is None:
         return []
-    return [counterpart_ref(source.id)]
+    return [counterpart_ref(CounterpartId(source.id))]

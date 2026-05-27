@@ -13,6 +13,7 @@ from alpha_agent.cognition.models import (
     Instant,
     Lifecycle,
     NLStatement,
+    Reference,
     ReflectionId,
     Role,
     SituationId,
@@ -33,7 +34,7 @@ def belief(
     belief_id: str,
     content: str,
     *,
-    about: list[object] | None = None,
+    about: list[Reference] | None = None,
     object_: str = "python",
     confidence: float = 0.6,
     held_since: str = "2026-01-01T00:00:00+00:00",
@@ -143,10 +144,16 @@ def test_apply_belief_superseded_marks_old_and_keeps_new_active(tmp_path) -> Non
         )
     )
 
-    assert projection.get_by_id(BeliefId("belief:old")).status == "superseded"
-    assert projection.get_by_id(BeliefId("belief:old")).superseded_by.id == "belief:new"
-    assert projection.get_by_id(BeliefId("belief:new")).status == "active"
-    assert projection.get_by_id(BeliefId("belief:new")).supersedes.id == "belief:old"
+    materialized_old = projection.get_by_id(BeliefId("belief:old"))
+    materialized_new = projection.get_by_id(BeliefId("belief:new"))
+    assert materialized_old is not None
+    assert materialized_new is not None
+    assert materialized_old.superseded_by is not None
+    assert materialized_new.supersedes is not None
+    assert materialized_old.status == "superseded"
+    assert materialized_old.superseded_by.id == "belief:new"
+    assert materialized_new.status == "active"
+    assert materialized_new.supersedes.id == "belief:old"
     assert [item.id for item in projection.list_active()] == ["belief:new"]
 
 
@@ -177,7 +184,9 @@ def test_apply_belief_retracted_removes_from_active_scope(tmp_path) -> None:
         )
     )
 
-    assert projection.get_by_id(BeliefId("belief:python")).status == "retracted"
+    materialized = projection.get_by_id(BeliefId("belief:python"))
+    assert materialized is not None
+    assert materialized.status == "retracted"
     assert projection.list_active() == []
 
 
@@ -208,7 +217,9 @@ def test_apply_belief_archived_removes_from_active_scope(tmp_path) -> None:
         )
     )
 
-    assert projection.get_by_id(BeliefId("belief:python")).status == "archived"
+    materialized = projection.get_by_id(BeliefId("belief:python"))
+    assert materialized is not None
+    assert materialized.status == "archived"
     assert projection.list_active() == []
 
 

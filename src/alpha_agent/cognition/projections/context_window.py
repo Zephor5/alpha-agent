@@ -8,6 +8,7 @@ reconstructs Perception objects from their original perceived events.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -190,7 +191,7 @@ class ContextWindowProjection(Projection):
     def attach_recalled(
         self,
         window: ContextWindow,
-        recalled: list[Belief | BeliefRef],
+        recalled: Sequence[Belief | BeliefRef],
     ) -> ContextWindow:
         return replace(window, recalled=[_belief_reference(item) for item in recalled])
 

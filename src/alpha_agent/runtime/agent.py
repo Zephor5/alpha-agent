@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import timedelta
 from pathlib import Path
 from threading import Lock, RLock
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -114,7 +114,7 @@ _DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {
 
 
 @contextmanager
-def _serialized_session_turn(session_id: str):
+def _serialized_session_turn(session_id: str) -> Iterator[None]:
     with _SESSION_TURN_LOCKS_GUARD:
         lock = _SESSION_TURN_LOCKS.setdefault(session_id, RLock())
     lock.acquire()
@@ -122,6 +122,10 @@ def _serialized_session_turn(session_id: str):
         yield
     finally:
         lock.release()
+
+
+def _copy_chat_message(message: ChatMessage) -> ChatMessage:
+    return cast(ChatMessage, dict(message))
 
 
 @dataclass(frozen=True)
@@ -602,9 +606,9 @@ class AlphaAgent:
         transient_context_messages: Sequence[ChatMessage],
     ) -> list[ChatMessage]:
         return [
-            dict(system_message),  # type: ignore[arg-type]
+            _copy_chat_message(system_message),
             *self.session_context.load(session_id).chat_messages,
-            *[dict(message) for message in transient_context_messages],  # type: ignore[arg-type]
+            *[_copy_chat_message(message) for message in transient_context_messages],
         ]
 
     def _prompt_frame_from_rendered(
@@ -613,10 +617,10 @@ class AlphaAgent:
         view: CognitionView,
         rendered: RenderResult,
     ) -> tuple[ChatMessage, list[ChatMessage]]:
-        rendered_messages = list(rendered.payload)
+        rendered_messages = cast(list[ChatMessage], rendered.payload)
         if not rendered_messages:
             return self._default_system_message(), []
-        system_message = dict(rendered_messages[0])  # type: ignore[arg-type]
+        system_message = _copy_chat_message(rendered_messages[0])
         source_count = len(view.chat_history)
         transient_messages = list(rendered_messages[1 + source_count :])
         if transient_messages and self._is_current_query_message(
@@ -624,7 +628,7 @@ class AlphaAgent:
             view.current_query,
         ):
             transient_messages = transient_messages[:-1]
-        return system_message, [dict(message) for message in transient_messages]  # type: ignore[arg-type]
+        return system_message, [_copy_chat_message(message) for message in transient_messages]
 
     def _is_current_query_message(
         self,
@@ -667,7 +671,7 @@ class AlphaAgent:
         )
 
     def _default_system_message(self) -> ChatMessage:
-        return dict(_DEFAULT_RUNTIME_SYSTEM_MESSAGE)  # type: ignore[return-value]
+        return _copy_chat_message(_DEFAULT_RUNTIME_SYSTEM_MESSAGE)
 
     def _raise_pending_user_too_large(self, estimate: ContextBudgetEstimate) -> None:
         raise ContextWindowExceededError(

@@ -8,6 +8,7 @@ from alpha_agent.cognition.coordinator import LoopCoordinator
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.loops.scheduler import (
+    AcquiringCoordinator,
     InMemoryCheckpointStore,
     ScheduledWorker,
     Scheduler,
@@ -44,7 +45,7 @@ class ConsolidationLoop:
         self,
         *,
         scheduler: Scheduler | None = None,
-        coordinator: LoopCoordinator | None = None,
+        coordinator: AcquiringCoordinator | None = None,
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter | None = None,

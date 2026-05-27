@@ -6,7 +6,12 @@ from typing import ClassVar
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger, WorkerCheckpoint, WorkerReport
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers._common import (
     after_cursor_wrap,
     emit_projected,
@@ -20,6 +25,7 @@ from alpha_agent.cognition.models import (
     belief_ref,
 )
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
+from alpha_agent.cognition.models.value import ValueLens
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.value.lens import default_value_lens, lens_to_record, load_lens
@@ -43,7 +49,7 @@ class ResolveQueuedConflictsWorker:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
@@ -140,7 +146,7 @@ class ResolveQueuedConflictsWorker:
         return report(self.name, checkpoint, inspected=len(conflicts), emitted=emitted, metadata={})
 
 
-def _current_lens(log: EventLog):
+def _current_lens(log: EventLog) -> ValueLens:
     store = getattr(log, "store", None)
     return load_lens(store, str(SUBJECT_SELF)) if store is not None else default_value_lens()
 

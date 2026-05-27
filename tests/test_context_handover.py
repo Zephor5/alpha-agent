@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TypedDict
 
 import pytest
 
@@ -22,6 +23,12 @@ from alpha_agent.runtime.session_context import SessionContextAssembler, wrap_sy
 from alpha_agent.state.store import StateStore
 
 
+class _ProviderCall(TypedDict):
+    messages: list[ChatMessage]
+    tools: Sequence[LLMToolDefinitionInput] | None
+    tool_choice: LLMToolChoice | None
+
+
 def _store(tmp_path) -> StateStore:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
@@ -40,7 +47,7 @@ class _RecordingProvider:
 
     def __init__(self, response: str):
         self.response = response
-        self.calls: list[dict[str, object]] = []
+        self.calls: list[_ProviderCall] = []
 
     def complete(
         self,

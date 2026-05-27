@@ -11,6 +11,7 @@ from alpha_agent.cognition.models import CognitiveEvent, CognitiveEventKind, Sel
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.base import Projection
 from alpha_agent.cognition.value.lens import (
+    ValueLens,
     default_value_lens,
     ensure_lens_schema,
     load_lens,
@@ -187,7 +188,7 @@ class SubjectProjection(Projection):
                 ),
             )
 
-    def _lens_from_events(self):
+    def _lens_from_events(self) -> ValueLens | None:
         latest = None
         for event in self.event_log.iter(kinds=[CognitiveEventKind.VALUE_LENS_SHIFTED]):
             if str(event.payload.get("subject_id") or SUBJECT_SELF) != str(SUBJECT_SELF):

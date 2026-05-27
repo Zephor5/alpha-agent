@@ -8,7 +8,11 @@ from alpha_agent.cognition.models import (
     Reflection,
     StrategyOverride,
 )
-from alpha_agent.cognition.reflectors.l2_rules._common import event_window, has_active_strategy
+from alpha_agent.cognition.reflectors.l2_rules._common import (
+    StrategyCandidate,
+    event_window,
+    has_active_strategy,
+)
 
 RULE_NAME = "premature-novel-auto-form-burst"
 STRATEGY_NAME = "require_confirm_before_novel_form"
@@ -18,7 +22,7 @@ def premature_novel_auto_form_burst(
     reflections: list[Reflection],
     events: list[CognitiveEvent],
     active_strategies: list[StrategyOverride],
-) -> dict[str, object] | None:
+) -> StrategyCandidate | None:
     del reflections
     if has_active_strategy(active_strategies, STRATEGY_NAME):
         return None

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 from alpha_agent.cognition.models import (
     ContextWindow,
     Counterpart,
@@ -72,7 +74,7 @@ def counterpart(
     )
 
 
-def view(**kwargs) -> CognitionView:
+def view(**kwargs: Any) -> CognitionView:
     subject = Subject()
     situation = Situation(id=SituationId("situation:test"))
     base = {
@@ -84,14 +86,14 @@ def view(**kwargs) -> CognitionView:
         "current_query": "hello",
     }
     base.update(kwargs)
-    return CognitionView(**base)
+    return CognitionView(**cast(Any, base))
 
 
 def counterpart_window() -> ContextWindow:
     base = window()
-    return ContextWindow(
-        **{
+    return ContextWindow.from_record(
+        {
             **base.to_record(),
             "counterpart": counterpart_ref(CounterpartId("counterpart:user-a")).to_record(),
-        }
+        },
     )

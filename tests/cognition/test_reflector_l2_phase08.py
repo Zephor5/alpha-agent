@@ -20,7 +20,6 @@ from alpha_agent.cognition.loops import (
 from alpha_agent.cognition.loops.workers import ExpireStrategiesWorker, LearnValueLensWorker
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
-    ExpectedFeedback,
     Instant,
     NLStatement,
     Procedure,
@@ -29,6 +28,7 @@ from alpha_agent.cognition.models import (
     ReflectionId,
     ReflectionKind,
     ReflectionTarget,
+    RemedyHint,
     Severity,
     Step,
     Stimulus,
@@ -438,7 +438,7 @@ def test_controller_skips_procedure_match_for_trigger_strategy(tmp_path: Path) -
         id=ProcedureId("procedure:hello"),
         trigger=TriggerPattern("hello"),
         steps=[Step("respond with known path")],
-        expected_outcome=ExpectedFeedback("ok"),
+        expected_outcome=NLStatement("ok"),
         learned_from=[],
         success_count=5,
         failure_count=0,
@@ -549,7 +549,7 @@ def _reflection(reflection_id: str, kind: str, created_at: str) -> Reflection:
         severity=Severity("warning"),
         target=ReflectionTarget("belief:test"),
         finding=NLStatement("finding"),
-        suggested_remedy="",
+        suggested_remedy=RemedyHint(""),
         created_at=Instant(created_at),
     )
 

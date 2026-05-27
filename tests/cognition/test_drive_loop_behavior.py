@@ -10,7 +10,7 @@ from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.goals import GoalRegistry
 from alpha_agent.cognition.loops import DriveConfig, DriveLoop
-from alpha_agent.cognition.models import CognitiveEventKind, GoalId, StimulusKind
+from alpha_agent.cognition.models import CognitiveEventKind, GoalId, Instant, StimulusKind
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.llm.mock import MockLLMProvider
@@ -167,7 +167,7 @@ class _ReactiveBusyCoordinator(LoopCoordinator):
     @contextmanager
     def try_acquire(self, req: LoopAcquireRequest) -> Iterator[None]:
         if req.loop_name == "reactive":
-            raise LockBusy("reactive", "2026-01-01T00:00:00+00:00")
+            raise LockBusy("reactive", Instant("2026-01-01T00:00:00+00:00"))
         with super().try_acquire(req):
             yield
 

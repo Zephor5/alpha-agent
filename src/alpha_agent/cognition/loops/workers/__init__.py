@@ -1,5 +1,6 @@
 """Consolidation workers."""
 
+from alpha_agent.cognition.loops.scheduler import ScheduledWorker
 from alpha_agent.cognition.loops.workers.archive_expired import ArchiveExpiredWorker
 from alpha_agent.cognition.loops.workers.compress_context import CompressContextWorker
 from alpha_agent.cognition.loops.workers.expire_strategies import ExpireStrategiesWorker
@@ -13,7 +14,7 @@ from alpha_agent.cognition.loops.workers.resolve_queued_conflicts import (
 from alpha_agent.cognition.loops.workers.summarize_counterpart import SummarizeCounterpartWorker
 
 
-def default_workers():
+def default_workers() -> list[ScheduledWorker]:
     from alpha_agent.cognition.reflectors.l3 import ReflectorL3
 
     return [

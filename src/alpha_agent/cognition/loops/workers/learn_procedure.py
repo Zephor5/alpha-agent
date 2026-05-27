@@ -7,7 +7,12 @@ from typing import ClassVar
 
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger, WorkerCheckpoint, WorkerReport
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers._common import (
     after_cursor_wrap,
     emit_projected,
@@ -18,7 +23,7 @@ from alpha_agent.cognition.loops.workers._common import (
 )
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
-    ExpectedFeedback,
+    NLStatement,
     Procedure,
     ProcedureId,
     Step,
@@ -45,7 +50,7 @@ class LearnProcedureWorker:
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
@@ -83,13 +88,13 @@ class LearnProcedureWorker:
                         id=ProcedureId(procedure_id),
                         trigger=TriggerPattern(pattern),
                         steps=[Step(f"repeat action pattern: {pattern}")],
-                        expected_outcome=ExpectedFeedback("matched_expected_feedback"),
+                        expected_outcome=NLStatement("matched_expected_feedback"),
                         learned_from=learned_from,
                         success_count=len(items),
                         failure_count=0,
                         confidence=min(0.95, 0.5 + 0.1 * len(items)),
                     )
-                    event = emit_projected(
+                    learned = emit_projected(
                         emitter,
                         projections,
                         CognitiveEventKind.PROCEDURE_LEARNED,
@@ -104,7 +109,7 @@ class LearnProcedureWorker:
                         ),
                     )
                     emitted += (
-                        1 if event is not None or getattr(config, "dry_run", False) else 0
+                        1 if learned is not None or getattr(config, "dry_run", False) else 0
                     )
             if coordinator.yield_to_higher_priority():
                 return report(

@@ -12,6 +12,8 @@ from alpha_agent.cognition.models import (
     NLStatement,
     Reflection,
     ReflectionId,
+    ReflectionKind,
+    ReflectionTarget,
     RemedyHint,
     Severity,
 )
@@ -27,9 +29,9 @@ def test_cli_reflections_lists_recent_rows_with_severity_filter(tmp_path: Path) 
     warning = Reflection(
         id=ReflectionId("reflection:1"),
         level="L1",
-        kind="unsupported-tool-call",
+        kind=ReflectionKind("unsupported-tool-call"),
         severity=Severity("warning"),
-        target="decision:decision:1",
+        target=ReflectionTarget("decision:decision:1"),
         finding=NLStatement("Tool use lacked support."),
         suggested_remedy=RemedyHint("Ask for evidence before calling tools."),
         created_at=Instant("2026-01-01T00:00:01+00:00"),
@@ -37,9 +39,9 @@ def test_cli_reflections_lists_recent_rows_with_severity_filter(tmp_path: Path) 
     info = Reflection(
         id=ReflectionId("reflection:2"),
         level="L1",
-        kind="feedback-surprise",
+        kind=ReflectionKind("feedback-surprise"),
         severity=Severity("info"),
-        target="loop_run:tick:1",
+        target=ReflectionTarget("loop_run:tick:1"),
         finding=NLStatement("Feedback surprised the loop."),
         suggested_remedy=RemedyHint("Review expectation."),
         created_at=Instant("2026-01-01T00:00:02+00:00"),

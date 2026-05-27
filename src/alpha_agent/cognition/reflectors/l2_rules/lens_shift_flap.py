@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from numbers import Real
 
 from alpha_agent.cognition.models import (
     CognitiveEvent,
@@ -11,7 +12,11 @@ from alpha_agent.cognition.models import (
     Reflection,
     StrategyOverride,
 )
-from alpha_agent.cognition.reflectors.l2_rules._common import event_window, has_active_strategy
+from alpha_agent.cognition.reflectors.l2_rules._common import (
+    StrategyCandidate,
+    event_window,
+    has_active_strategy,
+)
 
 RULE_NAME = "lens-shift-flap"
 STRATEGY_NAME = "freeze_lens_learning_for_24h"
@@ -21,7 +26,7 @@ def lens_shift_flap(
     reflections: list[Reflection],
     events: list[CognitiveEvent],
     active_strategies: list[StrategyOverride],
-) -> dict[str, object] | None:
+) -> StrategyCandidate | None:
     del reflections
     if has_active_strategy(active_strategies, STRATEGY_NAME):
         return None
@@ -78,8 +83,8 @@ def _sensitivity_direction(before: dict[str, object], after: dict[str, object]) 
     keys = sorted(set(before_sensitivity) | set(after_sensitivity))
     directions: list[str] = []
     for key in keys:
-        before_value = float(before_sensitivity.get(key, 1.0))
-        after_value = float(after_sensitivity.get(key, 1.0))
+        before_value = _float_value(before_sensitivity.get(key), 1.0)
+        after_value = _float_value(after_sensitivity.get(key), 1.0)
         if after_value > before_value:
             directions.append(f"sensitivity:{key}:up")
         elif after_value < before_value:
@@ -89,3 +94,7 @@ def _sensitivity_direction(before: dict[str, object], after: dict[str, object]) 
 
 def _mapping(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
+
+
+def _float_value(value: object, default: float) -> float:
+    return float(value) if isinstance(value, Real | str) else default

@@ -26,6 +26,7 @@ from alpha_agent.cognition.loops import (
     DriveConfig,
     DriveLoop,
     Scheduler,
+    WorkerReport,
 )
 from alpha_agent.cognition.models import (
     CognitiveEvent,
@@ -85,6 +86,7 @@ from alpha_agent.gateway.config import (
 )
 from alpha_agent.gateway.logging import append_gateway_log
 from alpha_agent.gateway.status import gateway_tables_available
+from alpha_agent.llm.base import ChatMessage
 from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
@@ -707,7 +709,7 @@ def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
 def _debug_prompt_view(
     session_id: str,
     message: str,
-    chat_history: list[dict[str, Any]],
+    chat_history: list[ChatMessage],
 ) -> CognitionView:
     situation = Situation(id=SituationId("situation:debug-prompt"))
     thread_id = ThreadId.from_session(session_id)
@@ -859,7 +861,7 @@ def cognition_consolidate(
 def _run_consolidation_once(
     store: StateStore,
     consolidation_config: ConsolidationConfig,
-):
+) -> list[WorkerReport]:
     log = SQLiteEventLog(store)
     projections = default_projection_registry(log)
     scheduler = Scheduler(log, CheckpointStore(store))

@@ -12,7 +12,13 @@ from alpha_agent.cognition.models import (
     StimulusKind,
     ThreadId,
 )
-from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolChoice, LLMToolDefinitionInput
+from alpha_agent.llm.base import (
+    ChatMessage,
+    LLMResponse,
+    LLMToolCall,
+    LLMToolChoice,
+    LLMToolDefinitionInput,
+)
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import Tool, ToolResult
@@ -100,12 +106,12 @@ class _ToolCallingProvider:
                 provider=self.name,
                 finish_reason="tool_calls",
                 tool_calls=[
-                    {
-                        "id": "call_1",
-                        "name": "echo",
-                        "arguments": {"text": "hello"},
-                        "raw_arguments": '{"text":"hello"}',
-                    }
+                    LLMToolCall(
+                        id="call_1",
+                        name="echo",
+                        arguments={"text": "hello"},
+                        raw_arguments='{"text":"hello"}',
+                    )
                 ],
             )
         return LLMResponse(content="final answer", model="test", provider=self.name)

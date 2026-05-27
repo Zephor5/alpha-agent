@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import ClassVar, Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from alpha_agent.cognition.coordinator import LoopAcquireRequest
 from alpha_agent.cognition.emitter import EventEmitter
@@ -46,20 +47,32 @@ class WorkerReport:
 
 
 class ScheduledWorker(Protocol):
-    name: ClassVar[str]
-    trigger: ClassVar[ScheduleTrigger]
-    handles_event_kinds: ClassVar[frozenset[CognitiveEventKind]]
-    priority: ClassVar[LoopPriority]
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def trigger(self) -> ScheduleTrigger: ...
+
+    @property
+    def handles_event_kinds(self) -> frozenset[CognitiveEventKind]: ...
 
     def run(
         self,
         log: EventLog,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
-        coordinator: object,
+        coordinator: YieldingCoordinator,
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport: ...
+
+
+class YieldingCoordinator(Protocol):
+    def yield_to_higher_priority(self) -> bool: ...
+
+
+class AcquiringCoordinator(YieldingCoordinator, Protocol):
+    def acquire(self, req: LoopAcquireRequest) -> AbstractContextManager[None]: ...
 
 
 class CheckpointStore:
@@ -185,7 +198,7 @@ class Scheduler:
         self,
         now: Instant,
         *,
-        coordinator: object,
+        coordinator: AcquiringCoordinator,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
         config: object,
@@ -209,7 +222,7 @@ class Scheduler:
         self,
         now: Instant,
         *,
-        coordinator: object,
+        coordinator: AcquiringCoordinator,
         projections: ProjectionRegistry,
         emitter: EventEmitter,
         config: object,
@@ -272,7 +285,7 @@ class Scheduler:
         )
 
 
-def _count_events_after(events: Iterable[object], event_id: EventId | None) -> int:
+def _count_events_after(events: Iterable[Any], event_id: EventId | None) -> int:
     count = 0
     seen_checkpoint = event_id is None
     for event in events:
@@ -284,11 +297,12 @@ def _count_events_after(events: Iterable[object], event_id: EventId | None) -> i
     return count
 
 
-def _latest_event_id(events: Iterable[object]) -> EventId | None:
+def _latest_event_id(events: Iterable[Any]) -> EventId | None:
     latest = None
     for event in events:
         latest = event.id
     return latest
+
 
 
 def _parse_instant(value: Instant) -> datetime:
