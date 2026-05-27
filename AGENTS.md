@@ -7,35 +7,47 @@
 
 ## Project Content Navigation
 ```text
+AGENTS.md             Project-specific agent rules and content map.
 README.md             Project overview, install steps, CLI usage, configuration, state baseline, and current limitations.
 pyproject.toml        Package metadata, Python version, dependencies, console script entry point, and lint/type-check settings.
+uv.lock               Locked dependency graph for uv-based installs.
 config.example.toml   Example runtime configuration.
+LICENSE               Project license.
 docs/
-  cognition/          Reference docs for cognition related model.
-  develop_record/     Archived working notes and completed refactor records, no need to read this unless required.
-  doing/              Execution ledger for active tasks only; record during execution, then clear after self-check on completion
-  todo/               Todo docs
-    cognition-runtime/ Staged plan for rebuilding long-term cognition after Phase 00 cleanup.
+  cognition/          Reference docs for cognition and memory design.
+  develop_record/     Archived working notes and completed refactor records, no need to read unless required.
+  doing/              Execution ledger for active tasks only; record during execution, then clear after self-check.
+  todo/               Project todo docs.
 src/
   alpha_agent/
-    cli.py            Typer CLI entry point for chat, ask, config, skills, debug, and gateway commands.
+    cli.py            Typer CLI entry point for init, ask/chat, config, daemon, gateway, skills, debug, cognition, goals, lens, and self-model commands.
     config.py         Runtime configuration loading, defaults, environment overrides, and persistent config handling.
-    cognition/        Cognition foundations, Reactive loop wiring, belief/context/reflection projections, and L1/L2/L3 reflectors.
-      controller.py   CognitiveController orchestration for Reactive single tick.
-      stages/         Perceive, Attend, Interpret, Judge, Decide, Act, Feedback, Reflect, and Revise stages.
-      reflectors/     Deterministic L1 audit rules, L2 strategy-control rules, and L3 SelfModel aggregation.
-      loops/          In-process Scheduler, checkpoint storage, ConsolidationLoop, deterministic consolidation workers, and synchronous DriveLoop v1.
+    daemon/           Local daemon process lifecycle, IPC client/server, runtime loop, status, and manager.
+    gateway/          Gateway operation shell, adapter contracts, session routing, status, logging, and gateway config.
+      adapters/       External gateway adapter interfaces.
+    runtime/          Agent turn/session execution, event models, context budget/handover, session context, counterpart routing, and runtime tool wiring.
+      counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
+    cognition/        Cognition foundations, Reactive tick orchestration, event emission, loop coordination, projection rebuilds, and thread helpers.
+      controller.py   CognitiveController orchestration for one Reactive tick.
+      coordinator.py  LoopCoordinator lock/lease control for Reactive and background cognition loops.
+      emitter.py      Cognitive event emission helpers.
+      projection_runner.py Projection registry execution and rebuild helpers.
+      threads.py      Thread identity helpers for context-window projections.
+      models/         Frozen cognition data contracts for events, perceptions, judgments, decisions, beliefs, goals, strategies, subjects, values, situations, and threads.
+      event_log/      In-memory and SQLite cognitive event log implementations.
+      stages/         Perceive, Attend, Interpret, Judge, Decide, Act/Effector, Feedback, Reflect, and Revise stages.
+      reflectors/     L1/L2/L3 reflector orchestration, deterministic audit rules, L2 strategy rules, and L3 self-model aggregators.
+      loops/          In-process scheduler, checkpoint storage, ConsolidationLoop, deterministic workers, and synchronous DriveLoop.
+        workers/      Background consolidation workers for beliefs, context, procedures, goals, value lens, strategies, counterpart summaries, and archive/resolve tasks.
       goals/          GoalRegistry event write path for DriveLoop goals.
       value/          Deterministic ValueProfile derivation, ValueLens persistence, and conflict resolution.
-      projections/    Subject/counterpart projections, SQLite-backed BeliefProjection, ProcedureProjection, ReflectionProjection, StrategyProjection, GoalProjection, SubjectProjection, and ContextWindowProjection.
+      projections/    SQLite-backed projections for counterpart, belief, context window, reflection, strategy, goal, subject, procedure, and event counts.
       render/         CognitionView assembly and renderers for chat prompts, graph snapshots, diffs, and evidence traces.
-    runtime/          Core turn/session execution, event models, session context, and runtime tool wiring.
-      counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
-    state/            SQLite-backed runtime tables plus cognition event/projection tables, including cognitive_events, counterpart_view, belief_view, context_window_view, context_window_background, procedure_view, strategy_view, goal_view, subject_view, subject_value_lens, cognition_worker_checkpoint, and reflection_view.
+    state/            SQLite-backed state store/schema/models for session messages, runtime traces, gateway mappings/dedup, cognitive events, and projection tables.
     llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
-    gateway/          Gateway operation shell, session routing, adapter contracts, status, logging, and gateway config.
     tools/            Tool abstractions and registry used by the runtime.
     skills/           Procedural skill manager and built-in Markdown skills.
-    utils/            Shared utility helpers for IDs, text, and time.
-tests/                Test coverage grouped around CLI, runtime loop, cognition renderers, state, LLM providers, config, gateway, and future cognition.
+    utils/            Shared utility helpers for IDs and time.
+tests/                Test coverage for CLI, runtime, config, daemon, gateway, LLM providers, and session/context behavior.
+  cognition/          Cognition-specific tests for events, projections, renderers, reflectors, loops, drive behavior, and CLI inspection commands.
 ```
