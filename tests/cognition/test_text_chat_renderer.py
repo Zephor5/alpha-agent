@@ -3,10 +3,10 @@ from __future__ import annotations
 from alpha_agent.cognition.render import (
     RenderBudget,
     TextChatRenderer,
-    conversation_message_to_chat,
+    source_message_to_chat,
     wrap_system_reminder,
 )
-from alpha_agent.state.models import ConversationMessage
+from alpha_agent.state.models import SessionMessage
 from tests.cognition.render_helpers import view
 from tests.cognition.test_belief_projection_apply import belief
 
@@ -19,12 +19,13 @@ def _message(
     content: str,
     tool_call_id: str | None = None,
     tool_calls: list[dict] | None = None,
-) -> ConversationMessage:
-    return ConversationMessage(
+) -> SessionMessage:
+    return SessionMessage(
         id=message_id,
         session_id="s1",
         ordinal=ordinal,
-        role=role,  # type: ignore[arg-type]
+        kind=f"{role}_message",  # type: ignore[arg-type]
+        llm_role=role,  # type: ignore[arg-type]
         raw_content=content,
         model_content=None,
         tool_call_id=tool_call_id,
@@ -32,7 +33,10 @@ def _message(
         tool_result_id=None,
         provider_metadata={},
         source_metadata={},
+        compression_point_ordinal=None,
+        compression_version=None,
         created_at="2026-01-01T00:00:00+00:00",
+        updated_at=None,
     )
 
 
@@ -57,7 +61,7 @@ def test_renderer_orders_system_sections_and_current_user_message() -> None:
 
 def test_renderer_preserves_history_and_appends_current_input_once() -> None:
     history = [
-        conversation_message_to_chat(
+        source_message_to_chat(
             _message(message_id="msg_1", ordinal=1, role="user", content="hello")
         )
     ]
@@ -72,6 +76,31 @@ def test_renderer_preserves_history_and_appends_current_input_once() -> None:
     assert messages[1]["content"] == "hello"
     assert messages[-1]["content"] == "hello"
     assert [message["content"] for message in messages].count("hello") == 2
+
+
+def test_renderer_budget_does_not_prune_source_history_messages() -> None:
+    history = [
+        source_message_to_chat(
+            _message(
+                message_id=f"msg_{index}",
+                ordinal=index,
+                role="user" if index % 2 else "assistant",
+                content=f"source history {index} " + ("long text " * 40),
+            )
+        )
+        for index in range(1, 7)
+    ]
+
+    rendered = TextChatRenderer().render(
+        view(chat_history=history, current_query="current user source message"),
+        RenderBudget(max_tokens=1),
+    )
+
+    contents = [str(message.get("content", "")) for message in rendered.payload]
+    for index in range(1, 7):
+        assert any(f"source history {index}" in content for content in contents)
+    assert contents[-1] == "current user source message"
+    assert "unknown" not in rendered.dropped_sections
 
 
 def test_renderer_uses_user_role_for_non_transcript_context() -> None:
@@ -90,7 +119,7 @@ def test_renderer_uses_user_role_for_non_transcript_context() -> None:
     assert all("<context-reminder>" not in str(message["content"]) for message in context_messages)
 
 
-def test_conversation_tool_round_converts_to_chat_messages() -> None:
+def test_source_tool_round_converts_to_chat_messages() -> None:
     assistant = _message(
         message_id="msg_1",
         ordinal=1,
@@ -112,8 +141,8 @@ def test_conversation_tool_round_converts_to_chat_messages() -> None:
         tool_call_id="call_1",
     )
 
-    assert conversation_message_to_chat(assistant)["tool_calls"][0]["id"] == "call_1"
-    assert conversation_message_to_chat(tool) == {
+    assert source_message_to_chat(assistant)["tool_calls"][0]["id"] == "call_1"
+    assert source_message_to_chat(tool) == {
         "role": "tool",
         "tool_call_id": "call_1",
         "content": '{"ok": true}',

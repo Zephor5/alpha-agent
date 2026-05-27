@@ -29,8 +29,19 @@ debug_logging = true
 base_url = "https://compatible.example/v1"
 api_key = "compatible-key"
 
-[context]
-recent_tail_messages = 6
+[llm.context]
+tool_truncate_threshold_ratio = 0.55
+handover_compress_threshold_ratio = 0.85
+minimum_remaining_tokens = 12000
+tool_string_truncate_chars = 240
+expected_output_reserve_tokens = 2048
+safety_margin_tokens = 512
+
+[llm.providers.openai-compatible]
+max_context_tokens = 200000
+
+[llm.providers.deepseek]
+max_context_tokens = 900000
 
 [deepseek]
 api_key = "deepseek-key"
@@ -48,7 +59,16 @@ reasoning_effort = "high"
     assert config.daemon_socket_path == Path("~/custom-alpha/daemon.sock").expanduser()
     assert config.daemon_status_path == Path("~/custom-alpha/daemon-status.json").expanduser()
     assert config.llm_provider == "deepseek"
-    assert config.context_recent_tail_messages == 6
+    assert config.llm_context.tool_truncate_threshold_ratio == 0.55
+    assert config.llm_context.handover_compress_threshold_ratio == 0.85
+    assert config.llm_context.minimum_remaining_tokens == 12000
+    assert config.llm_context.tool_string_truncate_chars == 240
+    assert config.llm_context.expected_output_reserve_tokens == 2048
+    assert config.llm_context.safety_margin_tokens == 512
+    assert config.max_context_tokens_for_provider("openai-compatible") == 200000
+    assert config.max_context_tokens_for_provider("openai") == 200000
+    assert config.max_context_tokens_for_provider("compatible") == 200000
+    assert config.max_context_tokens_for_provider("deepseek") == 900000
     assert config.deepseek_api_key == "deepseek-key"
     assert config.llm_model == "deepseek-v4-pro"
     assert config.compatible_base_url == "https://compatible.example/v1"
@@ -123,7 +143,8 @@ def test_config_cli_init_and_show(
     assert config_path.exists()
     assert str(config_path) in show_result.output
     assert "llm_provider" in show_result.output
-    assert "context_recent_tail_messages" in show_result.output
+    assert "llm_context_handover_compress_threshold_ratio" in show_result.output
+    assert "llm_provider_max_context_tokens" in show_result.output
     assert "compatible_base_url" not in show_result.output
 
 
@@ -152,18 +173,27 @@ def test_config_cli_set_and_get(
 
     set_provider = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
     set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
-    set_context = runner.invoke(app, ["config", "set", "context.recent_tail_messages", "6"])
+    set_context = runner.invoke(
+        app,
+        ["config", "set", "llm.context.expected_output_reserve_tokens", "2048"],
+    )
+    set_provider_limit = runner.invoke(
+        app,
+        ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
+    )
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
 
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
     assert set_context.exit_code == 0
+    assert set_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
     assert "codex" in get_provider.output
     config = load_config(env_file=None, config_file=config_path)
     assert config.llm_provider == "codex"
     assert config.llm_debug_logging is True
-    assert config.context_recent_tail_messages == 6
+    assert config.llm_context.expected_output_reserve_tokens == 2048
+    assert config.max_context_tokens_for_provider("deepseek") == 900000
 
 
 def test_config_set_preserves_cognition_consolidation_section(
@@ -320,7 +350,10 @@ def test_config_set_rejects_non_positive_limits(
     monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
     runner = CliRunner()
 
-    result = runner.invoke(app, ["config", "set", "context.recent_tail_messages", "0"])
+    result = runner.invoke(
+        app,
+        ["config", "set", "llm.context.minimum_remaining_tokens", "0"],
+    )
 
     assert result.exit_code != 0
     assert "must be greater than 0" in result.output
@@ -330,10 +363,14 @@ def test_config_set_rejects_non_positive_limits(
     ("toml", "match"),
     [
         (
-            "[context]\nrecent_tail_messages = 0\n",
-            "context.recent_tail_messages must be greater than 0",
+            "[llm.context]\nminimum_remaining_tokens = 0\n",
+            "llm.context.minimum_remaining_tokens must be greater than 0",
         ),
-        ('[context]\nrecent_tail_messages = "abc"\n', "Expected integer value"),
+        ('[llm.context]\nminimum_remaining_tokens = "abc"\n', "Expected integer value"),
+        (
+            "[llm.context]\nhandover_compress_threshold_ratio = 2.0\n",
+            "llm.context.handover_compress_threshold_ratio must be greater than 0 and at most 1",
+        ),
     ],
 )
 def test_load_config_rejects_invalid_toml_values(
@@ -352,9 +389,9 @@ def test_load_config_rejects_invalid_toml_values(
     ("env_name", "env_value", "match"),
     [
         (
-            "ALPHA_CONTEXT_RECENT_TAIL_MESSAGES",
+            "ALPHA_LLM_CONTEXT_MINIMUM_REMAINING_TOKENS",
             "0",
-            "context.recent_tail_messages must be greater than 0",
+            "llm.context.minimum_remaining_tokens must be greater than 0",
         ),
     ],
 )

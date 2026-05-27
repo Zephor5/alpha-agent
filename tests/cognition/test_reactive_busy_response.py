@@ -28,4 +28,4 @@ def test_busy_response_writes_no_events_or_conversation(tmp_path) -> None:
     assert result.debug["holder"] == "consolidation"
     assert result.debug["since"]
     assert list(SQLiteEventLog(store).iter()) == []
-    assert store.list_conversation_messages("s1") == []
+    assert store.list_session_messages("s1") == []

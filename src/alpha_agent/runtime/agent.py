@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import timedelta
 from pathlib import Path
+from threading import Lock, RLock
 from typing import Any
 
 import httpx
@@ -26,14 +28,15 @@ from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.render import (
     RenderResult,
-    conversation_message_to_chat,
     estimate_chat_tokens,
+    source_message_to_chat,
     wrap_system_reminder,
 )
 from alpha_agent.cognition.render.view import CognitionView
 from alpha_agent.cognition.stages.effector import Effector
 from alpha_agent.cognition.stages.types import Outcome
 from alpha_agent.cognition.threads import StimulusRouter
+from alpha_agent.config import DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS, LLMContextConfig
 from alpha_agent.llm.base import (
     ChatCompletionToolCall,
     ChatMessage,
@@ -42,11 +45,13 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.runtime.context_budget import ContextBudgetEstimate, estimate_context_budget
+from alpha_agent.runtime.context_handover import compress_session_context
 from alpha_agent.runtime.counterpart_router import CounterpartRouter
 from alpha_agent.runtime.events import deterministic_json
-from alpha_agent.runtime.session_context import SessionContextManager
+from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
-from alpha_agent.state.models import ConversationMessage, RuntimeTrace
+from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import ToolCall
 from alpha_agent.tools.registry import ToolRegistry
@@ -92,6 +97,33 @@ class ToolProtocolError(RuntimeError):
     """Raised when provider-returned tool-call protocol data is incomplete."""
 
 
+class ContextWindowExceededError(RuntimeError):
+    """Raised when a pending user message cannot fit in the configured context."""
+
+
+_SESSION_TURN_LOCKS: dict[str, RLock] = {}
+_SESSION_TURN_LOCKS_GUARD = Lock()
+_DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {
+    "role": "system",
+    "content": (
+        "Identity: Alpha Agent.\n"
+        "Use the current reactive context and answer concisely. "
+        "Call tools only when they are useful."
+    ),
+}
+
+
+@contextmanager
+def _serialized_session_turn(session_id: str):
+    with _SESSION_TURN_LOCKS_GUARD:
+        lock = _SESSION_TURN_LOCKS.setdefault(session_id, RLock())
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 @dataclass(frozen=True)
 class RetriedLLMCompletion:
     response: LLMResponse
@@ -101,7 +133,7 @@ class RetriedLLMCompletion:
 @dataclass(frozen=True)
 class AgentLoopResult:
     response: LLMResponse
-    provider_tool_messages: list[ConversationMessage]
+    provider_tool_messages: list[SessionMessage]
     provider_tool_calls: list[ToolCall]
     tool_results: list[Any]
     llm_round_count: int
@@ -175,15 +207,17 @@ class AlphaAgent:
         max_llm_rounds: int | None = None,
         llm_debug_logging: bool = False,
         llm_trace_log_path: str | Path | None = None,
-        context_recent_tail_messages: int = 8,
+        llm_context_config: LLMContextConfig | None = None,
+        max_context_tokens: int | None = None,
         event_log: EventLog | None = None,
         coordinator: LoopCoordinator | None = None,
     ):
         self.store = store
         self.llm_provider = llm_provider
-        self.session_context = SessionContextManager(
-            store,
-            recent_tail_messages=context_recent_tail_messages,
+        self.session_context = SessionContextAssembler(store)
+        self.llm_context_config = llm_context_config or LLMContextConfig()
+        self.max_context_tokens = max_context_tokens or _default_max_context_tokens(
+            getattr(llm_provider, "name", None)
         )
         self.tool_registry = tool_registry or ToolRegistry()
         self.tool_executor = ToolExecutor(self.tool_registry)
@@ -244,6 +278,8 @@ class AlphaAgent:
                 session_id=session_id,
                 debug={"busy": True, "holder": busy.holder, "since": busy.since},
             )
+        turn_context = _serialized_session_turn(session_id)
+        turn_context.__enter__()
 
         debug: dict[str, Any] = {
             "turn_id": turn_id,
@@ -256,13 +292,22 @@ class AlphaAgent:
         }
         try:
             self._check_canceled(session_id, "before_user_event")
+            model_tools = self.tool_registry.to_llm_tool_definitions()
+            self._run_pre_user_context_maintenance(
+                session_id=session_id,
+                pending_user_message=user_message,
+                model_tools=model_tools or None,
+                model_tool_choice="auto" if model_tools else None,
+                debug=debug,
+            )
             counterpart_ref = self.counterpart_router.upsert_from_source_metadata(
                 source_metadata,
                 emitter=self.emitter,
             )
-            user_record = self.store.append_conversation_message(
+            user_record = self.store.append_session_message(
                 session_id=session_id,
-                role="user",
+                kind="user_message",
+                llm_role="user",
                 raw_content=user_message,
                 source_metadata=dict(source_metadata or {}),
             )
@@ -272,12 +317,8 @@ class AlphaAgent:
                 session_id,
                 before_ordinal=user_record.ordinal,
             )
-            chat_history = [
-                conversation_message_to_chat(message) for message in session_context.messages
-            ]
+            chat_history = list(session_context.chat_messages)
             debug["chat_history_message_count"] = len(chat_history)
-
-            model_tools = self.tool_registry.to_llm_tool_definitions()
 
             stimulus = Stimulus(
                 kind=StimulusKind.USER_MESSAGE,
@@ -355,6 +396,7 @@ class AlphaAgent:
             self.clear_cancel(session_id)
             raise
         finally:
+            turn_context.__exit__(None, None, None)
             acquire_context.__exit__(None, None, None)
             if session_id not in self._canceled_sessions:
                 self.clear_cancel(session_id)
@@ -372,7 +414,15 @@ class AlphaAgent:
     ) -> Outcome:
         del decision
         self._check_canceled(session_id, "before_prompt")
-        messages = list(rendered.payload)
+        system_message, transient_context_messages = self._prompt_frame_from_rendered(
+            view=view,
+            rendered=rendered,
+        )
+        messages = self._rebuild_runtime_llm_messages(
+            session_id=session_id,
+            system_message=system_message,
+            transient_context_messages=transient_context_messages,
+        )
         prompt_token_estimate = estimate_chat_tokens(messages, tools=model_tools)
         debug["context_window_foreground_count"] = len(view.window.foreground)
         debug["prompt_token_estimate"] = prompt_token_estimate
@@ -382,6 +432,8 @@ class AlphaAgent:
         loop_result = self._run_agent_loop(
             session_id=session_id,
             messages=messages,
+            system_message=system_message,
+            transient_context_messages=transient_context_messages,
             model_tools=model_tools,
             model_tool_choice=model_tool_choice,
             initial_prompt_token_estimate=prompt_token_estimate,
@@ -405,6 +457,224 @@ class AlphaAgent:
             },
         )
 
+    def _run_pre_user_context_maintenance(
+        self,
+        *,
+        session_id: str,
+        pending_user_message: str,
+        model_tools: Sequence[LLMToolDefinitionInput] | None,
+        model_tool_choice: LLMToolChoice | None,
+        debug: dict[str, Any],
+    ) -> None:
+        pending_message: ChatMessage = {"role": "user", "content": pending_user_message}
+        pending_only_estimate = self._estimate_context_budget(
+            [self._default_system_message(), pending_message],
+            tools=model_tools,
+        )
+        if pending_only_estimate.used_context_tokens > self.max_context_tokens:
+            self._raise_pending_user_too_large(pending_only_estimate)
+
+        planning_messages = [self._default_system_message(), pending_message]
+        projected_messages = self._source_prompt_messages(
+            session_id=session_id,
+            extra_source_messages=[pending_message],
+        )
+        estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
+        debug["pre_user_context_used_tokens"] = estimate.used_context_tokens
+        debug["pre_user_context_remaining_tokens"] = estimate.remaining_context_tokens
+
+        if self._needs_tool_truncation(estimate):
+            truncation = self.session_context.truncate_tool_context_if_needed(
+                session_id,
+                context_config=self.llm_context_config,
+                max_context_tokens=self.max_context_tokens,
+                tools=model_tools,
+                planning_messages=planning_messages,
+            )
+            debug["pre_user_tool_truncation_triggered"] = truncation.triggered
+            debug["pre_user_tool_truncated_message_ids"] = list(
+                truncation.truncated_message_ids
+            )
+            projected_messages = self._source_prompt_messages(
+                session_id=session_id,
+                extra_source_messages=[pending_message],
+            )
+            estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
+
+        if self._needs_handover(estimate) and self.session_context.load(
+            session_id
+        ).source_messages:
+            compression_messages = self._source_prompt_messages(session_id=session_id)
+            result = compress_session_context(
+                session_id=session_id,
+                assembler=self.session_context,
+                llm_provider=self.llm_provider,
+                llm_messages=compression_messages,
+                tools=model_tools,
+                tool_choice=model_tool_choice,
+            )
+            debug["pre_user_compressed_message_id"] = result.message.id
+            debug["pre_user_compression_point_ordinal"] = result.compression_point_ordinal
+            projected_messages = self._source_prompt_messages(
+                session_id=session_id,
+                extra_source_messages=[pending_message],
+            )
+            estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
+
+        if estimate.used_context_tokens > self.max_context_tokens:
+            self._raise_pending_user_too_large(estimate)
+        debug["pre_user_context_after_maintenance_used_tokens"] = estimate.used_context_tokens
+        debug["pre_user_context_after_maintenance_remaining_tokens"] = (
+            estimate.remaining_context_tokens
+        )
+
+    def _run_tool_result_context_maintenance(
+        self,
+        *,
+        session_id: str,
+        system_message: ChatMessage,
+        transient_context_messages: Sequence[ChatMessage],
+        model_tools: Sequence[LLMToolDefinitionInput] | None,
+        model_tool_choice: LLMToolChoice | None,
+        debug: dict[str, Any],
+    ) -> list[ChatMessage]:
+        llm_messages = self._rebuild_runtime_llm_messages(
+            session_id=session_id,
+            system_message=system_message,
+            transient_context_messages=transient_context_messages,
+        )
+        estimate = self._estimate_context_budget(llm_messages, tools=model_tools)
+        debug["tool_loop_context_used_tokens"] = estimate.used_context_tokens
+        debug["tool_loop_context_remaining_tokens"] = estimate.remaining_context_tokens
+
+        if self._needs_tool_truncation(estimate):
+            self.session_context.truncate_tool_context_if_needed(
+                session_id,
+                context_config=self.llm_context_config,
+                max_context_tokens=self.max_context_tokens,
+                tools=model_tools,
+                planning_messages=[system_message, *transient_context_messages],
+            )
+            llm_messages = self._rebuild_runtime_llm_messages(
+                session_id=session_id,
+                system_message=system_message,
+                transient_context_messages=transient_context_messages,
+            )
+            estimate = self._estimate_context_budget(llm_messages, tools=model_tools)
+
+        if self._needs_handover(estimate) and self.session_context.load(
+            session_id
+        ).source_messages:
+            result = compress_session_context(
+                session_id=session_id,
+                assembler=self.session_context,
+                llm_provider=self.llm_provider,
+                llm_messages=llm_messages,
+                tools=model_tools,
+                tool_choice=model_tool_choice,
+            )
+            debug["tool_loop_compressed_message_id"] = result.message.id
+            debug["tool_loop_compression_point_ordinal"] = result.compression_point_ordinal
+            llm_messages = self._rebuild_runtime_llm_messages(
+                session_id=session_id,
+                system_message=system_message,
+                transient_context_messages=transient_context_messages,
+            )
+        return llm_messages
+
+    def _source_prompt_messages(
+        self,
+        *,
+        session_id: str,
+        extra_source_messages: Sequence[ChatMessage] | None = None,
+    ) -> list[ChatMessage]:
+        return [
+            self._default_system_message(),
+            *self.session_context.load(session_id).chat_messages,
+            *(extra_source_messages or ()),
+        ]
+
+    def _rebuild_runtime_llm_messages(
+        self,
+        *,
+        session_id: str,
+        system_message: ChatMessage,
+        transient_context_messages: Sequence[ChatMessage],
+    ) -> list[ChatMessage]:
+        return [
+            dict(system_message),  # type: ignore[arg-type]
+            *self.session_context.load(session_id).chat_messages,
+            *[dict(message) for message in transient_context_messages],  # type: ignore[arg-type]
+        ]
+
+    def _prompt_frame_from_rendered(
+        self,
+        *,
+        view: CognitionView,
+        rendered: RenderResult,
+    ) -> tuple[ChatMessage, list[ChatMessage]]:
+        rendered_messages = list(rendered.payload)
+        if not rendered_messages:
+            return self._default_system_message(), []
+        system_message = dict(rendered_messages[0])  # type: ignore[arg-type]
+        source_count = len(view.chat_history)
+        transient_messages = list(rendered_messages[1 + source_count :])
+        if transient_messages and self._is_current_query_message(
+            transient_messages[-1],
+            view.current_query,
+        ):
+            transient_messages = transient_messages[:-1]
+        return system_message, [dict(message) for message in transient_messages]  # type: ignore[arg-type]
+
+    def _is_current_query_message(
+        self,
+        message: ChatMessage,
+        current_query: str | None,
+    ) -> bool:
+        return (
+            current_query is not None
+            and message.get("role") == "user"
+            and message.get("content") == current_query
+        )
+
+    def _estimate_context_budget(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None,
+    ) -> ContextBudgetEstimate:
+        return estimate_context_budget(
+            messages,
+            tools=tools,
+            context_config=self.llm_context_config,
+            max_context_tokens=self.max_context_tokens,
+        )
+
+    def _needs_tool_truncation(self, estimate: ContextBudgetEstimate) -> bool:
+        return (
+            estimate.used_context_tokens
+            > estimate.max_context_tokens
+            * self.llm_context_config.tool_truncate_threshold_ratio
+        )
+
+    def _needs_handover(self, estimate: ContextBudgetEstimate) -> bool:
+        return (
+            estimate.used_context_tokens
+            > estimate.max_context_tokens
+            * self.llm_context_config.handover_compress_threshold_ratio
+            or estimate.remaining_context_tokens
+            < self.llm_context_config.minimum_remaining_tokens
+        )
+
+    def _default_system_message(self) -> ChatMessage:
+        return dict(_DEFAULT_RUNTIME_SYSTEM_MESSAGE)  # type: ignore[return-value]
+
+    def _raise_pending_user_too_large(self, estimate: ContextBudgetEstimate) -> None:
+        raise ContextWindowExceededError(
+            "pending user message exceeds configured context window "
+            f"(used={estimate.used_context_tokens}, max={estimate.max_context_tokens})"
+        )
+
     def _compose_busy_message(self, busy: LockBusy) -> str:
         return (
             f"Agent is currently {busy.holder} "
@@ -416,13 +686,15 @@ class AlphaAgent:
         *,
         session_id: str,
         messages: list[ChatMessage],
+        system_message: ChatMessage,
+        transient_context_messages: Sequence[ChatMessage],
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         initial_prompt_token_estimate: int,
         debug: dict[str, Any],
     ) -> AgentLoopResult:
-        conversation_messages = list(messages)
-        provider_tool_messages: list[ConversationMessage] = []
+        llm_messages = list(messages)
+        provider_tool_messages: list[SessionMessage] = []
         provider_tool_calls_seen: list[ToolCall] = []
         tool_results_seen: list[Any] = []
         llm_round_count = llm_retry_count = tool_iteration_count = 0
@@ -442,12 +714,12 @@ class AlphaAgent:
             )
             completion = self._call_model(
                 session_id=session_id,
-                messages=conversation_messages,
+                messages=llm_messages,
                 prompt_token_estimate=(
                     initial_prompt_token_estimate
                     if llm_round_count == 0
                     else estimate_chat_tokens(
-                        conversation_messages,
+                        llm_messages,
                         tools=model_tools,
                     )
                 ),
@@ -486,11 +758,11 @@ class AlphaAgent:
             self._validate_provider_tool_calls(provider_tool_calls, response)
             if tool_iteration_count >= self.max_tool_iterations:
                 finalizing_reason = "max_tool_iterations"
-                conversation_messages.append(self._tool_loop_finalization_message(finalizing_reason))
+                llm_messages.append(self._tool_loop_finalization_message(finalizing_reason))
                 continue
             if llm_round_count >= self.max_llm_rounds:
                 finalizing_reason = "max_llm_rounds"
-                conversation_messages.append(self._tool_loop_finalization_message(finalizing_reason))
+                llm_messages.append(self._tool_loop_finalization_message(finalizing_reason))
                 continue
 
             provider_tool_call_count += len(provider_tool_calls)
@@ -501,7 +773,7 @@ class AlphaAgent:
                 llm_response=response,
             )
             provider_tool_messages.append(provider_tool_call_message)
-            conversation_messages.append(conversation_message_to_chat(provider_tool_call_message))
+            llm_messages.append(source_message_to_chat(provider_tool_call_message))
             provider_results = self._execute_tool_calls(
                 session_id=session_id,
                 calls=provider_tool_calls,
@@ -515,8 +787,16 @@ class AlphaAgent:
             provider_tool_messages.extend(provider_result_messages)
             tool_call_count += len(provider_results)
             tool_iteration_count += 1
-            conversation_messages.extend(
-                conversation_message_to_chat(message) for message in provider_result_messages
+            llm_messages.extend(
+                source_message_to_chat(message) for message in provider_result_messages
+            )
+            llm_messages = self._run_tool_result_context_maintenance(
+                session_id=session_id,
+                system_message=system_message,
+                transient_context_messages=transient_context_messages,
+                model_tools=model_tools,
+                model_tool_choice=model_tool_choice,
+                debug=debug,
             )
 
     def _call_model(
@@ -630,10 +910,11 @@ class AlphaAgent:
         self,
         session_id: str,
         llm_response: LLMResponse,
-    ) -> ConversationMessage:
-        return self.store.append_conversation_message(
+    ) -> SessionMessage:
+        return self.store.append_session_message(
             session_id=session_id,
-            role="assistant",
+            kind="assistant_message",
+            llm_role="assistant",
             raw_content=llm_response.content,
             provider_metadata={
                 "provider": llm_response.provider,
@@ -649,10 +930,11 @@ class AlphaAgent:
         session_id: str,
         calls: list[ToolCall],
         llm_response: LLMResponse,
-    ) -> ConversationMessage:
-        return self.store.append_conversation_message(
+    ) -> SessionMessage:
+        return self.store.append_session_message(
             session_id=session_id,
-            role="assistant",
+            kind="assistant_message",
+            llm_role="assistant",
             raw_content=llm_response.content,
             tool_calls=[dict(self._wire_tool_call(call)) for call in calls],
             provider_metadata={
@@ -669,11 +951,12 @@ class AlphaAgent:
         *,
         session_id: str,
         results: list[ExecutedToolResult],
-    ) -> list[ConversationMessage]:
+    ) -> list[SessionMessage]:
         return [
-            self.store.append_conversation_message(
+            self.store.append_session_message(
                 session_id=session_id,
-                role="tool",
+                kind="tool_message",
+                llm_role="tool",
                 raw_content=item.trace.content,
                 tool_call_id=self._required_tool_call_id(item.call),
                 tool_result_id=item.trace.id,
@@ -877,6 +1160,14 @@ def _llm_tool_name(tool: LLMToolDefinitionInput) -> str:
             return str(function["name"])
         return str(tool.get("name", ""))
     return str(getattr(tool, "name", ""))
+
+
+def _default_max_context_tokens(provider_name: object) -> int:
+    provider_key = str(provider_name or "openai-compatible")
+    return DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS.get(
+        provider_key,
+        DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS["openai-compatible"],
+    )
 
 
 def _json_safe(value: Any) -> Any:

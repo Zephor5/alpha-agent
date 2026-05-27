@@ -9,11 +9,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TypeVar
 
-from alpha_agent.state.models import ConversationMessage, ConversationRole, RuntimeTrace
+from alpha_agent.state.models import LLMRole, RuntimeTrace, SessionMessage, SessionMessageKind
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
 
 T = TypeVar("T")
+
+SYSTEM_REMINDER_OPEN = "<system-reminder>"
+SYSTEM_REMINDER_CLOSE = "</system-reminder>"
 
 
 def _dumps(value: Any) -> str:
@@ -36,8 +39,15 @@ def _loads_dict_list(value: str | None) -> list[dict[str, Any]]:
     return [item for item in loaded if isinstance(item, dict)]
 
 
+def _system_reminder(content: str) -> str:
+    stripped = content.strip()
+    if stripped.startswith(SYSTEM_REMINDER_OPEN) and stripped.endswith(SYSTEM_REMINDER_CLOSE):
+        return stripped
+    return f"{SYSTEM_REMINDER_OPEN}\n{stripped}\n{SYSTEM_REMINDER_CLOSE}"
+
+
 class StateStore:
-    """Low-level SQLite operations for transcript, traces, and gateway state."""
+    """Low-level SQLite operations for source messages, traces, and gateway state."""
 
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path).expanduser()
@@ -94,11 +104,12 @@ class StateStore:
         with self.connect() as local:
             return fn(local)
 
-    def append_conversation_message(
+    def append_session_message(
         self,
         *,
         session_id: str,
-        role: ConversationRole,
+        kind: SessionMessageKind,
+        llm_role: LLMRole | None,
         raw_content: str,
         model_content: str | None = None,
         tool_call_id: str | None = None,
@@ -106,18 +117,24 @@ class StateStore:
         tool_result_id: str | None = None,
         provider_metadata: dict[str, Any] | None = None,
         source_metadata: dict[str, Any] | None = None,
+        compression_point_ordinal: int | None = None,
+        compression_version: str | None = None,
         created_at: str | None = None,
+        updated_at: str | None = None,
         metadata: dict[str, Any] | None = None,
         conn: sqlite3.Connection | None = None,
-    ) -> ConversationMessage:
-        """Append a transcript message with the next monotonic session ordinal."""
+    ) -> SessionMessage:
+        """Append a source message with the next monotonic session ordinal."""
 
-        def op(db: sqlite3.Connection) -> ConversationMessage:
-            message = ConversationMessage(
+        self._validate_session_message_shape(kind=kind, llm_role=llm_role)
+
+        def op(db: sqlite3.Connection) -> SessionMessage:
+            message = SessionMessage(
                 id=new_id("msg"),
                 session_id=session_id,
-                ordinal=self._next_conversation_ordinal(db, session_id),
-                role=role,
+                ordinal=self._next_session_ordinal(db, session_id),
+                kind=kind,
+                llm_role=llm_role,
                 raw_content=raw_content,
                 model_content=model_content,
                 tool_call_id=tool_call_id,
@@ -125,46 +142,82 @@ class StateStore:
                 tool_result_id=tool_result_id,
                 provider_metadata=provider_metadata or {},
                 source_metadata=source_metadata or {},
+                compression_point_ordinal=compression_point_ordinal,
+                compression_version=compression_version,
                 created_at=created_at or utc_now_iso(),
+                updated_at=updated_at,
                 metadata=metadata or {},
             )
-            return self._insert_conversation_message(db, message)
+            return self._insert_session_message(db, message)
 
         if conn is not None:
             return op(conn)
         with self.immediate_transaction() as local:
             return op(local)
 
-    def insert_conversation_message(
+    def append_compressed_message(
         self,
-        message: ConversationMessage,
+        *,
+        session_id: str,
+        raw_content: str,
+        compression_point_ordinal: int,
+        compression_version: str,
+        provider_metadata: dict[str, Any] | None = None,
+        source_metadata: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        metadata: dict[str, Any] | None = None,
         conn: sqlite3.Connection | None = None,
-    ) -> ConversationMessage:
-        """Insert a transcript message only if it is the next ordinal for its session."""
+    ) -> SessionMessage:
+        """Append a synthetic handover message for LLM replay continuity."""
 
-        def op(db: sqlite3.Connection) -> ConversationMessage:
-            expected_ordinal = self._next_conversation_ordinal(db, message.session_id)
+        if compression_point_ordinal < 1:
+            raise ValueError("compression_point_ordinal must be greater than 0")
+        return self.append_session_message(
+            session_id=session_id,
+            kind="compressed_message",
+            llm_role="user",
+            raw_content=_system_reminder(raw_content),
+            compression_point_ordinal=compression_point_ordinal,
+            compression_version=compression_version,
+            provider_metadata=provider_metadata,
+            source_metadata=source_metadata,
+            created_at=created_at,
+            metadata=metadata,
+            conn=conn,
+        )
+
+    def insert_session_message(
+        self,
+        message: SessionMessage,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionMessage:
+        """Insert a source message only if it is the next ordinal for its session."""
+
+        self._validate_session_message_shape(kind=message.kind, llm_role=message.llm_role)
+
+        def op(db: sqlite3.Connection) -> SessionMessage:
+            expected_ordinal = self._next_session_ordinal(db, message.session_id)
             if message.ordinal != expected_ordinal:
                 raise ValueError(
-                    "conversation message ordinal for session "
+                    "session message ordinal for session "
                     f"{message.session_id!r} must be {expected_ordinal}, got {message.ordinal}"
                 )
-            return self._insert_conversation_message(db, message)
+            return self._insert_session_message(db, message)
 
         if conn is not None:
             return op(conn)
         with self.immediate_transaction() as local:
             return op(local)
 
-    def list_conversation_messages(
+    def list_session_messages(
         self,
         session_id: str,
         *,
         after_ordinal: int | None = None,
         before_ordinal: int | None = None,
         limit: int | None = None,
-    ) -> list[ConversationMessage]:
-        """List transcript messages in ascending ordinal order."""
+    ) -> list[SessionMessage]:
+        """List source messages in ascending ordinal order."""
 
         conditions = ["session_id = ?"]
         params: list[Any] = [session_id]
@@ -175,7 +228,7 @@ class StateStore:
             conditions.append("ordinal < ?")
             params.append(before_ordinal)
         query = f"""
-            SELECT * FROM conversation_messages
+            SELECT * FROM session_messages
             WHERE {' AND '.join(conditions)}
             ORDER BY ordinal ASC
         """
@@ -184,13 +237,13 @@ class StateStore:
             params.append(limit)
         with self.connect() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [self._conversation_message_from_row(row) for row in rows]
+        return [self._session_message_from_row(row) for row in rows]
 
-    def list_conversation_messages_by_ids(
+    def list_session_messages_by_ids(
         self,
         message_ids: list[str],
-    ) -> list[ConversationMessage]:
-        """Return transcript messages for the given ids, preserving requested order."""
+    ) -> list[SessionMessage]:
+        """Return source messages for the given ids, preserving requested order."""
 
         if not message_ids:
             return []
@@ -198,19 +251,90 @@ class StateStore:
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT * FROM conversation_messages
+                SELECT * FROM session_messages
                 WHERE id IN ({placeholders})
                 """,
                 message_ids,
             ).fetchall()
-        by_id = {str(row["id"]): self._conversation_message_from_row(row) for row in rows}
+        by_id = {str(row["id"]): self._session_message_from_row(row) for row in rows}
         return [by_id[message_id] for message_id in message_ids if message_id in by_id]
 
-    def latest_conversation_ordinal(self, session_id: str) -> int:
-        """Return the latest message ordinal for a session, or zero if it has none."""
+    def latest_session_ordinal(self, session_id: str) -> int:
+        """Return the latest source ordinal for a session, or zero if it has none."""
 
         with self.connect() as conn:
-            return self._latest_conversation_ordinal(conn, session_id)
+            return self._latest_session_ordinal(conn, session_id)
+
+    def find_latest_compressed_message(
+        self,
+        session_id: str,
+        *,
+        before_ordinal: int | None = None,
+    ) -> SessionMessage | None:
+        """Return the newest compressed source message by session ordinal."""
+
+        conditions = ["session_id = ?", "kind = 'compressed_message'"]
+        params: list[Any] = [session_id]
+        if before_ordinal is not None:
+            conditions.append("ordinal < ?")
+            params.append(before_ordinal)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT * FROM session_messages
+                WHERE {' AND '.join(conditions)}
+                ORDER BY ordinal DESC
+                LIMIT 1
+                """,
+                params,
+            ).fetchone()
+        return self._session_message_from_row(row) if row is not None else None
+
+    def update_session_message_replay_payload(
+        self,
+        message_id: str,
+        *,
+        raw_content: str,
+        model_content: str | None,
+        tool_calls: list[dict[str, Any]],
+        metadata: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionMessage:
+        """Update only replay payload fields and general metadata for a source message."""
+
+        def op(db: sqlite3.Connection) -> SessionMessage:
+            db.execute(
+                """
+                UPDATE session_messages
+                SET raw_content = ?,
+                    model_content = ?,
+                    tool_calls = ?,
+                    metadata = ?
+                WHERE id = ?
+                """,
+                (
+                    raw_content,
+                    model_content,
+                    _dumps(tool_calls),
+                    _dumps(metadata),
+                    message_id,
+                ),
+            )
+            row = db.execute(
+                """
+                SELECT * FROM session_messages
+                WHERE id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"session message {message_id!r} not found")
+            return self._session_message_from_row(row)
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
 
     def append_runtime_trace(
         self,
@@ -283,38 +407,40 @@ class StateStore:
             rows = conn.execute(query, params).fetchall()
         return [self._runtime_trace_from_row(row) for row in rows]
 
-    def _next_conversation_ordinal(self, conn: sqlite3.Connection, session_id: str) -> int:
-        return self._latest_conversation_ordinal(conn, session_id) + 1
+    def _next_session_ordinal(self, conn: sqlite3.Connection, session_id: str) -> int:
+        return self._latest_session_ordinal(conn, session_id) + 1
 
-    def _latest_conversation_ordinal(self, conn: sqlite3.Connection, session_id: str) -> int:
+    def _latest_session_ordinal(self, conn: sqlite3.Connection, session_id: str) -> int:
         row = conn.execute(
             """
             SELECT COALESCE(MAX(ordinal), 0) AS ordinal
-            FROM conversation_messages
+            FROM session_messages
             WHERE session_id = ?
             """,
             (session_id,),
         ).fetchone()
         return int(row["ordinal"]) if row is not None else 0
 
-    def _insert_conversation_message(
+    def _insert_session_message(
         self,
         conn: sqlite3.Connection,
-        message: ConversationMessage,
-    ) -> ConversationMessage:
+        message: SessionMessage,
+    ) -> SessionMessage:
         conn.execute(
             """
-            INSERT INTO conversation_messages
-                (id, session_id, ordinal, role, raw_content, model_content,
+            INSERT INTO session_messages
+                (id, session_id, ordinal, kind, llm_role, raw_content, model_content,
                  tool_call_id, tool_calls, tool_result_id, provider_metadata,
-                 source_metadata, created_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 source_metadata, compression_point_ordinal, compression_version,
+                 metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.id,
                 message.session_id,
                 message.ordinal,
-                message.role,
+                message.kind,
+                message.llm_role,
                 message.raw_content,
                 message.model_content,
                 message.tool_call_id,
@@ -322,18 +448,22 @@ class StateStore:
                 message.tool_result_id,
                 _dumps(message.provider_metadata),
                 _dumps(message.source_metadata),
-                message.created_at,
+                message.compression_point_ordinal,
+                message.compression_version,
                 _dumps(message.metadata),
+                message.created_at,
+                message.updated_at,
             ),
         )
         return message
 
-    def _conversation_message_from_row(self, row: sqlite3.Row) -> ConversationMessage:
-        return ConversationMessage(
+    def _session_message_from_row(self, row: sqlite3.Row) -> SessionMessage:
+        return SessionMessage(
             id=row["id"],
             session_id=row["session_id"],
             ordinal=int(row["ordinal"]),
-            role=row["role"],
+            kind=row["kind"],
+            llm_role=row["llm_role"],
             raw_content=row["raw_content"],
             model_content=row["model_content"],
             tool_call_id=row["tool_call_id"],
@@ -341,7 +471,14 @@ class StateStore:
             tool_result_id=row["tool_result_id"],
             provider_metadata=_loads_dict(row["provider_metadata"]),
             source_metadata=_loads_dict(row["source_metadata"]),
+            compression_point_ordinal=(
+                int(row["compression_point_ordinal"])
+                if row["compression_point_ordinal"] is not None
+                else None
+            ),
+            compression_version=row["compression_version"],
             created_at=row["created_at"],
+            updated_at=row["updated_at"],
             metadata=_loads_dict(row["metadata"]),
         )
 
@@ -354,3 +491,22 @@ class StateStore:
             timestamp=row["timestamp"],
             metadata=_loads_dict(row["metadata"]),
         )
+
+    def _validate_session_message_shape(
+        self,
+        *,
+        kind: SessionMessageKind,
+        llm_role: LLMRole | None,
+    ) -> None:
+        if kind == "compressed_message":
+            if llm_role != "user":
+                raise ValueError("compressed_message must use llm_role='user'")
+            return
+        expected_roles: dict[SessionMessageKind, LLMRole] = {
+            "user_message": "user",
+            "assistant_message": "assistant",
+            "tool_message": "tool",
+            "compressed_message": "user",
+        }
+        if llm_role != expected_roles[kind]:
+            raise ValueError(f"{kind} must use llm_role={expected_roles[kind]!r}")

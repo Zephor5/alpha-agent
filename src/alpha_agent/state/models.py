@@ -5,17 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-ConversationRole = Literal["user", "assistant", "tool"]
+SessionMessageKind = Literal[
+    "user_message",
+    "assistant_message",
+    "tool_message",
+    "compressed_message",
+]
+LLMRole = Literal["user", "assistant", "tool"]
 
 
 @dataclass(frozen=True)
-class ConversationMessage:
-    """Append-only source message in a session transcript."""
+class SessionMessage:
+    """Append-only source message in a session stream."""
 
     id: str
     session_id: str
     ordinal: int
-    role: ConversationRole
+    kind: SessionMessageKind
+    llm_role: LLMRole | None
     raw_content: str
     model_content: str | None
     tool_call_id: str | None
@@ -23,7 +30,10 @@ class ConversationMessage:
     tool_result_id: str | None
     provider_metadata: dict[str, Any]
     source_metadata: dict[str, Any]
+    compression_point_ordinal: int | None
+    compression_version: str | None
     created_at: str
+    updated_at: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

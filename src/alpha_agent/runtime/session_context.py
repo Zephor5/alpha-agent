@@ -1,27 +1,66 @@
-"""Session context projection built from append-only conversation messages."""
+"""Session context projection built from append-only source messages."""
 
 from __future__ import annotations
 
+import copy
+import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
-from alpha_agent.state.models import ConversationMessage
+from alpha_agent.cognition.render.text_chat import source_message_to_chat
+from alpha_agent.config import LLMContextConfig
+from alpha_agent.llm.base import ChatMessage, LLMToolDefinitionInput
+from alpha_agent.runtime.context_budget import (
+    ContextBudgetEstimate,
+    estimate_context_budget,
+    estimate_text_tokens,
+    stable_json,
+)
+from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
+
+SYSTEM_REMINDER_OPEN = "<system-reminder>"
+SYSTEM_REMINDER_CLOSE = "</system-reminder>"
+TOOL_TRUNCATION_MARKER = "<system-reminder>truncated</system-reminder>"
 
 
 @dataclass(frozen=True)
 class SessionContextProjection:
-    """LLM-visible session context projected from the recent transcript."""
+    """LLM-visible source context projected from the session message stream."""
 
-    messages: list[ConversationMessage]
+    source_messages: list[SessionMessage]
+    chat_messages: list[ChatMessage]
+    compressed_message: SessionMessage | None = None
     before_ordinal: int | None = None
 
 
-class SessionContextManager:
-    """Load recent session context without mutating the transcript."""
+@dataclass(frozen=True)
+class ToolContextTruncationResult:
+    """Result of one explicit tool replay payload truncation maintenance pass."""
 
-    def __init__(self, store: StateStore, *, recent_tail_messages: int = 8):
+    triggered: bool
+    checked_message_ids: list[str]
+    truncated_message_ids: list[str]
+    before_estimate: ContextBudgetEstimate
+    after_estimate: ContextBudgetEstimate
+
+
+@dataclass(frozen=True)
+class _ReplayPayloadUpdate:
+    message_id: str
+    raw_content: str
+    model_content: str | None
+    tool_calls: list[dict[str, Any]]
+    metadata: dict[str, Any]
+    truncated: bool
+
+
+class SessionContextAssembler:
+    """Assemble source-aware LLM context without mutating the message stream."""
+
+    def __init__(self, store: StateStore):
         self.store = store
-        self.recent_tail_messages = max(0, recent_tail_messages)
 
     def load(
         self,
@@ -29,105 +68,274 @@ class SessionContextManager:
         *,
         before_ordinal: int | None = None,
     ) -> SessionContextProjection:
-        """Load replay-safe recent transcript messages before an ordinal."""
+        """Load the latest compressed handover plus later source messages."""
 
-        messages = self.store.list_conversation_messages(
+        compressed = self.store.find_latest_compressed_message(
             session_id,
             before_ordinal=before_ordinal,
         )
-        if self.recent_tail_messages:
-            messages = messages[-self.recent_tail_messages :]
-        messages = self._repair_tool_replay_head(session_id, messages, before_ordinal)
-        messages = self._drop_incomplete_tool_replay(messages)
-        return SessionContextProjection(messages=messages, before_ordinal=before_ordinal)
-
-    def _repair_tool_replay_head(
-        self,
-        session_id: str,
-        messages: list[ConversationMessage],
-        before_ordinal: int | None,
-    ) -> list[ConversationMessage]:
-        if not messages or messages[0].role != "tool":
-            return messages
-
-        assistant = self._find_assistant_for_tool_result(session_id, messages[0])
-        if assistant is None:
-            return self._drop_leading_tool_results(messages)
-
-        repaired = self.store.list_conversation_messages(
-            session_id,
-            after_ordinal=assistant.ordinal - 1,
+        after_ordinal = compressed.ordinal if compressed is not None else None
+        ordinary_messages = [
+            message
+            for message in self.store.list_session_messages(
+                session_id,
+                after_ordinal=after_ordinal,
+                before_ordinal=before_ordinal,
+            )
+            if message.kind != "compressed_message"
+        ]
+        source_messages = [compressed, *ordinary_messages] if compressed else ordinary_messages
+        return SessionContextProjection(
+            source_messages=source_messages,
+            chat_messages=[session_message_to_chat(message) for message in source_messages],
+            compressed_message=compressed,
             before_ordinal=before_ordinal,
         )
-        if self.recent_tail_messages:
-            return repaired[-self.recent_tail_messages :]
-        return repaired
 
-    def _find_assistant_for_tool_result(
+    def assemble_messages_for_llm(
         self,
         session_id: str,
-        tool_message: ConversationMessage,
-    ) -> ConversationMessage | None:
-        if not tool_message.tool_call_id:
-            return None
-        prior_messages = self.store.list_conversation_messages(
-            session_id,
-            before_ordinal=tool_message.ordinal,
+        *,
+        before_ordinal: int | None = None,
+    ) -> list[ChatMessage]:
+        """Return ChatMessage-shaped source context for an LLM call."""
+
+        return self.load(session_id, before_ordinal=before_ordinal).chat_messages
+
+    def truncate_tool_context_if_needed(
+        self,
+        session_id: str,
+        *,
+        context_config: LLMContextConfig | None = None,
+        max_context_tokens: int,
+        tools: Sequence[LLMToolDefinitionInput | Mapping[str, Any]] | None = None,
+        before_ordinal: int | None = None,
+        planning_messages: Sequence[ChatMessage | Mapping[str, Any]] | None = None,
+    ) -> ToolContextTruncationResult:
+        """Truncate unchecked replay tool payloads after the latest compression boundary."""
+
+        config = context_config or LLMContextConfig()
+        projection = self.load(session_id, before_ordinal=before_ordinal)
+        budget_messages = [*projection.chat_messages, *(planning_messages or ())]
+        before_estimate = estimate_context_budget(
+            budget_messages,
+            tools=tools,
+            context_config=config,
+            max_context_tokens=max_context_tokens,
         )
-        for message in reversed(prior_messages):
-            if (
-                message.role == "assistant"
-                and tool_message.tool_call_id in self._tool_call_ids(message)
-            ):
-                return message
+        threshold_tokens = max_context_tokens * config.tool_truncate_threshold_ratio
+        if before_estimate.used_context_tokens <= threshold_tokens:
+            return ToolContextTruncationResult(
+                triggered=False,
+                checked_message_ids=[],
+                truncated_message_ids=[],
+                before_estimate=before_estimate,
+                after_estimate=before_estimate,
+            )
+
+        updates = [
+            update
+            for message in projection.source_messages
+            if (update := _prepare_tool_payload_update(message, config.tool_string_truncate_chars))
+            is not None
+        ]
+        if updates:
+            with self.store.immediate_transaction() as conn:
+                for update in updates:
+                    self.store.update_session_message_replay_payload(
+                        update.message_id,
+                        raw_content=update.raw_content,
+                        model_content=update.model_content,
+                        tool_calls=update.tool_calls,
+                        metadata=update.metadata,
+                        conn=conn,
+                    )
+
+        after_projection = self.load(session_id, before_ordinal=before_ordinal)
+        after_budget_messages = [
+            *after_projection.chat_messages,
+            *(planning_messages or ()),
+        ]
+        after_estimate = estimate_context_budget(
+            after_budget_messages,
+            tools=tools,
+            context_config=config,
+            max_context_tokens=max_context_tokens,
+        )
+        return ToolContextTruncationResult(
+            triggered=True,
+            checked_message_ids=[update.message_id for update in updates],
+            truncated_message_ids=[update.message_id for update in updates if update.truncated],
+            before_estimate=before_estimate,
+            after_estimate=after_estimate,
+        )
+
+
+def session_message_to_chat(message: SessionMessage) -> ChatMessage:
+    """Convert a durable source message into a replayable chat message."""
+
+    if message.kind == "compressed_message":
+        content = (
+            message.model_content
+            if message.model_content is not None
+            else message.raw_content
+        )
+        return {"role": "user", "content": _ensure_system_reminder(content)}
+    return source_message_to_chat(message)
+
+
+def wrap_system_reminder(content: str) -> str:
+    """Wrap content as a user-role system reminder."""
+
+    return _ensure_system_reminder(content)
+
+
+def _ensure_system_reminder(content: str) -> str:
+    stripped = content.strip()
+    if stripped.startswith(SYSTEM_REMINDER_OPEN) and stripped.endswith(SYSTEM_REMINDER_CLOSE):
+        return stripped
+    return f"{SYSTEM_REMINDER_OPEN}\n{stripped}\n{SYSTEM_REMINDER_CLOSE}"
+
+
+def _prepare_tool_payload_update(
+    message: SessionMessage,
+    tool_string_truncate_chars: int,
+) -> _ReplayPayloadUpdate | None:
+    if message.metadata.get("truncate_checked") is True:
         return None
+    if message.kind == "assistant_message" and message.tool_calls:
+        return _prepare_assistant_tool_call_update(message, tool_string_truncate_chars)
+    if message.kind == "tool_message":
+        return _prepare_tool_message_update(message, tool_string_truncate_chars)
+    return None
 
-    def _drop_leading_tool_results(
-        self,
-        messages: list[ConversationMessage],
-    ) -> list[ConversationMessage]:
-        index = 0
-        while index < len(messages) and messages[index].role == "tool":
-            index += 1
-        return messages[index:]
 
-    def _drop_incomplete_tool_replay(
-        self,
-        messages: list[ConversationMessage],
-    ) -> list[ConversationMessage]:
-        projected: list[ConversationMessage] = []
-        index = 0
-        while index < len(messages):
-            message = messages[index]
-            if message.role == "tool":
-                index += 1
-                continue
-            if message.role != "assistant" or not message.tool_calls:
-                projected.append(message)
-                index += 1
-                continue
+def _prepare_assistant_tool_call_update(
+    message: SessionMessage,
+    tool_string_truncate_chars: int,
+) -> _ReplayPayloadUpdate:
+    tool_calls = copy.deepcopy(message.tool_calls)
+    original_lengths: dict[str, int] = {}
+    for index, tool_call in enumerate(tool_calls):
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            raise ValueError(f"assistant tool_call {index} is missing function payload")
+        arguments = function.get("arguments")
+        if not isinstance(arguments, str):
+            raise ValueError(
+                f"assistant tool_call {index} function.arguments must be a JSON string"
+            )
+        parsed_arguments = json.loads(arguments)
+        truncated_arguments = _truncate_json_strings(
+            parsed_arguments,
+            tool_string_truncate_chars,
+            f"tool_calls[{index}].function.arguments",
+            original_lengths,
+        )
+        function["arguments"] = _dump_replay_json(truncated_arguments)
+    return _ReplayPayloadUpdate(
+        message_id=message.id,
+        raw_content=message.raw_content,
+        model_content=message.model_content,
+        tool_calls=tool_calls,
+        metadata=_truncate_checked_metadata(message.metadata, original_lengths),
+        truncated=bool(original_lengths),
+    )
 
-            required_call_ids = self._tool_call_ids(message)
-            replay_messages = [message]
-            seen_call_ids: set[str] = set()
-            index += 1
-            while index < len(messages) and messages[index].role == "tool":
-                tool_message = messages[index]
-                if tool_message.tool_call_id in required_call_ids:
-                    replay_messages.append(tool_message)
-                    if tool_message.tool_call_id is not None:
-                        seen_call_ids.add(tool_message.tool_call_id)
-                    index += 1
-                    continue
-                break
-            if seen_call_ids == required_call_ids:
-                projected.extend(replay_messages)
-        return projected
 
-    def _tool_call_ids(self, message: ConversationMessage) -> set[str]:
-        ids: set[str] = set()
-        for tool_call in message.tool_calls:
-            tool_call_id = tool_call.get("id")
-            if tool_call_id is not None:
-                ids.add(str(tool_call_id))
-        return ids
+def _prepare_tool_message_update(
+    message: SessionMessage,
+    tool_string_truncate_chars: int,
+) -> _ReplayPayloadUpdate:
+    original_lengths: dict[str, int] = {}
+    raw_payload = json.loads(message.raw_content)
+    raw_content = _dump_replay_json(
+        _truncate_json_strings(
+            raw_payload,
+            tool_string_truncate_chars,
+            "raw_content",
+            original_lengths,
+        )
+    )
+    model_content = message.model_content
+    if model_content is not None:
+        model_payload = json.loads(model_content)
+        model_content = _dump_replay_json(
+            _truncate_json_strings(
+                model_payload,
+                tool_string_truncate_chars,
+                "model_content",
+                original_lengths,
+            )
+        )
+    return _ReplayPayloadUpdate(
+        message_id=message.id,
+        raw_content=raw_content,
+        model_content=model_content,
+        tool_calls=message.tool_calls,
+        metadata=_truncate_checked_metadata(message.metadata, original_lengths),
+        truncated=bool(original_lengths),
+    )
+
+
+def _truncate_checked_metadata(
+    metadata: Mapping[str, Any],
+    original_lengths: Mapping[str, int],
+) -> dict[str, Any]:
+    updated = dict(metadata)
+    updated["truncate_checked"] = True
+    updated["original_lengths"] = dict(original_lengths)
+    return updated
+
+
+def _truncate_json_strings(
+    value: Any,
+    tool_string_truncate_chars: int,
+    path: str,
+    original_lengths: dict[str, int],
+) -> Any:
+    if tool_string_truncate_chars < 0:
+        raise ValueError("tool_string_truncate_chars must be non-negative")
+    if isinstance(value, str):
+        if len(value) <= tool_string_truncate_chars:
+            return value
+        original_lengths[path] = len(value)
+        return value[:tool_string_truncate_chars] + TOOL_TRUNCATION_MARKER
+    if isinstance(value, list):
+        return [
+            _truncate_json_strings(
+                item,
+                tool_string_truncate_chars,
+                f"{path}[{index}]",
+                original_lengths,
+            )
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _truncate_json_strings(
+                item,
+                tool_string_truncate_chars,
+                f"{path}.{key}",
+                original_lengths,
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
+def _dump_replay_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+__all__ = [
+    "ContextBudgetEstimate",
+    "SessionContextAssembler",
+    "SessionContextProjection",
+    "ToolContextTruncationResult",
+    "estimate_context_budget",
+    "estimate_text_tokens",
+    "session_message_to_chat",
+    "stable_json",
+    "wrap_system_reminder",
+]

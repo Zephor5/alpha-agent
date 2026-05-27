@@ -66,7 +66,10 @@ class AgentFactory:
             llm_provider=provider,
             llm_debug_logging=self.config.llm_debug_logging,
             llm_trace_log_path=Path(self.config.log_dir) / "llm.jsonl",
-            context_recent_tail_messages=self.config.context_recent_tail_messages,
+            llm_context_config=self.config.llm_context,
+            max_context_tokens=self.config.max_context_tokens_for_provider(
+                self.config.llm_provider
+            ),
         )
 
 

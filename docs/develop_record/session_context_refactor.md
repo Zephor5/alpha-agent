@@ -2,7 +2,12 @@
 
 ## Status
 
-Draft for implementation.
+Historical design record. Superseded by
+`docs/doing/session-context-handover-compression.md`, which implements
+append-only `session_messages`, latest `compressed_message` boundary replay,
+runtime tool payload truncation, and LLM handover compression. Mentions below of
+preserving a recent tail or `context.recent_tail_messages` are archival design
+notes, not current behavior or configuration.
 
 ## Core Problem
 

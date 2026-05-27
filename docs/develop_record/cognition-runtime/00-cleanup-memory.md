@@ -6,6 +6,13 @@
 **Design ref:** `docs/cognition/cognition_from_scratch.md` §13.1 / §13.2 / AGENTS.md
 "DO NOT FOLLOW PARTIAL COMPATIBILITY FIRST" 规则。
 
+> Historical note: this Phase 00 baseline was superseded by the implemented
+> session-context handover compression design in
+> `docs/doing/session-context-handover-compression.md`. Mentions below of a
+> minimal recent-N prompt, `context.max_prompt_tokens`, or
+> `context.recent_tail_messages` are archival cleanup notes, not current
+> runtime behavior or configuration.
+
 ## 0. 目标
 
 把现有 `src/alpha_agent/memory/` 子系统按目标架构所需的状态清理干净，让后续

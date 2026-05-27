@@ -1,8 +1,11 @@
-CREATE TABLE IF NOT EXISTS conversation_messages (
+CREATE TABLE IF NOT EXISTS session_messages (
     id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
     ordinal INTEGER NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+    kind TEXT NOT NULL CHECK (
+        kind IN ('user_message', 'assistant_message', 'tool_message', 'compressed_message')
+    ),
+    llm_role TEXT CHECK (llm_role IN ('user', 'assistant', 'tool')),
     raw_content TEXT NOT NULL,
     model_content TEXT,
     tool_call_id TEXT,
@@ -10,8 +13,11 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     tool_result_id TEXT,
     provider_metadata TEXT NOT NULL DEFAULT '{}',
     source_metadata TEXT NOT NULL DEFAULT '{}',
-    created_at TEXT NOT NULL,
+    compression_point_ordinal INTEGER,
+    compression_version TEXT,
     metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT,
     UNIQUE(session_id, ordinal),
     CHECK (ordinal >= 1)
 );
@@ -53,12 +59,14 @@ CREATE TABLE IF NOT EXISTS gateway_dedup (
     metadata TEXT NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX IF NOT EXISTS idx_conversation_messages_session_ordinal
-    ON conversation_messages(session_id, ordinal);
-CREATE INDEX IF NOT EXISTS idx_conversation_messages_created_at
-    ON conversation_messages(created_at);
-CREATE INDEX IF NOT EXISTS idx_conversation_messages_tool_call_id
-    ON conversation_messages(tool_call_id);
+CREATE INDEX IF NOT EXISTS idx_session_messages_session_ordinal
+    ON session_messages(session_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_session_messages_kind_ordinal
+    ON session_messages(session_id, kind, ordinal);
+CREATE INDEX IF NOT EXISTS idx_session_messages_created_at
+    ON session_messages(created_at);
+CREATE INDEX IF NOT EXISTS idx_session_messages_tool_call_id
+    ON session_messages(tool_call_id);
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_timestamp
     ON runtime_traces(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_event_type_timestamp

@@ -51,7 +51,6 @@ from alpha_agent.cognition.render import (
     GraphSnapshotRenderer,
     RenderBudget,
     TextChatRenderer,
-    conversation_message_to_chat,
 )
 from alpha_agent.cognition.render.build_view import build_view
 from alpha_agent.cognition.value.lens import default_value_lens, load_lens, save_lens
@@ -89,7 +88,7 @@ from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
 from alpha_agent.runtime.session import new_session_id
-from alpha_agent.runtime.session_context import SessionContextManager
+from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.skills.manager import SkillManager
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.registry import ToolRegistry
@@ -279,13 +278,26 @@ def config_show() -> None:
         "llm_provider": config.llm_provider,
         "llm_model": _display_model(config),
         "llm_debug_logging": str(config.llm_debug_logging).lower(),
-        "context_recent_tail_messages": str(config.context_recent_tail_messages),
+        "llm_context_tool_truncate_threshold_ratio": str(
+            config.llm_context.tool_truncate_threshold_ratio
+        ),
+        "llm_context_handover_compress_threshold_ratio": str(
+            config.llm_context.handover_compress_threshold_ratio
+        ),
+        "llm_context_minimum_remaining_tokens": str(
+            config.llm_context.minimum_remaining_tokens
+        ),
+        "llm_provider_max_context_tokens": str(
+            config.max_context_tokens_for_provider(config.llm_provider)
+        ),
     }
     if config.llm_provider in {"openai-compatible", "openai", "compatible"}:
         rows["compatible_base_url"] = config.compatible_base_url or ""
     for key, value in rows.items():
         table.add_row(key, value)
     console.print(table)
+    for key, value in rows.items():
+        typer.echo(f"{key}={value}")
     typer.echo(f"Config path: {default_config_path()}")
 
 
@@ -560,16 +572,13 @@ def prompt(
     config = load_config()
     store = _store(config)
     session_id = session or new_session_id()
-    context = SessionContextManager(
-        store,
-        recent_tail_messages=config.context_recent_tail_messages,
-    ).load(session_id)
+    context = SessionContextAssembler(store).load(session_id)
     if renderer != TextChatRenderer.name:
         raise typer.BadParameter("supported renderer: text_chat")
     view = _debug_prompt_view(
         session_id=session_id,
         message=message,
-        chat_history=[conversation_message_to_chat(item) for item in context.messages],
+        chat_history=context.chat_messages,
     )
     rendered = TextChatRenderer().render(view, RenderBudget())
     messages = rendered.payload

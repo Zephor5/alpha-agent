@@ -2,7 +2,14 @@
 
 ## Status
 
-Draft for implementation.
+Implemented and verified. Phase 1-6 explicit APIs, runtime orchestration,
+verification coverage, and documentation cleanup are complete:
+`session_messages` is the durable source stream, `SessionContextAssembler`
+projects LLM-visible context from the latest compressed-message boundary,
+deterministic context budget primitives are in place, tool replay payload
+truncation maintenance is available, callable handover compression appends
+`compressed_message` records after a successful provider call, and pre-user plus
+tool-loop maintenance are wired into the serialized runtime turn lifecycle.
 
 ## Core Direction
 
@@ -89,8 +96,9 @@ CREATE TABLE session_messages (
 );
 ```
 
-Existing `conversation_messages` can be directly refactored into this shape. The
-project does not require database compatibility. The source model must preserve
+The previous `conversation_messages` table is directly refactored into this
+shape as `session_messages`. The project does not require database
+compatibility. The source model must preserve
 complete tool replay data (`tool_call_id`, assistant `tool_calls`, and
 `tool_result_id`) and keep provider metadata, source metadata, and general
 metadata separate.
@@ -505,7 +513,7 @@ Required tests:
 Establish the durable source layer and prevent concurrent same-session mutation
 before adding maintenance behavior.
 
-- Refactor `conversation_messages` into the source message model with `kind`,
+- Refactor the previous transcript table into the source message model with `kind`,
   `llm_role`, `compression_point_ordinal`, `compression_version`, `metadata`,
   and `updated_at`.
 - Preserve replay fields: `raw_content`, `model_content`, `tool_call_id`,
@@ -533,7 +541,7 @@ Build one context assembly path that every LLM-facing caller will use.
 - Estimate existing context plus pending user message before appending the
   pending user message.
 - Reject a pending user message that cannot fit after prior context maintenance.
-- Do not add fixed-tail transcript pruning outside explicit compression.
+- Do not reduce ordinary transcript replay outside explicit compression.
 
 ### Phase 3: Tool Payload Maintenance
 
@@ -592,8 +600,8 @@ phase as an independently shippable endpoint.
   truncation, compression, pre-user flow, tool-loop flow, debug prompt, and
   cognition skip behavior.
 - Update configuration docs and examples for the final context budget settings.
-- Remove or rewrite docs that describe fixed-tail transcript pruning as normal
-  LLM context behavior.
+- Remove or rewrite docs that describe count-based tail selection as normal LLM
+  context behavior.
 - Confirm no source messages are deleted by compression and no compression
   instruction is persisted as source content.
 

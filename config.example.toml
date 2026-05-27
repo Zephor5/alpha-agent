@@ -19,8 +19,21 @@ debug_logging = false
 base_url = "https://api.openai.com/v1"
 api_key = ""
 
-[context]
-recent_tail_messages = 8
+[llm.context]
+# Active runtime context maintenance settings.
+# Tool payload truncation runs before LLM handover compression.
+tool_truncate_threshold_ratio = 0.60
+handover_compress_threshold_ratio = 0.90
+minimum_remaining_tokens = 10000
+tool_string_truncate_chars = 300
+expected_output_reserve_tokens = 4096
+safety_margin_tokens = 1024
+
+[llm.providers.openai-compatible]
+max_context_tokens = 258400
+
+[llm.providers.deepseek]
+max_context_tokens = 1000000
 
 [cognition.consolidation]
 enabled = true

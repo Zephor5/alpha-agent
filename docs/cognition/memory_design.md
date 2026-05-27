@@ -16,11 +16,10 @@
 > Implementation note: Alpha's current runtime no longer uses a separate
 > priority-pruned `working_memory` table for recent conversation context.
 > Short-term session context is now derived from append-only
-> `conversation_messages` plus optional `session_context_states` rows whose
-> `metadata.projection` stores structured state. The projection records current
-> goal, decisions, open questions, pending tasks, user constraints, relevant
-> files/entities, and last action, and later compression reads that metadata
-> instead of reconstructing state from clipped Markdown.
+> `session_messages` source records. LLM replay uses the latest
+> `compressed_message`, when present, plus later source messages; otherwise it
+> uses the full source stream. The compressed handover is synthetic LLM context,
+> not a cognition foreground record.
 > Long-term retrieval remains query-dependent across episodic, semantic, and
 > procedural memory, with scene/persona projections stored as source-backed
 > semantic memories.
@@ -191,15 +190,13 @@ M0 可以放在 Redis、内存、session store 里。
 Alpha 当前实现里，M0 不是单独表，而是：
 
 ```text
-conversation_messages
-  + session_context_states.structured_projection
-  + uncompressed transcript tail
+session_messages
+  + latest compressed_message boundary when present
+  + later uncompressed source messages
 ```
 
-`session_context_states` 不再保存普通“压缩聊天摘要”，而是保存可检查的
-session state：current goal、decisions、open questions、pending tasks、
-user constraints、relevant files/entities、last action。当前用户消息仍然是
-prompt 中最后一条真实用户消息，session state 只能作为低优先级背景。
+`compressed_message` 是 source stream 中的 synthetic handover，默认不进入
+cognition source mapping。当前用户消息仍然是 prompt 中最后一条真实用户消息。
 
 ---
 
@@ -593,7 +590,7 @@ M3 的作用：
 
 Alpha 当前实现将 scene 保存为 `semantic_memories.memory_type = "scene"`，
 而不是新增独立表。scene 只从 reviewed、active atomic semantic memories
-生成，并且这些 atomic memories 必须还能解析到 `conversation_messages`
+生成，并且这些 atomic memories 必须还能解析到 `session_messages`
 源消息。reviewed 当前定义为 approved 或 auto_approved candidate lineage
 产生的 semantic memory。scene 的 active `source_memory_ids` 只指向仍然 active
 的 reviewed M2 原子记忆，metadata 中的 `source_message_ids` 指向当前 active

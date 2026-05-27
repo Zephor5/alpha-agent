@@ -29,11 +29,11 @@ def test_reactive_tick_tool_call_path_emits_acted_and_feedback(tmp_path) -> None
     result = agent.respond("use tool", session_id="s1")
 
     assert result.response == "final answer"
-    assert [message.role for message in store.list_conversation_messages("s1")] == [
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
+    assert [message.kind for message in store.list_session_messages("s1")] == [
+        "user_message",
+        "assistant_message",
+        "tool_message",
+        "assistant_message",
     ]
     events = list(SQLiteEventLog(store).iter())
     acted = [event for event in events if event.kind == CognitiveEventKind.ACTED][0]

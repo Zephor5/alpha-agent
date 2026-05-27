@@ -36,7 +36,7 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
             ).fetchall()
         }
         assert tables == {
-            "conversation_messages",
+            "session_messages",
             "runtime_traces",
             "gateway_session_mappings",
             "gateway_dedup",
@@ -60,8 +60,18 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
 def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
-    store.append_conversation_message(session_id="s1", role="user", raw_content="hello")
-    store.append_conversation_message(session_id="s1", role="assistant", raw_content="hi")
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="hi",
+    )
     runner = CliRunner()
 
     result = runner.invoke(
@@ -76,6 +86,51 @@ def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path
     assert "hello" in result.output
     assert "hi" in result.output
     assert "continue" in result.output
+
+
+def test_debug_prompt_uses_latest_compressed_boundary(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    user = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="old source before compressed boundary",
+    )
+    assistant = store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="old answer before compressed boundary",
+    )
+    assert assistant.ordinal == user.ordinal + 1
+    store.append_compressed_message(
+        session_id="s1",
+        raw_content="latest compressed handover",
+        compression_point_ordinal=assistant.ordinal,
+        compression_version="test-v1",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="fresh source after compressed boundary",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["debug", "prompt", "continue", "--session", "s1"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "Identity: Alpha Agent" in result.output
+    assert "latest compressed handover" in result.output
+    assert "fresh source after compressed boundary" in result.output
+    assert "continue" in result.output
+    assert "old source before compressed boundary" not in result.output
+    assert "old answer before compressed boundary" not in result.output
 
 
 def test_debug_prompt_trace_renders_recent_cognitive_events(tmp_path: Path) -> None:

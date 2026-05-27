@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -10,7 +9,8 @@ from alpha_agent.cognition.models import CounterpartRole
 from alpha_agent.cognition.render.base import RenderBudget, RenderResult
 from alpha_agent.cognition.render.view import CognitionView
 from alpha_agent.llm.base import ChatCompletionToolCall, ChatMessage, LLMToolDefinitionInput
-from alpha_agent.state.models import ConversationMessage
+from alpha_agent.runtime.context_budget import estimate_context_budget
+from alpha_agent.state.models import SessionMessage
 
 SYSTEM_REMINDER_OPEN = "<system-reminder>"
 SYSTEM_REMINDER_CLOSE = "</system-reminder>"
@@ -25,30 +25,32 @@ def estimate_chat_tokens(
     *,
     tools: Sequence[LLMToolDefinitionInput] | None = None,
 ) -> int:
-    character_count = sum(_message_character_count(message) for message in messages)
-    if tools is not None:
-        character_count += sum(len(_stable_json(_tool_payload(tool))) for tool in tools)
-    return character_count // 4
+    estimate = estimate_context_budget(messages, tools=tools, max_context_tokens=0)
+    return estimate.message_tokens + estimate.tool_schema_tokens
 
 
-def conversation_message_to_chat(message: ConversationMessage) -> ChatMessage:
-    """Convert a durable transcript message into a replayable chat message."""
+def source_message_to_chat(message: SessionMessage) -> ChatMessage:
+    """Convert a durable source message into a replayable chat message."""
 
     content = message.model_content if message.model_content is not None else message.raw_content
-    if message.role == "user":
+    if message.kind == "compressed_message":
+        raise ValueError("compressed_message must be projected by SessionContextAssembler")
+    if message.llm_role == "user":
         return {"role": "user", "content": content}
-    if message.role == "assistant":
+    if message.llm_role == "assistant":
         if message.tool_calls:
             return {
                 "role": "assistant",
                 "content": content or None,
                 "tool_calls": [
-                    _conversation_tool_call(tool_call) for tool_call in message.tool_calls
+                    _source_tool_call(tool_call) for tool_call in message.tool_calls
                 ],
             }
         return {"role": "assistant", "content": content}
+    if message.llm_role != "tool":
+        raise ValueError(f"session message {message.id!r} is missing llm_role")
     if not message.tool_call_id:
-        raise ValueError(f"tool conversation message {message.id!r} is missing tool_call_id")
+        raise ValueError(f"tool session message {message.id!r} is missing tool_call_id")
     return {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
 
 
@@ -63,6 +65,7 @@ class TextChatRenderer:
             {"role": "system", "content": self._system_prompt(view, budget)}
         ]
         messages.extend(view.chat_history)
+        first_reminder_index = len(messages)
         sections = [
             ("strategy_reminders", self._strategy_reminders(view)),
             ("counterpart_digest", self._counterpart_digest(view)),
@@ -79,7 +82,7 @@ class TextChatRenderer:
             messages.append({"role": "user", "content": wrap_system_reminder(clipped)})
         messages.append({"role": "user", "content": self._current_query(view)})
         used_tokens = estimate_chat_tokens(messages)
-        while used_tokens > budget.max_tokens and len(messages) > 2:
+        while used_tokens > budget.max_tokens and len(messages) - 1 > first_reminder_index:
             removed = messages.pop(-2)
             dropped.append(_section_name_from_message(removed))
             used_tokens = estimate_chat_tokens(messages)
@@ -195,7 +198,7 @@ def _section_name_from_message(message: ChatMessage) -> str:
     return "unknown"
 
 
-def _conversation_tool_call(payload: Mapping[str, Any]) -> ChatCompletionToolCall:
+def _source_tool_call(payload: Mapping[str, Any]) -> ChatCompletionToolCall:
     function = payload.get("function")
     if not isinstance(function, Mapping):
         function = {}
@@ -207,32 +210,3 @@ def _conversation_tool_call(payload: Mapping[str, Any]) -> ChatCompletionToolCal
             "arguments": str(function.get("arguments") or "{}"),
         },
     }
-
-
-def _message_character_count(message: ChatMessage) -> int:
-    count = len(str(message.get("role", "")))
-    content = message.get("content")
-    if isinstance(content, str):
-        count += len(content)
-    tool_calls = message.get("tool_calls") if isinstance(message, dict) else None
-    if isinstance(tool_calls, list):
-        count += len(_stable_json(tool_calls))
-    tool_call_id = message.get("tool_call_id") if isinstance(message, dict) else None
-    if isinstance(tool_call_id, str):
-        count += len(tool_call_id)
-    return count
-
-
-def _tool_payload(tool: LLMToolDefinitionInput) -> dict[str, Any]:
-    if hasattr(tool, "name"):
-        return {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.parameters,
-            "strict": tool.strict,
-        }
-    return dict(tool)
-
-
-def _stable_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)

@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
+import pytest
+
+from alpha_agent.config import LLMContextConfig
 from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolChoice, LLMToolDefinitionInput
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.runtime.agent import AlphaAgent
+from alpha_agent.runtime.context_handover import DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import Tool, ToolResult
 from alpha_agent.tools.registry import ToolRegistry
@@ -17,7 +21,7 @@ def _store(tmp_path) -> StateStore:
     return store
 
 
-def test_agent_responds_and_persists_conversation_messages(tmp_path) -> None:
+def test_agent_responds_and_persists_session_messages(tmp_path) -> None:
     store = _store(tmp_path)
     agent = AlphaAgent(store=store, llm_provider=MockLLMProvider())
 
@@ -26,8 +30,9 @@ def test_agent_responds_and_persists_conversation_messages(tmp_path) -> None:
     assert result.session_id == "s1"
     assert result.response == "Mock response: I heard you say: hello."
     assert result.debug["note"] == "reactive cognition tick enabled; projections are Phase 02 stubs"
-    messages = store.list_conversation_messages("s1")
-    assert [message.role for message in messages] == ["user", "assistant"]
+    messages = store.list_session_messages("s1")
+    assert [message.kind for message in messages] == ["user_message", "assistant_message"]
+    assert [message.llm_role for message in messages] == ["user", "assistant"]
     assert messages[0].raw_content == "hello"
     assert messages[1].raw_content == result.response
     assert [trace.event_type for trace in store.list_runtime_traces("s1")] == [
@@ -36,7 +41,9 @@ def test_agent_responds_and_persists_conversation_messages(tmp_path) -> None:
     ]
 
 
-def test_agent_replays_transcript_without_foreground_duplicate_for_llm_input(tmp_path) -> None:
+def test_agent_replays_source_stream_without_foreground_duplicate_for_llm_input(
+    tmp_path,
+) -> None:
     store = _store(tmp_path)
     provider = _QueuedRecordingProvider(
         [
@@ -67,6 +74,25 @@ def test_agent_replays_transcript_without_foreground_duplicate_for_llm_input(tmp
     assert "Foreground:" not in rendered_contents
 
 
+def test_agent_two_turn_prompt_is_append_only_without_fixed_tail(tmp_path) -> None:
+    store = _store(tmp_path)
+    for index in range(1, 12):
+        store.append_session_message(
+            session_id="s1",
+            kind="user_message" if index % 2 else "assistant_message",
+            llm_role="user" if index % 2 else "assistant",
+            raw_content=f"old {index}",
+        )
+    provider = _RecordingProvider("done")
+    agent = AlphaAgent(store=store, llm_provider=provider)
+
+    agent.respond("new turn", session_id="s1")
+
+    first_call = provider.calls[0]
+    contents = [message.get("content") for message in first_call]
+    assert contents[1:] == [*(f"old {index}" for index in range(1, 12)), "new turn"]
+
+
 def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> None:
     store = _store(tmp_path)
     registry = ToolRegistry()
@@ -78,11 +104,11 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
 
     assert result.response == "final answer"
     assert result.debug["tool_call_count"] == 1
-    assert [message.role for message in store.list_conversation_messages("s1")] == [
-        "user",
-        "assistant",
-        "tool",
-        "assistant",
+    assert [message.kind for message in store.list_session_messages("s1")] == [
+        "user_message",
+        "assistant_message",
+        "tool_message",
+        "assistant_message",
     ]
     assert [trace.event_type for trace in store.list_runtime_traces("s1")] == [
         "llm.started",
@@ -116,8 +142,8 @@ def test_llm_debug_payloads_are_written_to_jsonl_not_database(tmp_path) -> None:
 
     assistant = [
         message
-        for message in store.list_conversation_messages("s1")
-        if message.role == "assistant"
+        for message in store.list_session_messages("s1")
+        if message.llm_role == "assistant"
     ][0]
     provider_metadata_json = json.dumps(assistant.provider_metadata, sort_keys=True)
     assert "secret response payload" not in provider_metadata_json
@@ -136,8 +162,6 @@ def test_llm_debug_payloads_are_written_to_jsonl_not_database(tmp_path) -> None:
 
 
 def test_agent_cancel_before_turn_raises_and_clears_flag(tmp_path) -> None:
-    import pytest
-
     store = _store(tmp_path)
     agent = AlphaAgent(store=store, llm_provider=MockLLMProvider())
     agent.cancel("s1")
@@ -147,6 +171,182 @@ def test_agent_cancel_before_turn_raises_and_clears_flag(tmp_path) -> None:
 
     assert agent.is_canceled("s1") is False
     assert store.list_runtime_traces("s1", event_type="turn.failed")
+
+
+def test_pending_user_too_large_rejected_without_persisting_message(tmp_path) -> None:
+    store = _store(tmp_path)
+    provider = _QueuedRecordingProvider(["should not be called"])
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        llm_context_config=_zero_reserve_context(),
+        max_context_tokens=4,
+    )
+
+    with pytest.raises(RuntimeError, match="pending user message exceeds"):
+        agent.respond("one two three four five six", session_id="s1")
+
+    assert provider.calls == []
+    assert store.list_session_messages("s1") == []
+
+
+def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="old source one two three four",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="old answer five six seven eight",
+    )
+    provider = _QueuedRecordingProvider(["pre-user handover", "final answer"])
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        llm_context_config=_compression_context(),
+        max_context_tokens=100,
+    )
+
+    result = agent.respond("pending user must stay out of compression", session_id="s1")
+
+    assert result.response == "final answer"
+    assert len(provider.calls) == 2
+    compression_call = provider.calls[0]
+    assert compression_call[0]["role"] == "system"
+    assert "Identity: Alpha Agent" in str(compression_call[0]["content"])
+    assert "old source one two three four" in str(compression_call)
+    assert "pending user must stay out of compression" not in str(compression_call)
+    assert DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in str(compression_call[-1]["content"])
+
+    persisted = store.list_session_messages("s1")
+    assert [message.kind for message in persisted] == [
+        "user_message",
+        "assistant_message",
+        "compressed_message",
+        "user_message",
+        "assistant_message",
+    ]
+    assert persisted[2].raw_content.startswith("<system-reminder>")
+    assert persisted[2].ordinal < persisted[3].ordinal
+    assert persisted[3].raw_content == "pending user must stay out of compression"
+    assert all(
+        DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in message.raw_content
+        for message in persisted
+    )
+
+
+def test_failed_pre_user_compression_does_not_persist_pending_user(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="old source one two three four",
+    )
+    before = store.list_session_messages("s1")
+    provider = _FailingOnceProvider()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        llm_context_config=_compression_context(),
+        max_context_tokens=100,
+    )
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        agent.respond("pending user must not be persisted", session_id="s1")
+
+    assert len(provider.calls) == 1
+    assert "pending user must not be persisted" not in str(provider.calls[0])
+    assert store.list_session_messages("s1") == before
+    assert [trace.event_type for trace in store.list_runtime_traces("s1")] == [
+        "handover_compression.started",
+        "handover_compression.failed",
+        "turn.failed",
+    ]
+
+
+def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    registry = ToolRegistry()
+    registry.register(_EchoTool())
+    provider = _ToolLoopCompressionProvider()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        tool_registry=registry,
+        llm_context_config=_compression_context(),
+        max_context_tokens=100,
+    )
+
+    result = agent.respond("use tool", session_id="s1")
+
+    assert result.response == "final answer"
+    assert len(provider.calls) == 3
+    first_call = provider.calls[0]
+    assert [message["role"] for message in first_call] == ["system", "user"]
+    assert "Identity: Alpha Agent" in str(first_call[0]["content"])
+    assert first_call[1]["content"] == "use tool"
+
+    compression_call = provider.calls[1]
+    assert [message["role"] for message in compression_call] == [
+        "system",
+        "user",
+        "assistant",
+        "tool",
+        "user",
+    ]
+    assert compression_call[0] == first_call[0]
+    assert compression_call[1]["content"] == "use tool"
+    assert compression_call[2]["tool_calls"][0]["id"] == "call_1"
+    assert compression_call[3]["tool_call_id"] == "call_1"
+    compression_tool_payload = json.loads(str(compression_call[3]["content"]))
+    assert compression_tool_payload == {
+        "content": "complete tool result: hello",
+        "metadata": {},
+        "name": "echo",
+    }
+    assert compression_call[-1]["role"] == "user"
+    assert DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in str(compression_call[-1]["content"])
+
+    next_call = provider.calls[2]
+    assert [message["role"] for message in next_call] == ["system", "user"]
+    assert next_call[0] == first_call[0]
+    assert next_call[1]["role"] == "user"
+    assert "tool-loop handover" in str(next_call[1]["content"])
+    assert DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in str(next_call)
+    assert "use tool" not in str(next_call)
+    assert "complete tool result: hello" not in str(next_call)
+    assert "call_1" not in str(next_call)
+
+    persisted = store.list_session_messages("s1")
+    assert [message.kind for message in persisted] == [
+        "user_message",
+        "assistant_message",
+        "tool_message",
+        "compressed_message",
+        "assistant_message",
+    ]
+    assert persisted[1].tool_calls[0]["id"] == "call_1"
+    assert persisted[2].tool_call_id == "call_1"
+    assert json.loads(persisted[2].raw_content) == {
+        "content": "complete tool result: hello",
+        "metadata": {},
+        "name": "echo",
+    }
+    assert persisted[3].raw_content.startswith("<system-reminder>")
+    assert persisted[3].raw_content.endswith("</system-reminder>")
+    assert persisted[3].compression_point_ordinal == persisted[2].ordinal
+    assert all(
+        DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in message.raw_content
+        for message in persisted
+    )
 
 
 class _RecordingProvider:
@@ -185,6 +385,24 @@ class _QueuedRecordingProvider:
         self.calls.append(messages)
         response = self.responses.pop(0)
         return LLMResponse(content=response, model="test", provider=self.name)
+
+
+class _FailingOnceProvider:
+    name = "failing"
+
+    def __init__(self) -> None:
+        self.calls: list[list[ChatMessage]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        del tools, tool_choice
+        self.calls.append(messages)
+        raise RuntimeError("provider failed")
 
 
 class _RawMetadataProvider:
@@ -245,9 +463,68 @@ class _ToolCallingProvider:
         return LLMResponse(content="final answer", model="test", provider=self.name)
 
 
+class _ToolLoopCompressionProvider:
+    name = "tool-compression-provider"
+
+    def __init__(self):
+        self.calls: list[list[ChatMessage]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        del tools, tool_choice
+        self.calls.append([dict(message) for message in messages])
+        if len(self.calls) == 1:
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "name": "echo",
+                        "arguments": {"text": "hello"},
+                        "raw_arguments": '{"text":"hello"}',
+                    }
+                ],
+            )
+        if DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in str(messages[-1].get("content")):
+            return LLMResponse(content="tool-loop handover", model="test", provider=self.name)
+        return LLMResponse(content="final answer", model="test", provider=self.name)
+
+
 class _EchoTool(Tool):
     name = "echo"
     description = "Echo input."
 
     def run(self, arguments):
-        return ToolResult(name=self.name, content=str(arguments["text"]), metadata={})
+        return ToolResult(
+            name=self.name,
+            content=f"complete tool result: {arguments['text']}",
+            metadata={},
+        )
+
+
+def _zero_reserve_context() -> LLMContextConfig:
+    return LLMContextConfig(
+        tool_truncate_threshold_ratio=1.0,
+        handover_compress_threshold_ratio=1.0,
+        minimum_remaining_tokens=0,
+        expected_output_reserve_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+
+def _compression_context() -> LLMContextConfig:
+    return LLMContextConfig(
+        tool_truncate_threshold_ratio=1.0,
+        handover_compress_threshold_ratio=0.01,
+        minimum_remaining_tokens=0,
+        expected_output_reserve_tokens=0,
+        safety_margin_tokens=0,
+    )

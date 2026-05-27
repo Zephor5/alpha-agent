@@ -6,8 +6,8 @@ from alpha_agent.cognition.render.evidence import EvidenceRenderer
 from alpha_agent.cognition.render.graph_snapshot import GraphSnapshotRenderer
 from alpha_agent.cognition.render.text_chat import (
     TextChatRenderer,
-    conversation_message_to_chat,
     estimate_chat_tokens,
+    source_message_to_chat,
     wrap_system_reminder,
 )
 from alpha_agent.cognition.render.view import CognitionView
@@ -21,7 +21,7 @@ __all__ = [
     "RenderResult",
     "Renderer",
     "TextChatRenderer",
-    "conversation_message_to_chat",
     "estimate_chat_tokens",
+    "source_message_to_chat",
     "wrap_system_reminder",
 ]

@@ -181,12 +181,13 @@ with `ALPHA_CONFIG_PATH`.
 
 Use `alpha config set <section.key> <value>` for supported keys such as
 `llm.provider`, `llm.model`, `llm.debug_logging`, `deepseek.api_key`,
-`codex.access_token`, `context.max_prompt_tokens`, and
-`context.recent_tail_messages`.
+`codex.access_token`, `llm.context.expected_output_reserve_tokens`, and
+`llm.providers.deepseek.max_context_tokens`.
 Secret values are masked by `alpha config get` unless you pass
 `--reveal-secret`.
 Config loading applies the same validation as `alpha config set`: token and
-count limits must be positive integers.
+count limits must be positive integers, and context threshold ratios must be in
+the `(0, 1]` range.
 
 Environment variables and `.env` still work as overrides for one-off runs,
 deployment, and secrets. Precedence is:
@@ -209,6 +210,20 @@ daemon_status_path = "~/.alpha-agent/daemon-status.json"
 provider = "mock"
 model = "" # empty means "use the selected provider's default"
 
+[llm.context]
+tool_truncate_threshold_ratio = 0.60
+handover_compress_threshold_ratio = 0.90
+minimum_remaining_tokens = 10000
+tool_string_truncate_chars = 300
+expected_output_reserve_tokens = 4096
+safety_margin_tokens = 1024
+
+[llm.providers.openai-compatible]
+max_context_tokens = 258400
+
+[llm.providers.deepseek]
+max_context_tokens = 1000000
+
 [compatible]
 base_url = "https://api.openai.com/v1"
 api_key = ""
@@ -219,10 +234,6 @@ reasoning_enabled = true
 
 [codex]
 access_token = ""
-
-[context]
-max_prompt_tokens = 6000
-recent_tail_messages = 8
 
 [cognition.drive]
 enabled = false
@@ -254,8 +265,18 @@ Useful environment overrides:
 - `ALPHA_DEEPSEEK_API_KEY`: DeepSeek API key when `ALPHA_LLM_PROVIDER=deepseek`.
 - `ALPHA_CODEX_ACCESS_TOKEN`: Optional Codex OAuth bearer token. If omitted,
   Alpha tries `CODEX_HOME/auth.json` or `~/.codex/auth.json`.
-- `ALPHA_CONTEXT_MAX_PROMPT_TOKENS`: Prompt budget for the current turn.
-- `ALPHA_CONTEXT_RECENT_TAIL_MESSAGES`: Uncompressed transcript tail to preserve.
+- `ALPHA_LLM_CONTEXT_TOOL_TRUNCATE_THRESHOLD_RATIO`: Tool replay payload
+  truncation threshold. Defaults to `0.60`.
+- `ALPHA_LLM_CONTEXT_HANDOVER_COMPRESS_THRESHOLD_RATIO`: LLM handover
+  compression threshold. Defaults to `0.90`.
+- `ALPHA_LLM_CONTEXT_MINIMUM_REMAINING_TOKENS`: Minimum remaining context budget.
+  Defaults to `10000`.
+- `ALPHA_LLM_CONTEXT_TOOL_STRING_TRUNCATE_CHARS`: Tool input/output string
+  truncation length. Defaults to `300`.
+- `ALPHA_LLM_CONTEXT_EXPECTED_OUTPUT_RESERVE_TOKENS`: Reserved output budget.
+  Defaults to `4096`.
+- `ALPHA_LLM_CONTEXT_SAFETY_MARGIN_TOKENS`: Context estimate safety margin.
+  Defaults to `1024`.
 - `ALPHA_COGNITION_DRIVE_ENABLED`: Enables scheduled Drive Loop use when a
   caller wires it in. Defaults to `false`.
 - `ALPHA_COGNITION_DRIVE_INTERVAL_SECONDS`: Global Drive Loop interval setting.
@@ -283,8 +304,8 @@ only an override.
 
 The current SQLite state baseline is deliberately narrow:
 
-- `conversation_messages`: append-only session transcript used for current
-  successful turn context.
+- `session_messages`: append-only source stream for user, assistant, tool, and
+  compressed handover messages used to assemble LLM-visible session context.
 - `runtime_traces`: operational turn, provider, and tool traces.
 - `gateway_session_mappings`: platform/session routing state.
 - `gateway_dedup`: inbound gateway deduplication state.

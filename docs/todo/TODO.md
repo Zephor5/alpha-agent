@@ -128,7 +128,7 @@ Current `AlphaAgent.respond()` is a clean MVP. The next step is to keep it
 explicit while making it useful for real channels and longer tasks.
 
 - [x] Split the turn pipeline into named services without hiding flow:
-  - append conversation message.
+  - append session source message.
   - session context projection/compression.
   - recent session state loading.
   - prompt build.
@@ -163,7 +163,7 @@ P1 Agent Loop implementation notes:
 - The turn pipeline is split into explicit runtime methods while keeping
   `AlphaAgent.respond()` as the visible orchestration path.
 - User, assistant, and tool transcript content is stored in
-  `conversation_messages`; operational diagnostics are stored as
+  `session_messages`; operational diagnostics are stored as
   `runtime_traces`.
 - Tool execution remains bounded and explicit. Caller-supplied tool calls are
   local one-shot executions. Provider-returned OpenAI-compatible tool calls run
@@ -191,9 +191,9 @@ P1 Agent Loop implementation notes:
   --session ...` can include gateway source fields and prints the built prompt
   from the current state baseline without writing runtime access rows.
 - Prompt construction keeps only the stable identity as a `system` message,
-  followed by recent conversation messages and the current user message. There
-  is no long-term recall, extraction, candidate lifecycle, retrieval ranking, or
-  consolidation in the Phase 00 baseline.
+  followed by source stream messages after the latest compressed handover and
+  the current user message. There is no long-term recall, extraction, candidate
+  lifecycle, retrieval ranking, or consolidation in the Phase 00 baseline.
 
 ## P1: Feishu Integration
 

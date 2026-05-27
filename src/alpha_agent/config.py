@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +29,21 @@ debug_logging = false
 base_url = "https://api.openai.com/v1"
 api_key = ""
 
-[context]
-recent_tail_messages = 8
+[llm.context]
+# Active runtime context maintenance settings.
+# Tool payload truncation runs before LLM handover compression.
+tool_truncate_threshold_ratio = 0.60
+handover_compress_threshold_ratio = 0.90
+minimum_remaining_tokens = 10000
+tool_string_truncate_chars = 300
+expected_output_reserve_tokens = 4096
+safety_margin_tokens = 1024
+
+[llm.providers.openai-compatible]
+max_context_tokens = 258400
+
+[llm.providers.deepseek]
+max_context_tokens = 1000000
 
 [cognition.consolidation]
 enabled = true
@@ -68,9 +81,16 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "llm.provider": str,
     "llm.model": str,
     "llm.debug_logging": bool,
+    "llm.context.tool_truncate_threshold_ratio": float,
+    "llm.context.handover_compress_threshold_ratio": float,
+    "llm.context.minimum_remaining_tokens": int,
+    "llm.context.tool_string_truncate_chars": int,
+    "llm.context.expected_output_reserve_tokens": int,
+    "llm.context.safety_margin_tokens": int,
+    "llm.providers.openai-compatible.max_context_tokens": int,
+    "llm.providers.deepseek.max_context_tokens": int,
     "compatible.base_url": str,
     "compatible.api_key": str,
-    "context.recent_tail_messages": int,
     "cognition.drive.enabled": bool,
     "cognition.drive.interval_seconds": int,
     "cognition.drive.goal_cooldown_seconds": int,
@@ -99,7 +119,17 @@ POSITIVE_INT_CONFIG_KEYS = {
     "cognition.drive.active_goal_limit",
     "cognition.drive.goal_cooldown_seconds",
     "cognition.drive.interval_seconds",
-    "context.recent_tail_messages",
+    "llm.context.minimum_remaining_tokens",
+    "llm.context.tool_string_truncate_chars",
+    "llm.context.expected_output_reserve_tokens",
+    "llm.context.safety_margin_tokens",
+    "llm.providers.openai-compatible.max_context_tokens",
+    "llm.providers.deepseek.max_context_tokens",
+}
+
+RATIO_CONFIG_KEYS = {
+    "llm.context.tool_truncate_threshold_ratio",
+    "llm.context.handover_compress_threshold_ratio",
 }
 
 SECRET_CONFIG_KEYS = {
@@ -107,6 +137,26 @@ SECRET_CONFIG_KEYS = {
     "deepseek.api_key",
     "codex.access_token",
 }
+
+
+DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS = {
+    "mock": 258400,
+    "openai-compatible": 258400,
+    "deepseek": 1000000,
+    "codex": 258400,
+}
+
+
+@dataclass(frozen=True)
+class LLMContextConfig:
+    """Context budgeting thresholds and reserves for LLM calls."""
+
+    tool_truncate_threshold_ratio: float = 0.60
+    handover_compress_threshold_ratio: float = 0.90
+    minimum_remaining_tokens: int = 10000
+    tool_string_truncate_chars: int = 300
+    expected_output_reserve_tokens: int = 4096
+    safety_margin_tokens: int = 1024
 
 
 @dataclass(frozen=True)
@@ -121,9 +171,12 @@ class AlphaConfig:
     llm_provider: str = "mock"
     llm_model: str = ""
     llm_debug_logging: bool = False
+    llm_context: LLMContextConfig = field(default_factory=LLMContextConfig)
+    llm_provider_max_context_tokens: dict[str, int] = field(
+        default_factory=lambda: dict(DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS)
+    )
     compatible_base_url: str | None = None
     compatible_api_key: str | None = None
-    context_recent_tail_messages: int = 8
     cognition_consolidation_enabled: bool = True
     cognition_consolidation_interval_seconds: int = 300
     cognition_consolidation_judgment_repeat_window: int = 20
@@ -142,6 +195,15 @@ class AlphaConfig:
     deepseek_reasoning_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
     codex_access_token: str | None = None
+
+    def max_context_tokens_for_provider(self, provider_name: str | None = None) -> int:
+        """Return the configured max context tokens for a normalized provider name."""
+
+        provider = _normalize_provider_context_key(provider_name or self.llm_provider)
+        return self.llm_provider_max_context_tokens.get(
+            provider,
+            DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS["openai-compatible"],
+        )
 
 
 def default_config_path() -> Path:
@@ -210,7 +272,11 @@ def load_config(
         load_dotenv(env_file, override=False)
 
     config_data = _load_toml_config(config_file)
-    context = _section(config_data, "context")
+    llm = _section(config_data, "llm")
+    llm_context = llm.get("context")
+    llm_context = llm_context if isinstance(llm_context, dict) else {}
+    llm_providers = llm.get("providers")
+    llm_providers = llm_providers if isinstance(llm_providers, dict) else {}
     cognition = _section(config_data, "cognition")
     consolidation = cognition.get("consolidation")
     consolidation = consolidation if isinstance(consolidation, dict) else {}
@@ -276,8 +342,35 @@ def load_config(
         llm_model=_env_or_config("ALPHA_LLM_MODEL", config_data, "llm", "model", "") or "",
         llm_debug_logging=_bool_env(
             "ALPHA_LLM_DEBUG_LOGGING",
-            _bool_value(_section(config_data, "llm").get("debug_logging"), False),
+            _bool_value(llm.get("debug_logging"), False),
         ),
+        llm_context=LLMContextConfig(
+            tool_truncate_threshold_ratio=_float_env(
+                "ALPHA_LLM_CONTEXT_TOOL_TRUNCATE_THRESHOLD_RATIO",
+                _float_value(llm_context.get("tool_truncate_threshold_ratio"), 0.60),
+            ),
+            handover_compress_threshold_ratio=_float_env(
+                "ALPHA_LLM_CONTEXT_HANDOVER_COMPRESS_THRESHOLD_RATIO",
+                _float_value(llm_context.get("handover_compress_threshold_ratio"), 0.90),
+            ),
+            minimum_remaining_tokens=_int_env(
+                "ALPHA_LLM_CONTEXT_MINIMUM_REMAINING_TOKENS",
+                _int_value(llm_context.get("minimum_remaining_tokens"), 10000),
+            ),
+            tool_string_truncate_chars=_int_env(
+                "ALPHA_LLM_CONTEXT_TOOL_STRING_TRUNCATE_CHARS",
+                _int_value(llm_context.get("tool_string_truncate_chars"), 300),
+            ),
+            expected_output_reserve_tokens=_int_env(
+                "ALPHA_LLM_CONTEXT_EXPECTED_OUTPUT_RESERVE_TOKENS",
+                _int_value(llm_context.get("expected_output_reserve_tokens"), 4096),
+            ),
+            safety_margin_tokens=_int_env(
+                "ALPHA_LLM_CONTEXT_SAFETY_MARGIN_TOKENS",
+                _int_value(llm_context.get("safety_margin_tokens"), 1024),
+            ),
+        ),
+        llm_provider_max_context_tokens=_provider_max_context_tokens(llm_providers),
         compatible_base_url=_env_or_config(
             "ALPHA_COMPATIBLE_BASE_URL",
             config_data,
@@ -289,10 +382,6 @@ def load_config(
             config_data,
             "compatible",
             "api_key",
-        ),
-        context_recent_tail_messages=_int_env(
-            "ALPHA_CONTEXT_RECENT_TAIL_MESSAGES",
-            _int_value(context.get("recent_tail_messages"), 8),
         ),
         cognition_consolidation_enabled=_bool_env(
             "ALPHA_COGNITION_CONSOLIDATION_ENABLED",
@@ -395,6 +484,11 @@ def _parse_config_value(raw_value: str, expected_type: type) -> Any:
             return int(raw_value)
         except ValueError as exc:
             raise ValueError(f"Expected integer value, got: {raw_value}") from exc
+    if expected_type is float:
+        try:
+            return float(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"Expected float value, got: {raw_value}") from exc
     return raw_value
 
 
@@ -408,14 +502,29 @@ def _validate_config_value(key: str, value: Any) -> Any:
         return normalized
     if key in POSITIVE_INT_CONFIG_KEYS and isinstance(value, int) and value <= 0:
         raise ValueError(f"{key} must be greater than 0")
+    if key in RATIO_CONFIG_KEYS:
+        numeric = float(value)
+        if numeric <= 0 or numeric > 1:
+            raise ValueError(f"{key} must be greater than 0 and at most 1")
     return value
 
 
 def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
     values = {
         "llm.provider": config.llm_provider,
+        "llm.context.tool_truncate_threshold_ratio": (
+            config.llm_context.tool_truncate_threshold_ratio
+        ),
+        "llm.context.handover_compress_threshold_ratio": (
+            config.llm_context.handover_compress_threshold_ratio
+        ),
+        "llm.context.minimum_remaining_tokens": config.llm_context.minimum_remaining_tokens,
+        "llm.context.tool_string_truncate_chars": config.llm_context.tool_string_truncate_chars,
+        "llm.context.expected_output_reserve_tokens": (
+            config.llm_context.expected_output_reserve_tokens
+        ),
+        "llm.context.safety_margin_tokens": config.llm_context.safety_margin_tokens,
         "deepseek.reasoning_effort": config.deepseek_reasoning_effort or "",
-        "context.recent_tail_messages": config.context_recent_tail_messages,
         "cognition.drive.enabled": config.cognition_drive_enabled,
         "cognition.drive.interval_seconds": config.cognition_drive_interval_seconds,
         "cognition.drive.goal_cooldown_seconds": config.cognition_drive_goal_cooldown_seconds,
@@ -423,6 +532,9 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
     }
     for key, value in values.items():
         _validate_config_value(key, value)
+    for provider, max_context_tokens in config.llm_provider_max_context_tokens.items():
+        if max_context_tokens <= 0:
+            raise ValueError(f"llm.providers.{provider}.max_context_tokens must be greater than 0")
     positive_values = (
         (
             "cognition.consolidation.interval_seconds",
@@ -477,8 +589,10 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
     sections = (
         "runtime",
         "llm",
+        "llm.context",
+        "llm.providers.openai-compatible",
+        "llm.providers.deepseek",
         "compatible",
-        "context",
         "cognition.consolidation",
         "cognition.drive",
         "deepseek",
@@ -495,6 +609,8 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
             continue
         lines.append(f"[{section_name}]")
         for field_name, value in section.items():
+            if isinstance(value, dict):
+                continue
             lines.append(f"{field_name} = {_toml_literal(value)}")
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -504,7 +620,7 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
 def _toml_literal(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
-    if isinstance(value, int):
+    if isinstance(value, int | float):
         return str(value)
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
@@ -532,6 +648,29 @@ def _int_value(value: Any, default: int) -> int:
     raise ValueError(f"Expected integer value, got: {value}")
 
 
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"Expected float value for {name}, got: {raw}") from exc
+
+
+def _float_value(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError as exc:
+            raise ValueError(f"Expected float value, got: {value}") from exc
+    raise ValueError(f"Expected float value, got: {value}")
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -554,6 +693,28 @@ def _load_toml_config(config_file: str | Path | None) -> dict[str, Any]:
     with path.open("rb") as handle:
         loaded = tomllib.load(handle)
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _provider_max_context_tokens(providers: dict[str, Any]) -> dict[str, int]:
+    values = dict(DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS)
+    for provider_name, provider_config in providers.items():
+        if not isinstance(provider_config, dict):
+            continue
+        normalized = _normalize_provider_context_key(str(provider_name))
+        values[normalized] = _int_value(
+            provider_config.get("max_context_tokens"),
+            values.get(normalized, DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS["openai-compatible"]),
+        )
+    return values
+
+
+def _normalize_provider_context_key(provider_name: str) -> str:
+    normalized = provider_name.strip().lower()
+    if normalized in {"openai", "compatible"}:
+        return "openai-compatible"
+    if normalized in {"openai-codex", "openai_codex"}:
+        return "codex"
+    return normalized
 
 
 def _section(config_data: dict[str, Any], name: str) -> dict[str, Any]:
