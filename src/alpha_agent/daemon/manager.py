@@ -16,6 +16,7 @@ from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
+from alpha_agent.tools.default import build_default_tool_registry
 
 
 @dataclass(slots=True)
@@ -64,6 +65,7 @@ class AgentFactory:
         return AlphaAgent(
             store=self.store,
             llm_provider=provider,
+            tool_registry=build_default_tool_registry(self.config),
             llm_debug_logging=self.config.llm_debug_logging,
             llm_trace_log_path=Path(self.config.log_dir) / "llm.jsonl",
             llm_context_config=self.config.llm_context,

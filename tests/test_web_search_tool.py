@@ -1,0 +1,173 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+
+from alpha_agent.config import AlphaConfig
+from alpha_agent.tools.default import build_default_tool_registry
+from alpha_agent.tools.web_search import TavilyWebSearchTool
+
+
+def test_tavily_web_search_tool_exposes_general_search_schema() -> None:
+    tool = TavilyWebSearchTool(api_key="tvly-test")
+
+    assert tool.name == "web_search"
+    assert "Tavily" not in tool.description
+    assert tool.parameters["required"] == ["query"]
+    assert set(tool.parameters["properties"]) >= {
+        "query",
+        "search_depth",
+        "max_results",
+        "time_range",
+        "start_date",
+        "end_date",
+        "country",
+        "include_domains",
+        "exclude_domains",
+    }
+
+
+def test_tavily_web_search_tool_posts_sanitized_request_and_formats_results() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json={
+                "query": "alpha agent web search",
+                "answer": "A short synthesized answer.",
+                "results": [
+                    {
+                        "title": "Result One",
+                        "url": "https://example.com/one",
+                        "content": "Useful snippet.",
+                        "score": 0.82,
+                        "raw_content": "ignored raw content",
+                    },
+                    {
+                        "title": "Result Two",
+                        "url": "https://example.com/two",
+                        "content": "Another snippet.",
+                    },
+                ],
+                "response_time": 1.23,
+                "request_id": "req_123",
+                "usage": {"credits": 2},
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    tool = TavilyWebSearchTool(api_key="tvly-test", client=client)
+
+    result = tool.run(
+        {
+            "query": "alpha agent web search",
+            "search_depth": "advanced",
+            "max_results": 6,
+            "time_range": "day",
+            "start_date": "2026-05-26",
+            "end_date": "2026-05-27",
+            "country": "united states",
+            "include_domains": ["example.com", ""],
+            "exclude_domains": ["spam.example"],
+            "include_answer": True,
+            "unknown": "dropped",
+        }
+    )
+
+    assert captured == {
+        "url": "https://api.tavily.com/search",
+        "authorization": "Bearer tvly-test",
+        "body": {
+            "query": "alpha agent web search",
+            "search_depth": "advanced",
+            "max_results": 6,
+            "time_range": "day",
+            "start_date": "2026-05-26",
+            "end_date": "2026-05-27",
+            "country": "united states",
+            "include_domains": ["example.com"],
+            "exclude_domains": ["spam.example"],
+            "include_answer": True,
+            "include_raw_content": False,
+        },
+    }
+    assert result.name == "web_search"
+    assert json.loads(result.content) == {
+        "answer": "A short synthesized answer.",
+        "query": "alpha agent web search",
+        "request_id": "req_123",
+        "response_time": 1.23,
+        "results": [
+            {
+                "content": "Useful snippet.",
+                "score": 0.82,
+                "title": "Result One",
+                "url": "https://example.com/one",
+            },
+            {
+                "content": "Another snippet.",
+                "score": None,
+                "title": "Result Two",
+                "url": "https://example.com/two",
+            },
+        ],
+    }
+    assert result.metadata == {
+        "provider": "tavily",
+        "request_id": "req_123",
+        "result_count": 2,
+        "usage": {"credits": 2},
+    }
+
+
+@pytest.mark.parametrize(
+    ("arguments", "match"),
+    [
+        ({}, "query is required"),
+        ({"query": "x", "search_depth": "deep"}, "search_depth must be one of"),
+        ({"query": "x", "max_results": 0}, "max_results must be between 1 and 20"),
+        ({"query": "x", "time_range": "hour"}, "time_range must be one of"),
+        ({"query": "x", "start_date": "05/26/2026"}, "start_date must use YYYY-MM-DD"),
+    ],
+)
+def test_tavily_web_search_tool_validates_arguments(
+    arguments: dict[str, object],
+    match: str,
+) -> None:
+    tool = TavilyWebSearchTool(api_key="tvly-test")
+
+    with pytest.raises(ValueError, match=match):
+        tool.run(arguments)
+
+
+def test_tavily_web_search_tool_requires_api_key() -> None:
+    tool = TavilyWebSearchTool(api_key="")
+
+    with pytest.raises(ValueError, match="tavily.api_key"):
+        tool.run({"query": "alpha"})
+
+
+def test_default_tool_registry_includes_web_search_only_when_tavily_key_is_configured(
+    tmp_path: Path,
+) -> None:
+    empty_config = AlphaConfig(
+        db_path=tmp_path / "empty.db",
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway.json",
+    )
+    configured = AlphaConfig(
+        db_path=tmp_path / "configured.db",
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway.json",
+        tavily_api_key="tvly-test",
+    )
+
+    assert build_default_tool_registry(empty_config).names() == []
+    assert build_default_tool_registry(configured).names() == ["web_search"]

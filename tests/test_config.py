@@ -47,6 +47,9 @@ max_context_tokens = 900000
 api_key = "deepseek-key"
 reasoning_enabled = false
 reasoning_effort = "high"
+
+[tavily]
+api_key = "tvly-file-key"
 """,
         encoding="utf-8",
     )
@@ -75,6 +78,7 @@ reasoning_effort = "high"
     assert config.compatible_api_key == "compatible-key"
     assert config.deepseek_reasoning_enabled is False
     assert config.deepseek_reasoning_effort == "high"
+    assert config.tavily_api_key == "tvly-file-key"
     assert config.llm_debug_logging is True
     assert config.cognition_drive_enabled is False
     assert config.cognition_drive_interval_seconds == 300
@@ -98,6 +102,9 @@ api_key = "from-file"
 [compatible]
 base_url = "from-file"
 api_key = "compatible-file-key"
+
+[tavily]
+api_key = "tvly-file-key"
 """,
         encoding="utf-8",
     )
@@ -106,6 +113,7 @@ api_key = "compatible-file-key"
     monkeypatch.setenv("ALPHA_DEEPSEEK_API_KEY", "from-env")
     monkeypatch.setenv("ALPHA_COMPATIBLE_BASE_URL", "from-env")
     monkeypatch.setenv("ALPHA_COMPATIBLE_API_KEY", "compatible-env-key")
+    monkeypatch.setenv("ALPHA_TAVILY_API_KEY", "tvly-env-key")
 
     config = load_config(env_file=None, config_file=config_path)
 
@@ -114,6 +122,20 @@ api_key = "compatible-file-key"
     assert config.deepseek_api_key == "from-env"
     assert config.compatible_base_url == "from-env"
     assert config.compatible_api_key == "compatible-env-key"
+    assert config.tavily_api_key == "tvly-env-key"
+
+
+def test_load_config_accepts_generic_tavily_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-generic-key")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.tavily_api_key == "tvly-generic-key"
 
 
 def test_write_default_config_is_non_destructive(tmp_path: Path) -> None:
@@ -177,6 +199,7 @@ def test_config_cli_set_and_get(
         app,
         ["config", "set", "llm.context.expected_output_reserve_tokens", "2048"],
     )
+    set_tavily = runner.invoke(app, ["config", "set", "tavily.api_key", "tvly-test"])
     set_provider_limit = runner.invoke(
         app,
         ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
@@ -186,6 +209,7 @@ def test_config_cli_set_and_get(
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
     assert set_context.exit_code == 0
+    assert set_tavily.exit_code == 0
     assert set_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
     assert "codex" in get_provider.output
@@ -194,6 +218,7 @@ def test_config_cli_set_and_get(
     assert config.llm_debug_logging is True
     assert config.llm_context.expected_output_reserve_tokens == 2048
     assert config.max_context_tokens_for_provider("deepseek") == 900000
+    assert config.tavily_api_key == "tvly-test"
 
 
 def test_config_set_preserves_cognition_consolidation_section(
@@ -422,5 +447,21 @@ def test_read_config_value_masks_secret(tmp_path: Path) -> None:
     assert result.exit_code == 0
 
     value = read_config_value("deepseek.api_key", config_path=config_path, reveal_secret=False)
+
+    assert value == "***"
+
+
+def test_read_config_value_masks_tavily_secret(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_default_config(config_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["config", "set", "tavily.api_key", "secret-value"],
+        env={"ALPHA_CONFIG_PATH": str(config_path)},
+    )
+    assert result.exit_code == 0
+
+    value = read_config_value("tavily.api_key", config_path=config_path, reveal_secret=False)
 
     assert value == "***"

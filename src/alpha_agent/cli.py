@@ -92,7 +92,7 @@ from alpha_agent.runtime.session import new_session_id
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.skills.manager import SkillManager
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_default_tool_registry
 
 console = Console()
 app = typer.Typer(help="Alpha Agent cognition runtime.")
@@ -949,7 +949,7 @@ def cognition_drive(
         log,
         projections,
         llm=build_provider(config),
-        tools=ToolRegistry(),
+        tools=build_default_tool_registry(config),
         emitter=emitter,
     )
     report = DriveLoop(

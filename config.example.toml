@@ -60,3 +60,7 @@ reasoning_effort = ""
 
 [codex]
 access_token = ""
+
+[tavily]
+# Enables the built-in web_search tool when set.
+api_key = ""

@@ -181,7 +181,8 @@ with `ALPHA_CONFIG_PATH`.
 
 Use `alpha config set <section.key> <value>` for supported keys such as
 `llm.provider`, `llm.model`, `llm.debug_logging`, `deepseek.api_key`,
-`codex.access_token`, `llm.context.expected_output_reserve_tokens`, and
+`codex.access_token`, `tavily.api_key`,
+`llm.context.expected_output_reserve_tokens`, and
 `llm.providers.deepseek.max_context_tokens`.
 Secret values are masked by `alpha config get` unless you pass
 `--reveal-secret`.
@@ -235,6 +236,9 @@ reasoning_enabled = true
 [codex]
 access_token = ""
 
+[tavily]
+api_key = ""
+
 [cognition.drive]
 enabled = false
 interval_seconds = 300
@@ -265,6 +269,9 @@ Useful environment overrides:
 - `ALPHA_DEEPSEEK_API_KEY`: DeepSeek API key when `ALPHA_LLM_PROVIDER=deepseek`.
 - `ALPHA_CODEX_ACCESS_TOKEN`: Optional Codex OAuth bearer token. If omitted,
   Alpha tries `CODEX_HOME/auth.json` or `~/.codex/auth.json`.
+- `ALPHA_TAVILY_API_KEY`: Tavily API key. Alpha also accepts `TAVILY_API_KEY`.
+  When set, Alpha registers the provider-backed `web_search` tool for
+  daemon-owned agent turns.
 - `ALPHA_LLM_CONTEXT_TOOL_TRUNCATE_THRESHOLD_RATIO`: Tool replay payload
   truncation threshold. Defaults to `0.60`.
 - `ALPHA_LLM_CONTEXT_HANDOVER_COMPRESS_THRESHOLD_RATIO`: LLM handover
@@ -299,6 +306,15 @@ ALPHA_LLM_PROVIDER=codex uv run alpha ask "hello"
 Codex uses OAuth-style bearer credentials. The simplest path is to log in with
 Codex CLI first so `~/.codex/auth.json` exists; `ALPHA_CODEX_ACCESS_TOKEN` is
 only an override.
+
+The built-in `web_search` tool is available when `tavily.api_key`,
+`ALPHA_TAVILY_API_KEY`, or `TAVILY_API_KEY` is configured:
+
+```bash
+uv run alpha config set tavily.api_key tvly-...
+uv run alpha daemon stop
+uv run alpha daemon start
+```
 
 ## Runtime State
 

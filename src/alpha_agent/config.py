@@ -70,6 +70,9 @@ reasoning_effort = ""
 
 [codex]
 access_token = ""
+
+[tavily]
+api_key = ""
 """
 
 CONFIG_KEY_TYPES: dict[str, type] = {
@@ -99,6 +102,7 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "deepseek.reasoning_enabled": bool,
     "deepseek.reasoning_effort": str,
     "codex.access_token": str,
+    "tavily.api_key": str,
 }
 
 CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
@@ -136,6 +140,7 @@ SECRET_CONFIG_KEYS = {
     "compatible.api_key",
     "deepseek.api_key",
     "codex.access_token",
+    "tavily.api_key",
 }
 
 
@@ -195,6 +200,7 @@ class AlphaConfig:
     deepseek_reasoning_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
     codex_access_token: str | None = None
+    tavily_api_key: str | None = None
 
     def max_context_tokens_for_provider(self, provider_name: str | None = None) -> int:
         """Return the configured max context tokens for a normalized provider name."""
@@ -283,6 +289,7 @@ def load_config(
     drive = cognition.get("drive")
     drive = drive if isinstance(drive, dict) else {}
     deepseek = _section(config_data, "deepseek")
+    tavily = _section(config_data, "tavily")
 
     config = AlphaConfig(
         db_path=Path(
@@ -460,6 +467,11 @@ def load_config(
             or os.getenv("ALPHA_CODEX_API_KEY")
             or _string_setting(config_data, "codex", "access_token")
         ),
+        tavily_api_key=(
+            os.getenv("ALPHA_TAVILY_API_KEY")
+            or os.getenv("TAVILY_API_KEY")
+            or str(tavily.get("api_key") or "")
+        ),
     )
     return _validate_loaded_config(config)
 
@@ -597,6 +609,7 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         "cognition.drive",
         "deepseek",
         "codex",
+        "tavily",
     )
     lines = [
         "# Alpha Agent local configuration.",

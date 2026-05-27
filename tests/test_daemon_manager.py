@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
-from alpha_agent.daemon.manager import AgentManager
+from alpha_agent.config import AlphaConfig
+from alpha_agent.daemon.manager import AgentFactory, AgentManager
+from alpha_agent.state.store import StateStore
 
 
 class _FakeFactory:
@@ -85,6 +88,21 @@ def test_agent_manager_evicts_least_recently_used_agent_when_full() -> None:
     assert manager.get_or_create("s1") is first
     assert manager.get_or_create("s2") not in {first, second, third}
     assert len(_cached_session_ids(manager)) == 2
+
+
+def test_agent_factory_registers_configured_default_tools(tmp_path: Path) -> None:
+    config = AlphaConfig(
+        db_path=tmp_path / "alpha.db",
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway-status.json",
+        tavily_api_key="tvly-test",
+    )
+    store = StateStore(config.db_path)
+    store.initialize()
+
+    agent = AgentFactory(config, store).create()
+
+    assert agent.tool_registry.names() == ["web_search"]
 
 
 class _MonotonicClock:
