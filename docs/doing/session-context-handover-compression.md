@@ -13,8 +13,9 @@ message kinds.
 Compression is not a separate state table and does not rewrite the whole
 session. A successful LLM handover compression appends one special
 `compressed_message` source record. Future LLM context assembly consumes the
-latest valid `compressed_message` and skips older source messages that it
-replaces. Cognition source mapping ignores `compressed_message` by default.
+latest `compressed_message` for the session and skips older source messages
+that it replaces. Cognition source mapping ignores `compressed_message` by
+default.
 
 Tool payload truncation is a separate, lower-cost maintenance step. It directly
 normalizes source tool payloads because large tool inputs/results are often
@@ -41,7 +42,9 @@ source session messages, not from foreground.
 
 ## Source Message Model
 
-The source message stream is append-only by ordinal. It should support these
+The source message stream is append-only by ordinal. Append-only here means
+message order and identity are stable; tool replay payload truncation below is
+the only planned in-place content normalization. The stream should support these
 message kinds:
 
 - `user_message`: original user input.
@@ -55,9 +58,10 @@ context projection and skipped by cognition projections by default. A later
 cognition layer may explicitly read `compressed_message` as evidence for
 higher-level facts, but that is a separate extraction rule.
 
-Tool truncation is the only planned in-place mutation of source content. It is
-allowed only for tool input/output payloads and must mark the resulting content
-as truncated.
+Tool truncation is the only planned in-place mutation of source content. Here
+source content means durable replay records for original tool input and output.
+Those tool input/output records are JSON structures; truncation deep-walks the
+JSON and rewrites only string fields inside those JSON structures.
 
 Suggested source schema:
 
@@ -70,18 +74,26 @@ CREATE TABLE session_messages (
     llm_role TEXT,
     raw_content TEXT NOT NULL,
     model_content TEXT,
+    tool_call_id TEXT,
+    tool_calls TEXT NOT NULL DEFAULT '[]',
+    tool_result_id TEXT,
+    provider_metadata TEXT NOT NULL DEFAULT '{}',
+    source_metadata TEXT NOT NULL DEFAULT '{}',
     compression_point_ordinal INTEGER,
     compression_version TEXT,
-    status TEXT NOT NULL DEFAULT 'active',
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT,
-    UNIQUE(session_id, ordinal)
+    UNIQUE(session_id, ordinal),
+    CHECK (ordinal >= 1)
 );
 ```
 
 Existing `conversation_messages` can be directly refactored into this shape. The
-project does not require database compatibility.
+project does not require database compatibility. The source model must preserve
+complete tool replay data (`tool_call_id`, assistant `tool_calls`, and
+`tool_result_id`) and keep provider metadata, source metadata, and general
+metadata separate.
 
 ## Provider Context Budget
 
@@ -114,6 +126,10 @@ max_context_tokens = 258400
 max_context_tokens = 1000000
 ```
 
+If per-model overrides become necessary, add them explicitly under the provider
+configuration. The numeric values above are deployment defaults, not universal
+provider guarantees.
+
 Budget terms:
 
 ```text
@@ -126,6 +142,14 @@ used_context =
 remaining_context = max_context_tokens - used_context
 ```
 
+Initial token estimation should be simple and deterministic:
+
+- English-like text counts by word count.
+- Chinese text counts by CJK character count.
+- Mixed text adds both counts.
+- JSON payloads and tool schemas are serialized deterministically and estimated
+  with the same text rule.
+
 ## Tool Context Truncation
 
 When projected context length exceeds 60% of provider max context, run tool
@@ -134,15 +158,18 @@ context truncation before attempting handover compression.
 Scope:
 
 - current session only;
-- messages after the latest active `compressed_message`;
+- messages after the latest `compressed_message`;
 - tool-related source messages that have not been checked for truncation;
-- tool input JSON, including assistant tool-call arguments;
-- tool output JSON, including tool result content;
-- no truncation of tool metadata.
+- tool input JSON, including assistant tool-call arguments stored in the
+  replayable `tool_calls` payload;
+- tool output JSON, including tool result content stored in replayable message
+  content;
+- no truncation of provider metadata, source metadata, or non-replay diagnostic
+  metadata.
 
 Algorithm:
 
-1. Find the latest active `compressed_message`, if any.
+1. Find the latest `compressed_message`, if any.
 2. Scan later source messages for unchecked tool input/output payloads.
 3. Parse tool input/output JSON.
 4. Deep-walk objects and arrays.
@@ -168,7 +195,13 @@ Example:
 
 Do not store `truncate_version`, `truncated_paths`, or hashes. The marker in the
 content is enough to show that truncation happened, and `original_lengths` is
-enough diagnostic metadata.
+enough diagnostic metadata. `metadata` may record truncation diagnostics, but
+`provider_metadata`, `source_metadata`, and tool-result diagnostic metadata must
+not be rewritten as a substitute for replay payload truncation.
+
+If JSON parsing or truncation fails, raise the exception directly. Do not mark
+the message as checked, do not silently skip it, and do not continue with a
+partially truncated payload.
 
 After truncation, rebuild the projected context and re-estimate tokens.
 
@@ -200,20 +233,24 @@ handover threshold. It must only happen at a safe replay boundary:
 ```text
 assistant/tool request
 tool result
-user: <system-reminder>compression prompt</system-reminder>
-assistant: handover output
+request-only user: <system-reminder>compression prompt</system-reminder>
+assistant: compressed output
 append compressed_message
 next LLM call
 ```
 
 There must be no unresolved tool execution request when the compression prompt
-is appended. The prompt belongs after the tool result so the handover can include
-the complete latest task state.
+is added to the request. The prompt belongs after the tool result so the
+compressed output can include the complete latest task state. The compression
+prompt is never persisted as source content.
 
 ## Handover Call Shape
 
-The compressor is a normal LLM call over the current visible context, not a
-separate summarization API over a selected message list.
+The compressor is the same kind of LLM call as the normal runtime call over the
+current visible context, not a separate summarization API over a selected
+message list. Use the same provider/model, tool definitions, and tool-choice
+behavior, and preserve the same prompt prefix; the only prompt difference is the
+final transient compression instruction.
 
 Compression call:
 
@@ -225,16 +262,17 @@ user: <system-reminder>compression prompt</system-reminder>
 The compression prompt is transient. It is sent as the last message of the
 compression call and is not persisted as conversation content.
 
-The model output is persisted as a new `compressed_message`.
+The model output is persisted as a new `compressed_message`. When appending that
+source record, wrap the returned text in a user-role `<system-reminder>`.
 
-## Handover, Not Summary
+## Compressed Message, Not Summary
 
-The `compressed_message` content should be a handover document, not a short
-summary. Compression changes the model's local context. The next model call is a
-new context holder taking over from the prior context, so the artifact must
-preserve operational continuity.
+The `compressed_message` content should be operational continuity context, not a
+short summary. Compression changes the model's local context. The next model
+call is a new context holder taking over from the prior context, so the artifact
+must preserve operational continuity.
 
-A handover must answer:
+The compressed content must answer:
 
 - What conversation/task is currently in progress?
 - What has already been decided or completed?
@@ -244,11 +282,10 @@ A handover must answer:
 - What should the next assistant know before responding?
 - What source messages or artifacts support the handover claims?
 
-Recommended content structure:
+Recommended content body. Runtime wraps this body in `<system-reminder>` when
+persisting the `compressed_message`:
 
 ```markdown
-<session-handover version="1">
-
 ## Continuity Contract
 - This handover replaces context through compression point ordinal N.
 - Continue as the same assistant in the same session.
@@ -285,8 +322,6 @@ Recommended content structure:
 
 ## Do Not Lose
 - ...
-
-</session-handover>
 ```
 
 The latest working context should be more detailed than older completed context.
@@ -302,20 +337,20 @@ session_id
 ordinal
 kind = compressed_message
 llm_role = user
-raw_content = handover content
+raw_content = <system-reminder> compressed continuity content </system-reminder>
 compression_point_ordinal
 compression_version
-status = active
 created_at
 metadata
 ```
 
-`compression_point_ordinal` is the last source ordinal covered by the handover.
-It is a diagnostic and validation boundary. LLM context assembly should include:
+`compression_point_ordinal` is the last source ordinal covered by the compressed
+message. It is a diagnostic and replay boundary. LLM context assembly should
+include:
 
 ```text
 system identity
-latest active compressed_message as user-role handover context
+latest compressed_message as user-role system-reminder context
 source messages with ordinal > compressed_message.ordinal
 ```
 
@@ -323,28 +358,27 @@ Using `compressed_message.ordinal` as the replay boundary prevents the handover
 message itself, or source messages already followed by that handover, from being
 duplicated in future prompts.
 
-The runtime does not need to record all source message ids. The handover is a
-compression of the full visible context before the compression prompt, and the
-durable boundary is the compression point on the appended message.
+The runtime does not need to record all source message ids. The compressed
+message is produced from the full visible context before the compression prompt,
+and the durable boundary is the compression point on the appended message.
 
-Latest valid `compressed_message` wins. Older compressed messages remain in the
-source stream for audit but are not selected for LLM context assembly.
+Latest `compressed_message` by session ordinal wins. Older compressed messages
+remain in the source stream for audit but are not selected for LLM context
+assembly.
 
-## Validation
+## Append Preconditions
 
-Before appending `compressed_message`, validate:
+Do not validate the model-produced compressed content. Before appending
+`compressed_message`, only enforce source-state preconditions:
 
-- output contains all required handover sections;
 - selected `compression_point_ordinal` is recorded on the message;
-- handover does not treat the compression instruction itself as session content;
-- handover does not include any future or not-yet-persisted user message;
-- handover stays within configured token/character limits;
-- handover is non-empty for active tasks and records uncertainty when the source
-  is ambiguous.
+- compressed content does not treat the compression instruction itself as session
+  content;
+- compressed content does not include any future or not-yet-persisted user
+  message.
 
-If validation fails, do not drop source messages. Retry with a repair prompt if
-there is room. If the context still cannot fit, fail loudly with a compression
-error trace rather than silently discarding history.
+If appending fails, do not drop source messages. Fail loudly rather than
+silently discarding history.
 
 ## Prefix Stability Rules
 
@@ -354,12 +388,18 @@ error trace rather than silently discarding history.
   must not change message role, order, ids, or metadata needed for replay.
 - Compression appends `compressed_message`; it does not delete covered source
   messages.
-- Future LLM prompts use the latest active `compressed_message` and source
-  messages after that compressed message's own ordinal.
+- Future LLM prompts use the latest `compressed_message` and source messages
+  after that compressed message's own ordinal.
 - Dynamic cognition context should not be inserted between stable source
   messages. If cognition-derived context must become LLM-visible, persist it as
   source context or fold it into the next handover.
-- `recent_tail_messages` must not truncate by itself.
+
+## Turn Serialization
+
+Turns for the same session must run serially. No two turns for the same
+`session_id` may interleave source loading, truncation, compression, source
+message appends, main LLM calls, or tool loops. Different sessions may run
+concurrently.
 
 ## Runtime Pipeline
 
@@ -387,7 +427,7 @@ assemble projected context for budget check
 reject pending user if it cannot fit
 if context > 60%: truncate unchecked tool context
 rebuild and re-estimate
-if context > 90% or remaining < 10000: append compressed_message through LLM handover
+if context > 90% or remaining < 10000: append compressed_message through LLM compression
 rebuild context
 append/process current user message
 main LLM call
@@ -403,8 +443,8 @@ rebuild and estimate context
 if context > 60%: truncate unchecked tool context
 rebuild and re-estimate
 if context > 90% or remaining < 10000:
-  append compression prompt after tool result
-  call LLM for handover
+  add transient compression prompt to request after tool result
+  call LLM for compression
   append compressed_message
   rebuild context
 continue next LLM call
@@ -412,47 +452,46 @@ continue next LLM call
 
 ## Relationship To Cognition
 
-Cognition and LLM context share the same source stream, but they do not consume
-it identically.
+Cognition and LLM context share the same source stream, but detailed cognition
+source mapping is intentionally out of scope for this document.
 
 Default cognition source mapping:
 
-- consume `user_message`, `assistant_message`, and relevant runtime messages as
-  cognition inputs;
+- leave `user_message`, `assistant_message`, and `tool_message` available for
+  future cognition mapping;
 - skip `compressed_message`;
 - keep `ContextWindow.foreground` as cognition working memory, not LLM context.
 
-Future cognition integration:
-
-- foreground can influence whether compression is useful or urgent;
-- foreground anchors can become handover preservation hints;
-- a later cognition layer can explicitly read `compressed_message` as evidence
-  for higher-level facts;
-- that extraction must be explicit so synthetic handover content does not
-  silently become raw user/assistant fact.
+A later cognition layer may explicitly read `compressed_message` as evidence for
+higher-level facts, but that extraction must be explicit so synthetic compressed
+content does not silently become raw user/assistant fact.
 
 ## Testing Plan
 
 Required tests:
 
 - two-turn prompt is append-only with no compression;
+- tool replay fields survive the source-message schema refactor;
 - provider max context length is loaded and used in estimates;
-- token estimates include messages, tool schema tokens, output reserve, and
-  safety margin;
+- token estimates use English word count plus Chinese character count and
+  include messages, tool schema tokens, output reserve, and safety margin;
 - context over 60% truncates unchecked tool input/output JSON strings longer
   than 300 characters;
 - truncation writes back to source tool payloads, marks `truncate_checked`, and
   records `original_lengths`;
-- truncation does not modify tool metadata;
+- truncation does not modify provider metadata, source metadata, or non-replay
+  diagnostic metadata;
 - pending user message that is too large is rejected directly;
 - context over 90% or remaining window below 10000 triggers handover
   compression;
 - pre-user compression appends `compressed_message` before the pending user is
   processed;
+- failed pre-user maintenance does not persist the pending user message as a
+  processed session message;
 - tool-loop compression only happens after a tool result, never while a tool
   request is unresolved;
-- compression call appends a user role `<system-reminder>` instruction to the
-  current visible context;
+- compression call adds a transient user role `<system-reminder>` instruction to
+  the current visible context;
 - compression instruction is not persisted as source content;
 - after compression, the next prompt starts with the same system identity and
   latest `compressed_message` until a newer compression occurs;
@@ -461,41 +500,108 @@ Required tests:
 
 ## Implementation Phases
 
-### Phase 1: Source Message Model
+### Phase 1: Source Stream And Turn Boundary
 
-- Refactor `conversation_messages` into a source message model with `kind`,
-  `llm_role`, `compression_point_ordinal`, `compression_version`, `status`,
-  `metadata`, and `updated_at`.
-- Add append/read helpers for `compressed_message`.
-- Make cognition source mapping ignore `compressed_message` by default.
+Establish the durable source layer and prevent concurrent same-session mutation
+before adding maintenance behavior.
 
-### Phase 2: Context Budgeting
+- Refactor `conversation_messages` into the source message model with `kind`,
+  `llm_role`, `compression_point_ordinal`, `compression_version`, `metadata`,
+  and `updated_at`.
+- Preserve replay fields: `raw_content`, `model_content`, `tool_call_id`,
+  `tool_calls`, `tool_result_id`, `provider_metadata`, and `source_metadata`.
+- Add append/read helpers for normal source messages and `compressed_message`.
+- Define latest `compressed_message` lookup as max session ordinal where
+  `kind = compressed_message`; do not add status or active-state machinery.
+- Add session-level turn serialization so one `session_id` cannot interleave
+  source loading, maintenance, appends, LLM calls, or tool loops.
+- Keep cognition handling minimal: `compressed_message` is ignored by default;
+  detailed source-to-cognition mapping remains out of scope.
 
-- Add provider/model `max_context_tokens`.
-- Add context threshold/reserve configuration.
-- Implement context token estimation including messages, tool schemas, output
-  reserve, and safety margin.
-- Reject pending user messages that cannot fit.
+### Phase 2: Context Projection And Budgeting
 
-### Phase 3: Tool Context Truncation
+Build one context assembly path that every LLM-facing caller will use.
 
-- Implement JSON deep truncation for unchecked tool input/output payloads.
-- Truncate strings longer than 300 characters with the
+- Implement `SessionContextAssembler` over the source stream.
+- Assemble LLM context as: stable system identity, latest `compressed_message`
+  if present, then source messages after that compressed message's ordinal.
+- Add provider/model `max_context_tokens` and context threshold/reserve
+  configuration.
+- Implement deterministic token estimation: English word count plus Chinese CJK
+  character count, including deterministic JSON serialization for tool schemas
+  and payloads.
+- Estimate existing context plus pending user message before appending the
+  pending user message.
+- Reject a pending user message that cannot fit after prior context maintenance.
+- Do not add fixed-tail transcript pruning outside explicit compression.
+
+### Phase 3: Tool Payload Maintenance
+
+Add the low-cost maintenance path that can reduce context without invoking the
+model.
+
+- Add a narrowly scoped update helper for replay payload truncation.
+- Scan only source messages after the latest `compressed_message`.
+- Parse tool input/output records as JSON and deep-walk objects and arrays.
+- Truncate string fields longer than `tool_string_truncate_chars` with the
   `<system-reminder>truncated</system-reminder>` marker.
-- Persist normalized payloads in source messages.
-- Mark `truncate_checked` and record `original_lengths`.
+- Persist normalized JSON back to the source tool input/output record.
+- Mark `truncate_checked` and record `original_lengths` in general metadata.
+- Leave provider metadata, source metadata, and non-replay diagnostic metadata
+  unchanged.
+- Let JSON parse or truncation failures raise directly.
 
-### Phase 4: LLM Handover Compression
+### Phase 4: Compression Call And Source Append
 
-- Implement compression as a normal LLM call over current context plus a final
-  user role `<system-reminder>` compression instruction.
-- Validate handover output.
-- Append successful handovers as `compressed_message`.
+Add LLM compression as a normal model call plus a new source message append.
+
+- Build the compression request from the current projected context plus one
+  transient final user-role `<system-reminder>` compression instruction.
+- Use the same provider/model, tool definitions, tool-choice behavior, and prompt
+  prefix as a normal runtime call.
+- Do not persist the compression instruction.
+- Wrap the model output in `<system-reminder>` and append it as
+  `kind = compressed_message`, `llm_role = user`.
+- Set `compression_point_ordinal` to the last source ordinal covered before the
+  transient compression prompt.
+- Do not validate or repair the model-produced compressed content.
 - Persist compression started/completed/failed traces for diagnostics only.
 
-### Phase 5: Runtime Integration
+### Phase 5: Runtime Orchestration
 
-- Run truncate/compress preflight before processing current user messages where
-  possible.
-- Run forced truncate/compress inside tool loops only after tool results.
-- Ensure main LLM calls and debug prompt use the same context projection.
+Wire the maintenance paths into the actual turn lifecycle.
+
+- Run pre-user maintenance before appending or processing a pending user message.
+- If pre-user maintenance fails, do not persist the pending user as a processed
+  session message.
+- After tool execution, append the tool result, rebuild context, then run
+  truncation and compression only if thresholds require it.
+- In tool loops, add the transient compression prompt only after a complete tool
+  result and never while a tool request is unresolved.
+- Rebuild projected context after truncation and after compression before the
+  next LLM call.
+- Route main runtime LLM calls and debug prompt rendering through the same
+  `SessionContextAssembler`.
+
+### Phase 6: Full Verification And Documentation Cleanup
+
+Verify the completed path as an integrated feature rather than treating each
+phase as an independently shippable endpoint.
+
+- Cover the required tests above across source model, projection, budgeting,
+  truncation, compression, pre-user flow, tool-loop flow, debug prompt, and
+  cognition skip behavior.
+- Update configuration docs and examples for the final context budget settings.
+- Remove or rewrite docs that describe fixed-tail transcript pruning as normal
+  LLM context behavior.
+- Confirm no source messages are deleted by compression and no compression
+  instruction is persisted as source content.
+
+Suggested verification checkpoints:
+
+- After Phases 1-2: source stream, latest compressed-message lookup, turn
+  serialization, context assembly, and budgeting can be tested together.
+- After Phases 3-4: tool truncation and compression append semantics can be
+  tested together without full runtime orchestration.
+- After Phases 5-6: run end-to-end pre-user and tool-loop compression tests plus
+  documentation cleanup checks.
