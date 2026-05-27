@@ -1124,20 +1124,17 @@ def _llm_request_summary(
 
 
 def _llm_response_log(response: LLMResponse) -> dict[str, Any]:
+    response_payload = response.metadata.get("response_payload")
+    if isinstance(response_payload, dict):
+        return _json_safe(response_payload)
+
     return {
         "content": response.content,
         "finish_reason": response.finish_reason,
-        "metadata": _llm_response_metadata_log(response.metadata),
         "model": response.model,
         "provider": response.provider,
         "tool_calls": [tool_call.to_dict() for tool_call in response.tool_calls],
     }
-
-
-def _llm_response_metadata_log(metadata: dict[str, Any]) -> dict[str, Any]:
-    return _json_safe(
-        {key: value for key, value in metadata.items() if key != "request_payload"}
-    )
 
 
 def _llm_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
