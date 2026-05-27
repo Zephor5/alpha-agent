@@ -116,6 +116,7 @@ cognition_app.add_typer(goals_app, name="goals")
 cognition_app.add_typer(self_model_app, name="self-model")
 
 DAEMON_START_TIMEOUT_SECONDS = 5.0
+DAEMON_STOP_TIMEOUT_SECONDS = 5.0
 DAEMON_START_POLL_INTERVAL_SECONDS = 0.1
 
 
@@ -173,6 +174,16 @@ def _daemon_status_is_running(response: dict[str, Any]) -> bool:
     return bool(status.get("running")) and str(status.get("state", "")) == "running"
 
 
+def _daemon_status_is_stopped(response: dict[str, Any]) -> bool:
+    error = response.get("error")
+    if isinstance(error, dict) and error.get("code") == "DAEMON_NOT_RUNNING":
+        return True
+    status = response.get("status")
+    if not isinstance(status, dict):
+        return False
+    return not bool(status.get("running"))
+
+
 def _daemon_log_path(runtime: DaemonRuntimeConfig) -> Path:
     return runtime.log_dir / "daemon.log"
 
@@ -216,6 +227,38 @@ def _wait_for_daemon_running(
         if time.monotonic() >= deadline:
             raise TimeoutError("Timed out waiting for daemon startup.")
         time.sleep(DAEMON_START_POLL_INTERVAL_SECONDS)
+
+
+def _wait_for_daemon_stopped(
+    client: DaemonClient,
+    *,
+    timeout_seconds: float = DAEMON_STOP_TIMEOUT_SECONDS,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if _daemon_status_is_stopped(client.status()):
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Timed out waiting for daemon shutdown.")
+        time.sleep(DAEMON_START_POLL_INTERVAL_SECONDS)
+
+
+def _start_daemon_background_and_report(
+    *,
+    runtime: DaemonRuntimeConfig,
+    client: DaemonClient,
+    message_prefix: str,
+) -> None:
+    process, log_path = _spawn_daemon_background(runtime)
+    try:
+        status = _wait_for_daemon_running(client, process)
+    except (RuntimeError, TimeoutError) as exc:
+        console.print(str(exc))
+        console.print(f"Daemon log: {log_path}")
+        raise typer.Exit(1) from exc
+    pid = status.get("pid") or process.pid
+    console.print(f"{message_prefix} with PID {pid}.")
+    console.print(f"Daemon log: {log_path}")
 
 
 def _client_response_or_exit(response: dict[str, Any]) -> dict[str, Any]:
@@ -361,16 +404,48 @@ def daemon_start() -> None:
     if _daemon_status_is_running(client.status()):
         console.print("Daemon is already running.")
         return
-    process, log_path = _spawn_daemon_background(runtime)
-    try:
-        status = _wait_for_daemon_running(client, process)
-    except (RuntimeError, TimeoutError) as exc:
-        console.print(str(exc))
-        console.print(f"Daemon log: {log_path}")
-        raise typer.Exit(1) from exc
-    pid = status.get("pid") or process.pid
-    console.print(f"Daemon started with PID {pid}.")
-    console.print(f"Daemon log: {log_path}")
+    _start_daemon_background_and_report(
+        runtime=runtime,
+        client=client,
+        message_prefix="Daemon started",
+    )
+
+
+@daemon_app.command("restart")
+def daemon_restart(
+    immediate: Annotated[
+        bool,
+        typer.Option("--immediate", help="Stop accepting daemon requests immediately."),
+    ] = False,
+) -> None:
+    """Restart the daemon runtime owner."""
+
+    config = load_config()
+    runtime = daemon_runtime_config(config)
+    client = DaemonClient(runtime.socket_path)
+    if _daemon_status_is_running(client.status()):
+        policy = "immediate" if immediate else "graceful"
+        response = _client_response_or_exit(client.stop(policy=policy))
+        raw_status = response.get("status")
+        if isinstance(raw_status, dict):
+            console.print(str(raw_status.get("message") or "Daemon stopping."))
+        else:
+            console.print("Daemon stopping.")
+        try:
+            _wait_for_daemon_stopped(client)
+        except TimeoutError as exc:
+            console.print(str(exc))
+            raise typer.Exit(1) from exc
+        message_prefix = "Daemon restarted"
+    else:
+        console.print("Daemon is not running; starting it.")
+        message_prefix = "Daemon started"
+
+    _start_daemon_background_and_report(
+        runtime=runtime,
+        client=client,
+        message_prefix=message_prefix,
+    )
 
 
 @daemon_app.command("status")

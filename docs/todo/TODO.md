@@ -108,6 +108,7 @@ These are prerequisites for making Alpha Agent usable outside `alpha chat`.
   - `alpha daemon start` owns local and gateway runtime turns in the background.
   - `alpha daemon run` runs the same owner in the foreground.
   - `alpha daemon status`
+  - `alpha daemon restart`
   - `alpha daemon stop`
   - `alpha gateway status`
   - `alpha gateway doctor`

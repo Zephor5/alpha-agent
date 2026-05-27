@@ -273,6 +273,96 @@ def test_daemon_start_does_not_spawn_when_already_running(
     assert popen_calls == []
 
 
+def test_daemon_restart_stops_running_daemon_then_starts_new_process(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    _FakeDaemonClient.status_responses = [
+        {
+            "ok": True,
+            "status": {
+                "running": True,
+                "state": "running",
+                "pid": 11111,
+                "socket_path": str(tmp_path / "daemon.sock"),
+                "status_path": str(tmp_path / "daemon-status.json"),
+                "adapters": [],
+            },
+        },
+        {"ok": False, "error": {"code": "DAEMON_NOT_RUNNING", "message": "missing"}},
+        {
+            "ok": True,
+            "status": {
+                "running": True,
+                "state": "running",
+                "pid": 22222,
+                "socket_path": str(tmp_path / "daemon.sock"),
+                "status_path": str(tmp_path / "daemon-status.json"),
+                "adapters": [],
+            },
+        },
+    ]
+    _FakeDaemonClient.response = {
+        "ok": True,
+        "status": {"message": "Daemon is draining the current request before stopping."},
+    }
+    popen_calls: list[dict[str, Any]] = []
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append({"command": command, **kwargs})
+        return _FakeProcess(pid=22222)
+
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    monkeypatch.setattr("alpha_agent.cli.subprocess.Popen", fake_popen)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["daemon", "restart"], env=_env(tmp_path))
+
+    assert result.exit_code == 0
+    assert "Daemon restarted with PID 22222." in result.output
+    assert _FakeDaemonClient.stop_policies == ["graceful"]
+    assert len(popen_calls) == 1
+
+
+def test_daemon_restart_starts_when_daemon_is_not_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    _FakeDaemonClient.status_responses = [
+        {"ok": False, "error": {"code": "DAEMON_NOT_RUNNING", "message": "missing"}},
+        {
+            "ok": True,
+            "status": {
+                "running": True,
+                "state": "running",
+                "pid": 12345,
+                "socket_path": str(tmp_path / "daemon.sock"),
+                "status_path": str(tmp_path / "daemon-status.json"),
+                "adapters": [],
+            },
+        },
+    ]
+    popen_calls: list[dict[str, Any]] = []
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append({"command": command, **kwargs})
+        return _FakeProcess(pid=12345)
+
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    monkeypatch.setattr("alpha_agent.cli.subprocess.Popen", fake_popen)
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["daemon", "restart"], env=_env(tmp_path))
+
+    assert result.exit_code == 0
+    assert "Daemon is not running; starting it." in result.output
+    assert "Daemon started with PID 12345." in result.output
+    assert _FakeDaemonClient.stop_policies == []
+    assert len(popen_calls) == 1
+
+
 def test_daemon_stop_supports_immediate_policy(tmp_path: Path, monkeypatch) -> None:
     _reset_fake_client()
     _FakeDaemonClient.response = {

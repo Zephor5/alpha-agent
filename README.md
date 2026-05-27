@@ -95,6 +95,7 @@ Start the daemon runtime owner before local turns or gateway adapters:
 ```bash
 uv run alpha daemon start
 uv run alpha daemon status
+uv run alpha daemon restart
 uv run alpha daemon stop
 ```
 
@@ -312,8 +313,7 @@ The built-in `web_search` tool is available when `tavily.api_key`,
 
 ```bash
 uv run alpha config set tavily.api_key tvly-...
-uv run alpha daemon stop
-uv run alpha daemon start
+uv run alpha daemon restart
 ```
 
 ## Runtime State
