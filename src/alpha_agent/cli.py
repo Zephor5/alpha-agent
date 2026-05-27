@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from prompt_toolkit import prompt as _terminal_prompt
 from rich.console import Console
 from rich.table import Table
 
@@ -132,6 +133,12 @@ def _display_model(config: AlphaConfig) -> str:
 
 def _store(config: AlphaConfig) -> StateStore:
     return initialize_store(config)
+
+
+def _read_chat_message() -> str:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return _terminal_prompt("You: ")
+    return typer.prompt("You")
 
 
 def _render_daemon_status(status: DaemonStatus) -> None:
@@ -518,7 +525,7 @@ def chat(
     console.print(f"Session: {session_id}")
     while True:
         try:
-            message = typer.prompt("You")
+            message = _read_chat_message()
         except (EOFError, KeyboardInterrupt):
             break
         if message.strip().lower() in {"/exit", "/quit"}:

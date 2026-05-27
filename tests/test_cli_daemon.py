@@ -5,6 +5,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
+from alpha_agent import cli
 from alpha_agent.cli import app
 
 
@@ -60,6 +61,44 @@ def _reset_fake_client() -> None:
     _FakeDaemonClient.status_responses = []
     _FakeDaemonClient.stop_policies = []
     _FakeDaemonClient.response = {"ok": True, "session_id": "s1", "response": "daemon response"}
+
+
+class _Stream:
+    def __init__(self, is_tty: bool):
+        self._is_tty = is_tty
+
+    def isatty(self) -> bool:
+        return self._is_tty
+
+
+def test_chat_prompt_uses_width_aware_terminal_editor_for_tty(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_terminal_prompt(message: str) -> str:
+        calls.append(message)
+        return "中文"
+
+    monkeypatch.setattr(cli, "_terminal_prompt", fake_terminal_prompt)
+    monkeypatch.setattr(cli.sys, "stdin", _Stream(True))
+    monkeypatch.setattr(cli.sys, "stdout", _Stream(True))
+
+    assert cli._read_chat_message() == "中文"
+    assert calls == ["You: "]
+
+
+def test_chat_prompt_keeps_typer_prompt_for_non_tty(monkeypatch) -> None:
+    def fake_typer_prompt(message: str) -> str:
+        return f"typed through {message}"
+
+    def fail_terminal_prompt(message: str) -> str:
+        raise AssertionError(f"terminal prompt should not run for {message}")
+
+    monkeypatch.setattr(cli, "_terminal_prompt", fail_terminal_prompt)
+    monkeypatch.setattr(cli.typer, "prompt", fake_typer_prompt)
+    monkeypatch.setattr(cli.sys, "stdin", _Stream(False))
+    monkeypatch.setattr(cli.sys, "stdout", _Stream(False))
+
+    assert cli._read_chat_message() == "typed through You"
 
 
 def test_ask_sends_ipc_request_to_daemon(tmp_path: Path, monkeypatch) -> None:
