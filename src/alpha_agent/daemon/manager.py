@@ -68,6 +68,7 @@ class AgentFactory:
             tool_registry=build_default_tool_registry(self.config),
             llm_debug_logging=self.config.llm_debug_logging,
             llm_trace_log_path=Path(self.config.log_dir) / "llm.jsonl",
+            tool_output_dir=Path(self.config.log_dir) / "tool-results",
             llm_context_config=self.config.llm_context,
             max_context_tokens=self.config.max_context_tokens_for_provider(
                 self.config.llm_provider

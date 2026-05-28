@@ -23,7 +23,7 @@ from alpha_agent.llm.base import (
 )
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.base import Tool, ToolResult
+from alpha_agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from alpha_agent.tools.registry import ToolRegistry
 
 
@@ -129,5 +129,6 @@ class _EchoTool(Tool):
     name = "echo"
     description = "Echo input."
 
-    def run(self, arguments):
+    def run(self, arguments, context: ToolExecutionContext):
+        del context
         return ToolResult(name=self.name, output=str(arguments["text"]), metadata={})

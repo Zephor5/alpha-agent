@@ -6,9 +6,19 @@ from pathlib import Path
 import httpx
 import pytest
 
-from alpha_agent.config import AlphaConfig
+from alpha_agent.config import AlphaConfig, BashToolConfig
+from alpha_agent.tools.base import ToolExecutionContext
 from alpha_agent.tools.default import build_default_tool_registry
 from alpha_agent.tools.web_search import TavilyWebSearchTool
+
+
+def _tool_context(tmp_path: Path | None = None) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        session_id="s1",
+        tool_call_id="call_1",
+        output_dir=tmp_path or Path("."),
+        check_canceled=lambda _stage: None,
+    )
 
 
 def test_tavily_web_search_tool_exposes_general_search_schema() -> None:
@@ -78,7 +88,8 @@ def test_tavily_web_search_tool_posts_sanitized_request_and_formats_results() ->
             "exclude_domains": ["spam.example"],
             "include_answer": True,
             "unknown": "dropped",
-        }
+        },
+        _tool_context(),
     )
 
     assert captured == {
@@ -144,14 +155,14 @@ def test_tavily_web_search_tool_validates_arguments(
     tool = TavilyWebSearchTool(api_key="tvly-test")
 
     with pytest.raises(ValueError, match=match):
-        tool.run(arguments)
+        tool.run(arguments, _tool_context())
 
 
 def test_tavily_web_search_tool_requires_api_key() -> None:
     tool = TavilyWebSearchTool(api_key="")
 
     with pytest.raises(ValueError, match="tavily.api_key"):
-        tool.run({"query": "alpha"})
+        tool.run({"query": "alpha"}, _tool_context())
 
 
 def test_default_tool_registry_includes_web_search_only_when_tavily_key_is_configured(
@@ -168,6 +179,29 @@ def test_default_tool_registry_includes_web_search_only_when_tavily_key_is_confi
         gateway_status_path=tmp_path / "gateway.json",
         tavily_api_key="tvly-test",
     )
+    bash_configured = AlphaConfig(
+        db_path=tmp_path / "bash.db",
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway.json",
+        bash_tool=BashToolConfig(
+            enabled=True,
+            default_workdir=tmp_path,
+            allowed_workdirs=(tmp_path,),
+        ),
+    )
+    both_configured = AlphaConfig(
+        db_path=tmp_path / "both.db",
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway.json",
+        bash_tool=BashToolConfig(
+            enabled=True,
+            default_workdir=tmp_path,
+            allowed_workdirs=(tmp_path,),
+        ),
+        tavily_api_key="tvly-test",
+    )
 
     assert build_default_tool_registry(empty_config).names() == []
     assert build_default_tool_registry(configured).names() == ["web_search"]
+    assert build_default_tool_registry(bash_configured).names() == ["bash"]
+    assert build_default_tool_registry(both_configured).names() == ["bash", "web_search"]

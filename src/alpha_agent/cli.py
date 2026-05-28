@@ -511,6 +511,7 @@ def config_show() -> None:
         "llm_provider_max_context_tokens": str(
             config.max_context_tokens_for_provider(config.llm_provider)
         ),
+        "bash_tool_enabled": str(config.bash_tool.enabled).lower(),
     }
     if config.llm_provider in {"openai-compatible", "openai", "compatible"}:
         rows["compatible_base_url"] = config.compatible_base_url or ""

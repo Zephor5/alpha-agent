@@ -4,12 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from alpha_agent.llm.base import LLMToolCall
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.state.models import RuntimeTrace
-from alpha_agent.tools.base import ToolCall, ToolResult, tool_output_to_model_content
+from alpha_agent.tools.base import (
+    ToolCall,
+    ToolExecutionContext,
+    ToolResult,
+    tool_output_to_model_content,
+)
 from alpha_agent.tools.registry import ToolRegistry
 
 ToolTraceWriter = Callable[[str, str, dict[str, Any]], RuntimeTrace]
@@ -66,6 +72,8 @@ class ToolExecutor:
         self,
         *,
         calls: Sequence[ToolCall],
+        session_id: str = "unknown",
+        output_dir: str | Path = Path(".alpha-agent/tool-results"),
         write_trace: ToolTraceWriter,
         check_canceled: CancelCheck,
         recover_errors: bool = False,
@@ -75,28 +83,39 @@ class ToolExecutor:
         executed: list[ExecutedToolResult] = []
         for index, call in enumerate(calls):
             check_canceled("before_tool")
+            parse_error = call.metadata.get("arguments_parse_error")
+            tool = self.registry.get(call.name) if not parse_error else None
+            trace_payload = self._call_payload(
+                call,
+                trace_arguments=self._trace_arguments(tool, call),
+            )
             started_trace = write_trace(
                 "tool.started",
-                deterministic_json(self._call_payload(call)),
+                deterministic_json(trace_payload),
                 {
                     "tool_name": call.name,
                     "tool_call_id": call.id,
                     "tool_index": index,
-                    "call": self._call_payload(call),
+                    "call": trace_payload,
                 },
             )
             try:
-                parse_error = call.metadata.get("arguments_parse_error")
                 if parse_error:
                     raise ToolExecutionError(
                         call,
                         f"Invalid tool call arguments for {call.name}: {parse_error}",
                     )
-                tool = self.registry.get(call.name)
                 if tool is None:
                     raise ToolExecutionError(call, f"Unknown tool: {call.name}")
-                result = tool.run(dict(call.arguments))
-                check_canceled("after_tool")
+                context = ToolExecutionContext(
+                    session_id=session_id,
+                    tool_call_id=call.id,
+                    output_dir=Path(output_dir).expanduser(),
+                    check_canceled=check_canceled,
+                )
+                result = tool.run(dict(call.arguments), context)
+                if not self._is_canceled_result(result):
+                    check_canceled("after_tool")
                 result_payload = self._result_payload(result)
                 result_content = tool_output_to_model_content(result.output)
                 completed_trace = write_trace(
@@ -170,13 +189,29 @@ class ToolExecutor:
             metadata=dict(metadata),
         )
 
-    def _call_payload(self, call: ToolCall) -> dict[str, Any]:
+    def _call_payload(
+        self,
+        call: ToolCall,
+        *,
+        trace_arguments: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return {
-            "arguments": dict(call.arguments),
+            "arguments": dict(trace_arguments if trace_arguments is not None else call.arguments),
             "id": call.id,
-            "metadata": dict(call.metadata),
+            "metadata": self._trace_metadata(call),
             "name": call.name,
         }
+
+    def _trace_arguments(self, tool: Any, call: ToolCall) -> Mapping[str, Any]:
+        trace_arguments = getattr(tool, "trace_arguments", None)
+        if callable(trace_arguments):
+            return trace_arguments(dict(call.arguments))
+        return dict(call.arguments)
+
+    def _trace_metadata(self, call: ToolCall) -> dict[str, Any]:
+        metadata = dict(call.metadata)
+        metadata.pop("raw_arguments", None)
+        return metadata
 
     def _result_payload(self, result: ToolResult) -> dict[str, Any]:
         return {
@@ -184,6 +219,13 @@ class ToolExecutor:
             "name": result.name,
             "output": result.output,
         }
+
+    def _is_canceled_result(self, result: ToolResult) -> bool:
+        if result.metadata.get("status") == "canceled":
+            return True
+        if isinstance(result.output, Mapping):
+            return result.output.get("status") == "canceled"
+        return False
 
     def _error_result(self, call: ToolCall, exc: Exception) -> ToolResult:
         message = str(exc)

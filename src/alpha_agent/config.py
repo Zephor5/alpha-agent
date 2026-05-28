@@ -45,6 +45,15 @@ max_context_tokens = 258400
 [llm.providers.deepseek]
 max_context_tokens = 1000000
 
+[tools.bash]
+enabled = false
+default_workdir = "."
+allowed_workdirs = ["."]
+default_timeout_seconds = 120
+max_timeout_seconds = 600
+max_output_chars = 30000
+env_passthrough = []
+
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300
@@ -94,6 +103,13 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "llm.providers.deepseek.max_context_tokens": int,
     "compatible.base_url": str,
     "compatible.api_key": str,
+    "tools.bash.enabled": bool,
+    "tools.bash.default_workdir": str,
+    "tools.bash.allowed_workdirs": list,
+    "tools.bash.default_timeout_seconds": int,
+    "tools.bash.max_timeout_seconds": int,
+    "tools.bash.max_output_chars": int,
+    "tools.bash.env_passthrough": list,
     "cognition.drive.enabled": bool,
     "cognition.drive.interval_seconds": int,
     "cognition.drive.goal_cooldown_seconds": int,
@@ -129,6 +145,9 @@ POSITIVE_INT_CONFIG_KEYS = {
     "llm.context.safety_margin_tokens",
     "llm.providers.openai-compatible.max_context_tokens",
     "llm.providers.deepseek.max_context_tokens",
+    "tools.bash.default_timeout_seconds",
+    "tools.bash.max_timeout_seconds",
+    "tools.bash.max_output_chars",
 }
 
 RATIO_CONFIG_KEYS = {
@@ -165,6 +184,19 @@ class LLMContextConfig:
 
 
 @dataclass(frozen=True)
+class BashToolConfig:
+    """Configuration for the opt-in local bash tool."""
+
+    enabled: bool = False
+    default_workdir: Path = Path(".")
+    allowed_workdirs: tuple[Path, ...] = (Path("."),)
+    default_timeout_seconds: int = 120
+    max_timeout_seconds: int = 600
+    max_output_chars: int = 30000
+    env_passthrough: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class AlphaConfig:
     """Runtime settings loaded from environment variables and defaults."""
 
@@ -177,6 +209,7 @@ class AlphaConfig:
     llm_model: str = ""
     llm_debug_logging: bool = False
     llm_context: LLMContextConfig = field(default_factory=LLMContextConfig)
+    bash_tool: BashToolConfig = field(default_factory=BashToolConfig)
     llm_provider_max_context_tokens: dict[str, int] = field(
         default_factory=lambda: dict(DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS)
     )
@@ -244,6 +277,7 @@ def set_config_value(
     write_default_config(path)
     config_data = _load_toml_config(path)
     _set_nested_value(config_data, key, parsed_value)
+    _validate_config_data(config_data)
     _write_toml_config(path, config_data)
     return parsed_value
 
@@ -265,6 +299,8 @@ def read_config_value(
         return "***" if value else ""
     if isinstance(value, bool):
         return "true" if value else "false"
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
     return str(value)
 
 
@@ -283,6 +319,9 @@ def load_config(
     llm_context = llm_context if isinstance(llm_context, dict) else {}
     llm_providers = llm.get("providers")
     llm_providers = llm_providers if isinstance(llm_providers, dict) else {}
+    tools = _section(config_data, "tools")
+    bash_tool = tools.get("bash")
+    bash_tool = bash_tool if isinstance(bash_tool, dict) else {}
     cognition = _section(config_data, "cognition")
     consolidation = cognition.get("consolidation")
     consolidation = consolidation if isinstance(consolidation, dict) else {}
@@ -377,6 +416,7 @@ def load_config(
                 _int_value(llm_context.get("safety_margin_tokens"), 1024),
             ),
         ),
+        bash_tool=_bash_tool_config(bash_tool),
         llm_provider_max_context_tokens=_provider_max_context_tokens(llm_providers),
         compatible_base_url=_env_or_config(
             "ALPHA_COMPATIBLE_BASE_URL",
@@ -501,6 +541,8 @@ def _parse_config_value(raw_value: str, expected_type: type) -> Any:
             return float(raw_value)
         except ValueError as exc:
             raise ValueError(f"Expected float value, got: {raw_value}") from exc
+    if expected_type is list:
+        return _list_value(raw_value, ())
     return raw_value
 
 
@@ -514,6 +556,12 @@ def _validate_config_value(key: str, value: Any) -> Any:
         return normalized
     if key in POSITIVE_INT_CONFIG_KEYS and isinstance(value, int) and value <= 0:
         raise ValueError(f"{key} must be greater than 0")
+    if key in {"tools.bash.allowed_workdirs", "tools.bash.env_passthrough"}:
+        return _validate_string_list_config_value(key, value)
+    if key in {"tools.bash.default_workdir"}:
+        text = str(value)
+        if "\x00" in text:
+            raise ValueError(f"{key} must not contain NUL characters")
     if key in RATIO_CONFIG_KEYS:
         numeric = float(value)
         if numeric <= 0 or numeric > 1:
@@ -537,6 +585,10 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         ),
         "llm.context.safety_margin_tokens": config.llm_context.safety_margin_tokens,
         "deepseek.reasoning_effort": config.deepseek_reasoning_effort or "",
+        "tools.bash.enabled": config.bash_tool.enabled,
+        "tools.bash.default_timeout_seconds": config.bash_tool.default_timeout_seconds,
+        "tools.bash.max_timeout_seconds": config.bash_tool.max_timeout_seconds,
+        "tools.bash.max_output_chars": config.bash_tool.max_output_chars,
         "cognition.drive.enabled": config.cognition_drive_enabled,
         "cognition.drive.interval_seconds": config.cognition_drive_interval_seconds,
         "cognition.drive.goal_cooldown_seconds": config.cognition_drive_goal_cooldown_seconds,
@@ -547,6 +599,18 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
     for provider, max_context_tokens in config.llm_provider_max_context_tokens.items():
         if max_context_tokens <= 0:
             raise ValueError(f"llm.providers.{provider}.max_context_tokens must be greater than 0")
+    if config.bash_tool.default_timeout_seconds > config.bash_tool.max_timeout_seconds:
+        raise ValueError(
+            "tools.bash.default_timeout_seconds must be at most "
+            "tools.bash.max_timeout_seconds"
+        )
+    if not config.bash_tool.allowed_workdirs:
+        raise ValueError("tools.bash.allowed_workdirs must not be empty")
+    if not _path_is_inside_allowed(
+        config.bash_tool.default_workdir,
+        config.bash_tool.allowed_workdirs,
+    ):
+        raise ValueError("tools.bash.default_workdir must be within tools.bash.allowed_workdirs")
     positive_values = (
         (
             "cognition.consolidation.interval_seconds",
@@ -590,11 +654,43 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
             config.cognition_drive_goal_cooldown_seconds,
         ),
         ("cognition.drive.active_goal_limit", config.cognition_drive_active_goal_limit),
+        ("tools.bash.default_timeout_seconds", config.bash_tool.default_timeout_seconds),
+        ("tools.bash.max_timeout_seconds", config.bash_tool.max_timeout_seconds),
+        ("tools.bash.max_output_chars", config.bash_tool.max_output_chars),
     )
     for key, value in positive_values:
         if value <= 0:
             raise ValueError(f"{key} must be greater than 0")
     return config
+
+
+def _validate_config_data(config_data: dict[str, Any]) -> None:
+    tools = _section(config_data, "tools")
+    bash = tools.get("bash")
+    bash = bash if isinstance(bash, dict) else {}
+    if not bash:
+        return
+    default_timeout = _int_value(bash.get("default_timeout_seconds"), 120)
+    max_timeout = _int_value(bash.get("max_timeout_seconds"), 600)
+    if default_timeout <= 0:
+        raise ValueError("tools.bash.default_timeout_seconds must be greater than 0")
+    if max_timeout <= 0:
+        raise ValueError("tools.bash.max_timeout_seconds must be greater than 0")
+    if default_timeout > max_timeout:
+        raise ValueError(
+            "tools.bash.default_timeout_seconds must be at most "
+            "tools.bash.max_timeout_seconds"
+        )
+    max_output_chars = _int_value(bash.get("max_output_chars"), 30000)
+    if max_output_chars <= 0:
+        raise ValueError("tools.bash.max_output_chars must be greater than 0")
+    allowed_workdirs = _list_value(bash.get("allowed_workdirs"), (".",))
+    if not allowed_workdirs:
+        raise ValueError("tools.bash.allowed_workdirs must not be empty")
+    default_workdir = _path_setting(_string_from_mapping(bash, "default_workdir", "."))
+    allowed_paths = _path_tuple(allowed_workdirs)
+    if not _path_is_inside_allowed(default_workdir, allowed_paths):
+        raise ValueError("tools.bash.default_workdir must be within tools.bash.allowed_workdirs")
 
 
 def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
@@ -605,6 +701,7 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         "llm.providers.openai-compatible",
         "llm.providers.deepseek",
         "compatible",
+        "tools.bash",
         "cognition.consolidation",
         "cognition.drive",
         "deepseek",
@@ -635,6 +732,8 @@ def _toml_literal(value: Any) -> str:
         return "true" if value else "false"
     if isinstance(value, int | float):
         return str(value)
+    if isinstance(value, list | tuple):
+        return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
@@ -684,6 +783,42 @@ def _float_value(value: Any, default: float) -> float:
     raise ValueError(f"Expected float value, got: {value}")
 
 
+def _bash_tool_config(section: dict[str, Any]) -> BashToolConfig:
+    default_workdir = _path_setting(
+        os.getenv("ALPHA_BASH_TOOL_DEFAULT_WORKDIR")
+        or _string_from_mapping(section, "default_workdir", ".")
+    )
+    allowed_workdirs = _path_tuple(
+        _list_env(
+            "ALPHA_BASH_TOOL_ALLOWED_WORKDIRS",
+            _list_value(section.get("allowed_workdirs"), (".",)),
+        )
+    )
+    return BashToolConfig(
+        enabled=_bool_env("ALPHA_BASH_TOOL_ENABLED", _bool_value(section.get("enabled"), False)),
+        default_workdir=default_workdir,
+        allowed_workdirs=allowed_workdirs,
+        default_timeout_seconds=_int_env(
+            "ALPHA_BASH_TOOL_DEFAULT_TIMEOUT_SECONDS",
+            _int_value(section.get("default_timeout_seconds"), 120),
+        ),
+        max_timeout_seconds=_int_env(
+            "ALPHA_BASH_TOOL_MAX_TIMEOUT_SECONDS",
+            _int_value(section.get("max_timeout_seconds"), 600),
+        ),
+        max_output_chars=_int_env(
+            "ALPHA_BASH_TOOL_MAX_OUTPUT_CHARS",
+            _int_value(section.get("max_output_chars"), 30000),
+        ),
+        env_passthrough=tuple(
+            _list_env(
+                "ALPHA_BASH_TOOL_ENV_PASSTHROUGH",
+                _list_value(section.get("env_passthrough"), ()),
+            )
+        ),
+    )
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -697,6 +832,71 @@ def _bool_value(value: Any, default: bool) -> bool:
     if isinstance(value, str) and value.strip():
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return default
+
+
+def _list_env(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return _list_value(raw, ())
+
+
+def _list_value(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return tuple(item.strip() for item in value.split(",") if item.strip())
+    if isinstance(value, list | tuple):
+        result: list[str] = []
+        for item in value:
+            text = str(item).strip()
+            if text:
+                result.append(text)
+        return tuple(result)
+    raise ValueError(f"Expected string list value, got: {value}")
+
+
+def _validate_string_list_config_value(key: str, value: Any) -> list[str]:
+    items = list(_list_value(value, ()))
+    for item in items:
+        if "\x00" in item:
+            raise ValueError(f"{key} must not contain NUL characters")
+    return items
+
+
+def _path_is_inside_allowed(path: Path, allowed_workdirs: tuple[Path, ...]) -> bool:
+    resolved = path.expanduser().resolve()
+    allowed = tuple(root.expanduser().resolve() for root in allowed_workdirs)
+    return any(resolved == root or resolved.is_relative_to(root) for root in allowed)
+
+
+def _string_from_mapping(mapping: dict[str, Any], key: str, default: str) -> str:
+    value = mapping.get(key)
+    if value is None:
+        return default
+    text = str(value)
+    if "\x00" in text:
+        raise ValueError(f"tools.bash.{key} must not contain NUL characters")
+    return text
+
+
+def _path_setting(value: str) -> Path:
+    if "\x00" in value:
+        raise ValueError("tools.bash.default_workdir must not contain NUL characters")
+    return Path(value).expanduser().resolve()
+
+
+def _path_tuple(values: tuple[str, ...]) -> tuple[Path, ...]:
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for value in values:
+        if "\x00" in value:
+            raise ValueError("tools.bash.allowed_workdirs must not contain NUL characters")
+        path = Path(value).expanduser().resolve()
+        if path not in seen:
+            resolved.append(path)
+            seen.add(path)
+    return tuple(resolved)
 
 
 def _load_toml_config(config_file: str | Path | None) -> dict[str, Any]:

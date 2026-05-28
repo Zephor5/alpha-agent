@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 type JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
@@ -27,6 +28,16 @@ class ToolResult:
     name: str
     output: JSONValue
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolExecutionContext:
+    """Runtime context available to one concrete tool invocation."""
+
+    session_id: str
+    tool_call_id: str | None
+    output_dir: Path
+    check_canceled: Callable[[str], None]
 
 
 def tool_output_kind(output: JSONValue) -> str:
@@ -55,7 +66,11 @@ class Tool(Protocol):
     name: str
     description: str
 
-    def run(self, arguments: dict[str, Any]) -> ToolResult:
+    def run(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> ToolResult:
         """Run the tool with validated arguments."""
 
 
@@ -69,3 +84,10 @@ class ToolWithStrict(Tool, Protocol):
     """Tool protocol extension for tools that opt into strict schema handling."""
 
     strict: bool | None
+
+
+class ToolWithTraceArguments(Tool, Protocol):
+    """Tool protocol extension for custom tool.started argument summaries."""
+
+    def trace_arguments(self, arguments: dict[str, Any]) -> Mapping[str, Any]:
+        """Return trace-safe arguments for runtime trace metadata."""

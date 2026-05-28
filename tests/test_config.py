@@ -43,6 +43,15 @@ max_context_tokens = 200000
 [llm.providers.deepseek]
 max_context_tokens = 900000
 
+[tools.bash]
+enabled = true
+default_workdir = "."
+allowed_workdirs = [".", "~/custom-alpha"]
+default_timeout_seconds = 30
+max_timeout_seconds = 90
+max_output_chars = 12000
+env_passthrough = ["ALPHA_VISIBLE_ENV"]
+
 [deepseek]
 api_key = "deepseek-key"
 reasoning_enabled = false
@@ -72,6 +81,16 @@ api_key = "tvly-file-key"
     assert config.max_context_tokens_for_provider("openai") == 200000
     assert config.max_context_tokens_for_provider("compatible") == 200000
     assert config.max_context_tokens_for_provider("deepseek") == 900000
+    assert config.bash_tool.enabled is True
+    assert config.bash_tool.default_workdir == Path(".").resolve()
+    assert config.bash_tool.allowed_workdirs == (
+        Path(".").resolve(),
+        Path("~/custom-alpha").expanduser().resolve(),
+    )
+    assert config.bash_tool.default_timeout_seconds == 30
+    assert config.bash_tool.max_timeout_seconds == 90
+    assert config.bash_tool.max_output_chars == 12000
+    assert config.bash_tool.env_passthrough == ("ALPHA_VISIBLE_ENV",)
     assert config.deepseek_api_key == "deepseek-key"
     assert config.llm_model == "deepseek-v4-pro"
     assert config.compatible_base_url == "https://compatible.example/v1"
@@ -105,6 +124,13 @@ api_key = "compatible-file-key"
 
 [tavily]
 api_key = "tvly-file-key"
+
+[tools.bash]
+enabled = false
+default_timeout_seconds = 10
+max_timeout_seconds = 20
+max_output_chars = 100
+allowed_workdirs = ["."]
 """,
         encoding="utf-8",
     )
@@ -114,6 +140,13 @@ api_key = "tvly-file-key"
     monkeypatch.setenv("ALPHA_COMPATIBLE_BASE_URL", "from-env")
     monkeypatch.setenv("ALPHA_COMPATIBLE_API_KEY", "compatible-env-key")
     monkeypatch.setenv("ALPHA_TAVILY_API_KEY", "tvly-env-key")
+    monkeypatch.setenv("ALPHA_BASH_TOOL_ENABLED", "true")
+    monkeypatch.setenv("ALPHA_BASH_TOOL_DEFAULT_WORKDIR", "~")
+    monkeypatch.setenv("ALPHA_BASH_TOOL_ALLOWED_WORKDIRS", ".,~")
+    monkeypatch.setenv("ALPHA_BASH_TOOL_DEFAULT_TIMEOUT_SECONDS", "45")
+    monkeypatch.setenv("ALPHA_BASH_TOOL_MAX_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("ALPHA_BASH_TOOL_MAX_OUTPUT_CHARS", "4096")
+    monkeypatch.setenv("ALPHA_BASH_TOOL_ENV_PASSTHROUGH", "ALPHA_VISIBLE_ENV,CI")
 
     config = load_config(env_file=None, config_file=config_path)
 
@@ -123,6 +156,16 @@ api_key = "tvly-file-key"
     assert config.compatible_base_url == "from-env"
     assert config.compatible_api_key == "compatible-env-key"
     assert config.tavily_api_key == "tvly-env-key"
+    assert config.bash_tool.enabled is True
+    assert config.bash_tool.default_workdir == Path("~").expanduser().resolve()
+    assert config.bash_tool.allowed_workdirs == (
+        Path(".").resolve(),
+        Path("~").expanduser().resolve(),
+    )
+    assert config.bash_tool.default_timeout_seconds == 45
+    assert config.bash_tool.max_timeout_seconds == 120
+    assert config.bash_tool.max_output_chars == 4096
+    assert config.bash_tool.env_passthrough == ("ALPHA_VISIBLE_ENV", "CI")
 
 
 def test_load_config_accepts_generic_tavily_env(
@@ -200,25 +243,40 @@ def test_config_cli_set_and_get(
         ["config", "set", "llm.context.expected_output_reserve_tokens", "2048"],
     )
     set_tavily = runner.invoke(app, ["config", "set", "tavily.api_key", "tvly-test"])
+    set_bash_enabled = runner.invoke(app, ["config", "set", "tools.bash.enabled", "true"])
+    set_bash_workdirs = runner.invoke(
+        app,
+        ["config", "set", "tools.bash.allowed_workdirs", ".,~/alpha-work"],
+    )
     set_provider_limit = runner.invoke(
         app,
         ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
     )
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
+    get_bash_enabled = runner.invoke(app, ["config", "get", "tools.bash.enabled"])
 
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
     assert set_context.exit_code == 0
     assert set_tavily.exit_code == 0
+    assert set_bash_enabled.exit_code == 0
+    assert set_bash_workdirs.exit_code == 0
     assert set_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
+    assert get_bash_enabled.exit_code == 0
     assert "codex" in get_provider.output
+    assert "true" in get_bash_enabled.output
     config = load_config(env_file=None, config_file=config_path)
     assert config.llm_provider == "codex"
     assert config.llm_debug_logging is True
     assert config.llm_context.expected_output_reserve_tokens == 2048
     assert config.max_context_tokens_for_provider("deepseek") == 900000
     assert config.tavily_api_key == "tvly-test"
+    assert config.bash_tool.enabled is True
+    assert config.bash_tool.allowed_workdirs == (
+        Path(".").resolve(),
+        Path("~/alpha-work").expanduser().resolve(),
+    )
 
 
 def test_config_set_preserves_cognition_consolidation_section(
@@ -384,6 +442,37 @@ def test_config_set_rejects_non_positive_limits(
     assert "must be greater than 0" in result.output
 
 
+def test_config_set_rejects_invalid_bash_timeout_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["config", "set", "tools.bash.max_timeout_seconds", "10"])
+
+    assert result.exit_code != 0
+    assert "tools.bash.default_timeout_seconds must be at most" in result.output
+
+
+def test_config_set_rejects_bash_default_workdir_outside_allowlist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["config", "set", "tools.bash.default_workdir", "~/outside-alpha-work"],
+    )
+
+    assert result.exit_code != 0
+    assert "tools.bash.default_workdir must be within" in result.output
+
+
 @pytest.mark.parametrize(
     ("toml", "match"),
     [
@@ -395,6 +484,18 @@ def test_config_set_rejects_non_positive_limits(
         (
             "[llm.context]\nhandover_compress_threshold_ratio = 2.0\n",
             "llm.context.handover_compress_threshold_ratio must be greater than 0 and at most 1",
+        ),
+        (
+            "[tools.bash]\ndefault_timeout_seconds = 20\nmax_timeout_seconds = 10\n",
+            "tools.bash.default_timeout_seconds must be at most tools.bash.max_timeout_seconds",
+        ),
+        (
+            "[tools.bash]\nmax_output_chars = 0\n",
+            "tools.bash.max_output_chars must be greater than 0",
+        ),
+        (
+            '[tools.bash]\ndefault_workdir = "~/outside-alpha-work"\nallowed_workdirs = ["."]\n',
+            "tools.bash.default_workdir must be within tools.bash.allowed_workdirs",
         ),
     ],
 )
@@ -417,6 +518,11 @@ def test_load_config_rejects_invalid_toml_values(
             "ALPHA_LLM_CONTEXT_MINIMUM_REMAINING_TOKENS",
             "0",
             "llm.context.minimum_remaining_tokens must be greater than 0",
+        ),
+        (
+            "ALPHA_BASH_TOOL_DEFAULT_TIMEOUT_SECONDS",
+            "0",
+            "tools.bash.default_timeout_seconds must be greater than 0",
         ),
     ],
 )

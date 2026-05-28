@@ -200,7 +200,10 @@ Use `alpha config set <section.key> <value>` for supported keys such as
 `llm.debug_logging`, `compatible.base_url`, `compatible.api_key`,
 `deepseek.api_key`, `deepseek.reasoning_enabled`,
 `deepseek.reasoning_effort`, `codex.access_token`, `tavily.api_key`,
-`llm.context.expected_output_reserve_tokens`, and
+`tools.bash.enabled`, `tools.bash.default_workdir`,
+`tools.bash.allowed_workdirs`, `tools.bash.default_timeout_seconds`,
+`tools.bash.max_timeout_seconds`, `tools.bash.max_output_chars`,
+`tools.bash.env_passthrough`, `llm.context.expected_output_reserve_tokens`, and
 `llm.providers.deepseek.max_context_tokens`. Drive Loop settings are also
 settable through `cognition.drive.*`. Consolidation settings are loaded from
 TOML and environment variables but are not currently accepted by
@@ -250,6 +253,15 @@ max_context_tokens = 1000000
 [compatible]
 base_url = "https://api.openai.com/v1"
 api_key = ""
+
+[tools.bash]
+enabled = false
+default_workdir = "."
+allowed_workdirs = ["."]
+default_timeout_seconds = 120
+max_timeout_seconds = 600
+max_output_chars = 30000
+env_passthrough = []
 
 [cognition.consolidation]
 enabled = true
@@ -313,6 +325,20 @@ Useful environment overrides:
 - `ALPHA_TAVILY_API_KEY`: Tavily API key. Alpha also accepts `TAVILY_API_KEY`.
   When set, Alpha registers the provider-backed `web_search` tool for
   daemon-owned agent turns.
+- `ALPHA_BASH_TOOL_ENABLED`: Enables the local `bash` tool. Defaults to
+  `false`.
+- `ALPHA_BASH_TOOL_DEFAULT_WORKDIR`: Default bash tool working directory.
+  Defaults to `.`.
+- `ALPHA_BASH_TOOL_ALLOWED_WORKDIRS`: Comma-separated workdir allowlist for the
+  bash tool. Defaults to `.`.
+- `ALPHA_BASH_TOOL_DEFAULT_TIMEOUT_SECONDS`: Default foreground command timeout.
+  Defaults to `120`.
+- `ALPHA_BASH_TOOL_MAX_TIMEOUT_SECONDS`: Maximum accepted foreground command
+  timeout. Defaults to `600`.
+- `ALPHA_BASH_TOOL_MAX_OUTPUT_CHARS`: Maximum bash stdout/stderr content
+  returned to the model after cleanup. Defaults to `30000`.
+- `ALPHA_BASH_TOOL_ENV_PASSTHROUGH`: Comma-separated environment variable names
+  to pass through to bash. Defaults to empty; provider secrets are still blocked.
 - `ALPHA_LLM_CONTEXT_TOOL_TRUNCATE_THRESHOLD_RATIO`: Tool replay payload
   truncation threshold. Defaults to `0.60`.
 - `ALPHA_LLM_CONTEXT_HANDOVER_COMPRESS_THRESHOLD_RATIO`: LLM handover
@@ -387,6 +413,25 @@ uv run alpha config set tavily.api_key tvly-...
 uv run alpha daemon restart
 ```
 
+The built-in `bash` tool is disabled by default. Enable it only for trusted
+local use when you want the agent to run foreground build, test, package, Git,
+diagnostic, or system-inspection commands:
+
+```bash
+uv run alpha config set tools.bash.enabled true
+uv run alpha config set tools.bash.allowed_workdirs ".,~/alpha-work"
+uv run alpha daemon restart
+```
+
+`bash` is not a security sandbox. The configured workdir allowlist only controls
+the process `cwd`; it is not filesystem confinement, so commands can still refer
+to absolute paths that the daemon user can access. The tool uses a cleaned
+environment, timeout/cancel handling, dangerous-command blocking, and output
+redaction/truncation. It does not allow background process escape hatches such
+as `nohup`, `disown`, `setsid`, or a trailing `&`, and it blocks privileged or
+interactive commands such as `sudo` and `vim`. Do not expose it to untrusted
+remote gateway users without a stronger sandbox or approval layer.
+
 ## Runtime State
 
 The current SQLite state baseline is deliberately narrow:
@@ -424,8 +469,8 @@ resolution, queued conflict consumption, and temporary strategy overrides are
 also in place. GoalProjection and manual DriveLoop self-signals are in place.
 SubjectProjection now persists the L3 SelfModel from `self_model_updated`.
 The explicit tool execution subsystem is also in place, with `web_search`
-registered when Tavily credentials are configured. Semantic strategy/lens diff
-remains pending.
+registered when Tavily credentials are configured and `bash` registered only
+when `tools.bash.enabled=true`. Semantic strategy/lens diff remains pending.
 
 ## Current Limitations
 

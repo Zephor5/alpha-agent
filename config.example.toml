@@ -35,6 +35,16 @@ max_context_tokens = 258400
 [llm.providers.deepseek]
 max_context_tokens = 1000000
 
+[tools.bash]
+# Disabled by default because this executes local foreground shell commands.
+enabled = false
+default_workdir = "."
+allowed_workdirs = ["."]
+default_timeout_seconds = 120
+max_timeout_seconds = 600
+max_output_chars = 30000
+env_passthrough = []
+
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300

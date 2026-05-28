@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from alpha_agent.config import AlphaConfig
+from alpha_agent.config import AlphaConfig, BashToolConfig
 from alpha_agent.daemon.manager import AgentFactory, AgentManager
 from alpha_agent.state.store import StateStore
 
@@ -95,6 +95,11 @@ def test_agent_factory_registers_configured_default_tools(tmp_path: Path) -> Non
         db_path=tmp_path / "alpha.db",
         log_dir=tmp_path / "logs",
         gateway_status_path=tmp_path / "gateway-status.json",
+        bash_tool=BashToolConfig(
+            enabled=True,
+            default_workdir=tmp_path,
+            allowed_workdirs=(tmp_path,),
+        ),
         tavily_api_key="tvly-test",
     )
     store = StateStore(config.db_path)
@@ -102,7 +107,7 @@ def test_agent_factory_registers_configured_default_tools(tmp_path: Path) -> Non
 
     agent = AgentFactory(config, store).create()
 
-    assert agent.tool_registry.names() == ["web_search"]
+    assert agent.tool_registry.names() == ["bash", "web_search"]
 
 
 class _MonotonicClock:

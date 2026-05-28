@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, cast
 
 from alpha_agent.cognition.emitter import EventEmitter
@@ -100,6 +101,8 @@ class Effector:
         if tool_calls and self.max_tool_iterations > 0:
             executed = self.tool_executor.execute(
                 calls=tool_calls,
+                session_id=str(view.window.thread_id),
+                output_dir=Path(".alpha-agent/tool-results"),
                 write_trace=_in_memory_trace,
                 check_canceled=lambda _stage: None,
                 recover_errors=True,

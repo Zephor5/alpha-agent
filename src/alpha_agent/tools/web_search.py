@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from alpha_agent.tools.base import ToolResult
+from alpha_agent.tools.base import ToolExecutionContext, ToolResult
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 SEARCH_DEPTH_VALUES = {"advanced", "basic", "fast", "ultra-fast"}
@@ -97,9 +97,10 @@ class TavilyWebSearchTool:
         self.client = client
         self.timeout = timeout
 
-    def run(self, arguments: dict[str, Any]) -> ToolResult:
+    def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         """Run a web search and return compact JSON suitable for LLM follow-up."""
 
+        del context
         if not self.api_key:
             raise ValueError("tavily.api_key is required to use web_search")
         payload = self._request_payload(arguments)

@@ -211,6 +211,7 @@ class AlphaAgent:
         max_llm_rounds: int | None = None,
         llm_debug_logging: bool = False,
         llm_trace_log_path: str | Path | None = None,
+        tool_output_dir: str | Path | None = None,
         llm_context_config: LLMContextConfig | None = None,
         max_context_tokens: int | None = None,
         event_log: EventLog | None = None,
@@ -239,6 +240,11 @@ class AlphaAgent:
         self.llm_debug_logging = llm_debug_logging
         self.llm_trace_log_path = (
             Path(llm_trace_log_path).expanduser() if llm_trace_log_path else None
+        )
+        self.tool_output_dir = (
+            Path(tool_output_dir).expanduser()
+            if tool_output_dir is not None
+            else self.store.db_path.parent / "tool-results"
         )
         self.event_log = event_log or SQLiteEventLog(store)
         self.emitter = EventEmitter(self.event_log)
@@ -1067,6 +1073,8 @@ class AlphaAgent:
     ) -> list[ExecutedToolResult]:
         return self.tool_executor.execute(
             calls=calls,
+            session_id=session_id,
+            output_dir=self.tool_output_dir,
             write_trace=lambda event_type, content, metadata: self.store.append_runtime_trace(
                 session_id=session_id,
                 event_type=event_type,

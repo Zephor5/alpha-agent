@@ -20,7 +20,7 @@ from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.runtime.context_handover import DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.base import Tool, ToolResult
+from alpha_agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from alpha_agent.tools.registry import ToolRegistry
 
 
@@ -131,6 +131,10 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
         "llm.started",
         "llm.completed",
     ]
+    started_trace = store.list_runtime_traces("s1")[2]
+    assert json.loads(started_trace.content)["arguments"] == {"text": "<trace-safe>"}
+    assert started_trace.metadata["call"]["arguments"] == {"text": "<trace-safe>"}
+    assert "raw_arguments" not in started_trace.metadata["call"]["metadata"]
 
 
 def test_agent_sends_only_structured_tool_output_to_llm_context(tmp_path) -> None:
@@ -589,20 +593,25 @@ class _EchoTool(Tool):
     name = "echo"
     description = "Echo input."
 
-    def run(self, arguments):
+    def run(self, arguments, context: ToolExecutionContext):
+        del context
         return ToolResult(
             name=self.name,
             output=f"complete tool result: {arguments['text']}",
             metadata={},
         )
 
+    def trace_arguments(self, arguments):
+        del arguments
+        return {"text": "<trace-safe>"}
+
 
 class _StructuredTool(Tool):
     name = "structured"
     description = "Return structured output."
 
-    def run(self, arguments):
-        del arguments
+    def run(self, arguments, context: ToolExecutionContext):
+        del arguments, context
         return ToolResult(
             name=self.name,
             output={"ok": True, "items": [{"title": "Alpha"}]},
