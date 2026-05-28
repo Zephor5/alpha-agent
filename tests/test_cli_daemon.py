@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from alpha_agent import cli
 from alpha_agent.cli import app
+from alpha_agent.state.store import StateStore
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -169,6 +170,134 @@ def test_chat_sends_turns_over_ipc(tmp_path: Path, monkeypatch) -> None:
             "source_metadata": {"channel": "cli", "command": "chat"},
         },
     ]
+
+
+def test_chat_with_existing_session_renders_recent_history(tmp_path: Path, monkeypatch) -> None:
+    _reset_fake_client()
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.append_session_message(
+        session_id="local-s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="old user message",
+    )
+    store.append_session_message(
+        session_id="local-s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="old assistant message",
+    )
+    store.append_session_message(
+        session_id="local-s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="recent user message",
+    )
+    store.append_session_message(
+        session_id="local-s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="recent assistant message",
+    )
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    monkeypatch.setattr(cli, "CHAT_HISTORY_PREVIEW_LIMIT", 2)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["chat", "--session", "local-s1"],
+        input="/exit\n",
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "Alpha Chat" in result.output
+    assert "local-s1" in result.output
+    assert "Recent Session Context" in result.output
+    assert "recent user message" in result.output
+    assert "recent assistant message" in result.output
+    assert "old user message" not in result.output
+    assert "old assistant message" not in result.output
+    assert _FakeDaemonClient.requests == []
+
+
+def test_chat_history_table_draws_message_separators(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.append_session_message(
+        session_id="local-s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="first",
+    )
+    store.append_session_message(
+        session_id="local-s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="second",
+    )
+
+    table = cli._build_chat_history_table(
+        cli._displayable_session_messages(store, "local-s1")
+    )
+
+    assert table.show_lines is True
+
+
+def test_chat_with_existing_session_renders_tool_round(tmp_path: Path, monkeypatch) -> None:
+    _reset_fake_client()
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.append_session_message(
+        session_id="local-s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="check docs",
+    )
+    store.append_session_message(
+        session_id="local-s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": '{"query":"alpha"}'},
+            }
+        ],
+    )
+    store.append_session_message(
+        session_id="local-s1",
+        kind="tool_message",
+        llm_role="tool",
+        raw_content='{"ok": true}',
+        tool_call_id="call_1",
+        provider_metadata={"tool_name": "lookup"},
+    )
+    store.append_session_message(
+        session_id="local-s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="done",
+    )
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["chat", "--session", "local-s1"],
+        input="/exit\n",
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "Tool call: lookup" in result.output
+    assert '{"query":"alpha"}' in result.output
+    assert "Tool result: lookup" in result.output
+    assert '{"ok": true}' in result.output
+    assert _FakeDaemonClient.requests == []
 
 
 def test_chat_reports_daemon_not_running(tmp_path: Path, monkeypatch) -> None:

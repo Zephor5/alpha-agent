@@ -110,7 +110,11 @@ Start an interactive chat:
 
 ```bash
 uv run alpha chat
+uv run alpha chat --session <session-id>
 ```
+
+Passing `--session` resumes that session and prints a compact preview of recent
+user/assistant messages before accepting the next turn.
 
 Run a single turn:
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -12,8 +13,11 @@ from typing import Annotated, Any
 
 import typer
 from prompt_toolkit import prompt as _terminal_prompt
+from rich import box
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from alpha_agent.cognition.controller import CognitiveController, default_projection_registry
 from alpha_agent.cognition.emitter import EventEmitter
@@ -91,8 +95,13 @@ from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
 from alpha_agent.runtime.session import new_session_id
-from alpha_agent.runtime.session_context import SessionContextAssembler
+from alpha_agent.runtime.session_context import (
+    SYSTEM_REMINDER_CLOSE,
+    SYSTEM_REMINDER_OPEN,
+    SessionContextAssembler,
+)
 from alpha_agent.skills.manager import SkillManager
+from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.default import build_default_tool_registry
 
@@ -120,6 +129,14 @@ cognition_app.add_typer(self_model_app, name="self-model")
 DAEMON_START_TIMEOUT_SECONDS = 5.0
 DAEMON_STOP_TIMEOUT_SECONDS = 5.0
 DAEMON_START_POLL_INTERVAL_SECONDS = 0.1
+CHAT_HISTORY_PREVIEW_LIMIT = 8
+CHAT_HISTORY_MESSAGE_MAX_CHARS = 900
+CHAT_DISPLAY_MESSAGE_KINDS = {
+    "user_message",
+    "assistant_message",
+    "tool_message",
+    "compressed_message",
+}
 
 
 def _display_model(config: AlphaConfig) -> str:
@@ -142,6 +159,158 @@ def _read_chat_message() -> str:
     if sys.stdin.isatty() and sys.stdout.isatty():
         return _terminal_prompt("You: ")
     return typer.prompt("You")
+
+
+def _render_chat_header(session_id: str) -> None:
+    header = Table.grid(expand=True)
+    header.add_column(style="bold cyan")
+    header.add_column(justify="right", style="dim")
+    header.add_row("Alpha Chat", f"session {session_id}")
+    console.print(Panel(header, box=box.ROUNDED, border_style="cyan", padding=(0, 1)))
+
+
+def _render_chat_history_preview(
+    store: StateStore,
+    session_id: str,
+    *,
+    limit: int | None = None,
+) -> None:
+    display_messages = _displayable_session_messages(store, session_id)
+    if not display_messages:
+        console.print(
+            Panel(
+                Text("No prior messages for this session.", style="dim"),
+                title="Recent Session Context",
+                box=box.ROUNDED,
+                border_style="dim",
+                padding=(0, 1),
+            )
+        )
+        return
+
+    table = _build_chat_history_table(display_messages, limit=limit)
+    console.print(table)
+
+
+def _build_chat_history_table(
+    display_messages: list[SessionMessage],
+    *,
+    limit: int | None = None,
+) -> Table:
+    preview_limit = CHAT_HISTORY_PREVIEW_LIMIT if limit is None else limit
+    visible_messages = display_messages[-max(1, preview_limit) :]
+    omitted_count = len(display_messages) - len(visible_messages)
+    table = Table(
+        title="Recent Session Context",
+        box=box.SIMPLE_HEAVY,
+        show_header=False,
+        show_lines=True,
+        expand=True,
+        padding=(0, 1),
+    )
+    table.add_column("Role", no_wrap=True, style="bold cyan", width=9)
+    table.add_column("Message", overflow="fold")
+    if omitted_count > 0:
+        table.caption = (
+            f"Showing last {len(visible_messages)} messages; {omitted_count} older omitted."
+        )
+    for message in visible_messages:
+        table.add_row(
+            _chat_history_role_label(message),
+            Text(_chat_history_content(message), overflow="fold"),
+        )
+    return table
+
+
+def _render_assistant_reply(content: str) -> None:
+    console.print(
+        Panel(
+            Text(content),
+            title="Alpha",
+            box=box.ROUNDED,
+            border_style="green",
+            padding=(0, 1),
+        )
+    )
+
+
+def _displayable_session_messages(store: StateStore, session_id: str) -> list[SessionMessage]:
+    projection = SessionContextAssembler(store).load(session_id)
+    return [
+        message
+        for message in projection.source_messages
+        if message.kind in CHAT_DISPLAY_MESSAGE_KINDS
+    ]
+
+
+def _chat_history_role_label(message: SessionMessage) -> str:
+    if message.kind == "compressed_message":
+        return "Context"
+    if message.llm_role == "tool":
+        return "Tool"
+    if message.llm_role == "assistant":
+        return "Alpha"
+    return "You"
+
+
+def _chat_history_content(message: SessionMessage) -> str:
+    content = message.model_content if message.model_content is not None else message.raw_content
+    if message.kind == "compressed_message":
+        content = _strip_system_reminder(content)
+    elif message.kind == "tool_message":
+        content = _tool_result_display(message, content)
+    elif message.tool_calls:
+        content = _assistant_tool_call_display(message, content)
+    return _truncate_chat_history_content(content)
+
+
+def _assistant_tool_call_display(message: SessionMessage, content: str) -> str:
+    parts = [content.strip()] if content.strip() else []
+    parts.extend(_tool_call_display(tool_call) for tool_call in message.tool_calls)
+    return "\n".join(parts)
+
+
+def _tool_call_display(tool_call: dict[str, Any]) -> str:
+    function = tool_call.get("function")
+    if isinstance(function, dict):
+        name = str(function.get("name") or "unknown")
+        arguments = function.get("arguments")
+    else:
+        name = str(tool_call.get("name") or tool_call.get("id") or "unknown")
+        arguments = tool_call.get("arguments")
+    if arguments is None or arguments == "":
+        return f"Tool call: {name}"
+    return f"Tool call: {name}\n{_display_jsonish(arguments)}"
+
+
+def _tool_result_display(message: SessionMessage, content: str) -> str:
+    tool_name = message.provider_metadata.get("tool_name")
+    name = str(tool_name or message.tool_call_id or "unknown")
+    if content.strip():
+        return f"Tool result: {name}\n{content.strip()}"
+    return f"Tool result: {name}"
+
+
+def _display_jsonish(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(value)
+
+
+def _strip_system_reminder(content: str) -> str:
+    stripped = content.strip()
+    if stripped.startswith(SYSTEM_REMINDER_OPEN) and stripped.endswith(SYSTEM_REMINDER_CLOSE):
+        return stripped[len(SYSTEM_REMINDER_OPEN) : -len(SYSTEM_REMINDER_CLOSE)].strip()
+    return stripped
+
+
+def _truncate_chat_history_content(content: str) -> str:
+    if len(content) <= CHAT_HISTORY_MESSAGE_MAX_CHARS:
+        return content
+    return f"{content[: CHAT_HISTORY_MESSAGE_MAX_CHARS - 3].rstrip()}..."
 
 
 def _render_daemon_status(status: DaemonStatus) -> None:
@@ -598,8 +767,11 @@ def chat(
     config = load_config()
     runtime = daemon_runtime_config(config)
     client = DaemonClient(runtime.socket_path)
+    store = _store(config)
     session_id = session or new_session_id()
-    console.print(f"Session: {session_id}")
+    _render_chat_header(session_id)
+    if session is not None:
+        _render_chat_history_preview(store, session_id)
     while True:
         try:
             message = _read_chat_message()
@@ -618,7 +790,7 @@ def chat(
             )
         )
         session_id = str(response.get("session_id") or session_id)
-        console.print(str(response.get("response", "")))
+        _render_assistant_reply(str(response.get("response", "")))
 
 
 @skills_app.command("list")
