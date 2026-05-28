@@ -26,7 +26,7 @@ from alpha_agent.llm.base import (
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.runtime.tools import ToolExecutor
 from alpha_agent.state.models import RuntimeTrace
-from alpha_agent.tools.base import ToolCall, ToolResult
+from alpha_agent.tools.base import ToolCall, ToolResult, tool_output_to_model_content
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
@@ -155,13 +155,7 @@ def _tool_result_message(call: ToolCall, result: ToolResult) -> ChatMessage:
     return {
         "role": "tool",
         "tool_call_id": _required_tool_call_id(call),
-        "content": deterministic_json(
-            {
-                "content": result.content,
-                "metadata": dict(result.metadata),
-                "name": result.name,
-            }
-        ),
+        "content": tool_output_to_model_content(result.output),
     }
 
 

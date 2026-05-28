@@ -144,8 +144,8 @@ explicit while making it useful for real channels and longer tasks.
   - keep tool registry small.
   - no hidden agent framework.
   - include `tool.started`, `tool.completed`, `tool.failed`.
-  - require deterministic result serialization into traces and transcript tool
-    messages.
+  - return only tool raw output in transcript tool messages; keep tool name and
+    diagnostic metadata in trace/session metadata.
 - [x] Add interrupt/cancel support:
   - cancellation flag by session_id.
   - gateway `/stop` command.
@@ -181,7 +181,7 @@ P1 Agent Loop implementation notes:
   `tool_call_id`. Missing provider tool ids and `finish_reason=tool_calls`
   without normalized calls fail before execution. Recoverable provider tool
   execution failures are recorded as `tool.failed` traces and returned to the
-  model as deterministic JSON tool results so the next LLM round can correct.
+  model as plain tool-output text so the next LLM round can correct.
 - Cancellation is synchronous and cooperative. The runtime checks session
   cancellation flags at safe boundaries before/after user message persistence,
   state loading, LLM, and tool stages. It cannot preempt a blocking provider or

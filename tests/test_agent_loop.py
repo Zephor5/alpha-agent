@@ -133,6 +133,48 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
     ]
 
 
+def test_agent_sends_only_structured_tool_output_to_llm_context(tmp_path) -> None:
+    store = _store(tmp_path)
+    registry = ToolRegistry()
+    registry.register(_StructuredTool())
+    provider = _StructuredToolCallingProvider()
+    agent = AlphaAgent(store=store, llm_provider=provider, tool_registry=registry)
+
+    result = agent.respond("use structured tool", session_id="s1")
+
+    assert result.response == "final answer"
+    tool_message = cast(ToolChatMessage, provider.calls[1][-1])
+    assert tool_message["role"] == "tool"
+    assert tool_message["tool_call_id"] == "call_1"
+    assert json.loads(tool_message["content"]) == {
+        "items": [{"title": "Alpha"}],
+        "ok": True,
+    }
+    assert "structured" not in tool_message["content"]
+    assert "metadata" not in tool_message["content"]
+
+    persisted = store.list_session_messages("s1")[2]
+    assert json.loads(persisted.raw_content) == {
+        "items": [{"title": "Alpha"}],
+        "ok": True,
+    }
+    assert persisted.provider_metadata == {"tool_name": "structured"}
+    assert persisted.metadata["result_metadata"] == {"source": "test"}
+    assert persisted.metadata["tool_output_kind"] == "json"
+
+    completed_trace = store.list_runtime_traces("s1")[3]
+    assert completed_trace.event_type == "tool.completed"
+    assert json.loads(completed_trace.content) == {
+        "items": [{"title": "Alpha"}],
+        "ok": True,
+    }
+    assert completed_trace.metadata["result"] == {
+        "metadata": {"source": "test"},
+        "name": "structured",
+        "output": {"items": [{"title": "Alpha"}], "ok": True},
+    }
+
+
 def test_llm_debug_payloads_are_written_to_jsonl_not_database(tmp_path) -> None:
     store = _store(tmp_path)
     trace_log = tmp_path / "llm.jsonl"
@@ -324,12 +366,7 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
     compression_tool = cast(ToolChatMessage, compression_call[3])
     assert compression_assistant["tool_calls"][0]["id"] == "call_1"
     assert compression_tool["tool_call_id"] == "call_1"
-    compression_tool_payload = json.loads(str(compression_tool["content"]))
-    assert compression_tool_payload == {
-        "content": "complete tool result: hello",
-        "metadata": {},
-        "name": "echo",
-    }
+    assert compression_tool["content"] == "complete tool result: hello"
     assert compression_call[-1]["role"] == "user"
     assert DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in str(compression_call[-1]["content"])
 
@@ -353,11 +390,10 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
     ]
     assert persisted[1].tool_calls[0]["id"] == "call_1"
     assert persisted[2].tool_call_id == "call_1"
-    assert json.loads(persisted[2].raw_content) == {
-        "content": "complete tool result: hello",
-        "metadata": {},
-        "name": "echo",
-    }
+    assert persisted[2].raw_content == "complete tool result: hello"
+    assert persisted[2].provider_metadata == {"tool_name": "echo"}
+    assert persisted[2].metadata["result_metadata"] == {}
+    assert persisted[2].metadata["tool_output_kind"] == "text"
     assert persisted[3].raw_content.startswith("<system-reminder>")
     assert persisted[3].raw_content.endswith("</system-reminder>")
     assert persisted[3].compression_point_ordinal == persisted[2].ordinal
@@ -516,6 +552,39 @@ class _ToolLoopCompressionProvider:
         return LLMResponse(content="final answer", model="test", provider=self.name)
 
 
+class _StructuredToolCallingProvider:
+    name = "structured-tool-provider"
+
+    def __init__(self):
+        self.calls: list[list[ChatMessage]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        del tools, tool_choice
+        self.calls.append([_copy_chat_message(message) for message in messages])
+        if len(self.calls) == 1:
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_1",
+                        name="structured",
+                        arguments={},
+                        raw_arguments="{}",
+                    )
+                ],
+            )
+        return LLMResponse(content="final answer", model="test", provider=self.name)
+
+
 class _EchoTool(Tool):
     name = "echo"
     description = "Echo input."
@@ -523,8 +592,21 @@ class _EchoTool(Tool):
     def run(self, arguments):
         return ToolResult(
             name=self.name,
-            content=f"complete tool result: {arguments['text']}",
+            output=f"complete tool result: {arguments['text']}",
             metadata={},
+        )
+
+
+class _StructuredTool(Tool):
+    name = "structured"
+    description = "Return structured output."
+
+    def run(self, arguments):
+        del arguments
+        return ToolResult(
+            name=self.name,
+            output={"ok": True, "items": [{"title": "Alpha"}]},
+            metadata={"source": "test"},
         )
 
 

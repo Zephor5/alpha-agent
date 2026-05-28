@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from alpha_agent.config import AlphaConfig
-from alpha_agent.llm.base import ChatMessage, LLMToolDefinition
+from alpha_agent.llm.base import AssistantChatMessage, ChatMessage, LLMToolDefinition
 from alpha_agent.llm.codex import (
     CodexResponsesProvider,
     codex_responses_payload,
@@ -475,7 +475,8 @@ def test_openai_compatible_provider_strips_internal_reasoning_content(
         },
         {"role": "tool", "tool_call_id": "call_1", "content": '{"result":"ok"}'},
     ]
-    assert messages[0]["reasoning_content"] == "internal reasoning"
+    assistant_message = cast(AssistantChatMessage, messages[0])
+    assert assistant_message["reasoning_content"] == "internal reasoning"
 
 
 def test_openai_compatible_provider_sends_tools_with_none_tool_choice(

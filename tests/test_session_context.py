@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from alpha_agent.config import LLMContextConfig
 from alpha_agent.runtime.session_context import SessionContextAssembler, wrap_system_reminder
 from alpha_agent.state.store import StateStore
@@ -389,7 +387,7 @@ def test_truncate_tool_context_if_needed_skips_messages_before_latest_compressed
     assert new_assistant_after.metadata["truncate_checked"] is True
 
 
-def test_truncate_tool_context_if_needed_invalid_json_raises_without_partial_write(
+def test_truncate_tool_context_if_needed_truncates_plain_text_tool_outputs(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -407,35 +405,40 @@ def test_truncate_tool_context_if_needed_invalid_json_raises_without_partial_wri
             }
         ],
     )
-    invalid_tool = store.append_session_message(
+    plain_tool = store.append_session_message(
         session_id="s1",
         kind="tool_message",
         llm_role="tool",
-        raw_content="{not valid json",
+        raw_content="plain text tool output",
         tool_call_id="call_1",
+        metadata={"tool_output_kind": "text"},
     )
 
-    with pytest.raises(json.JSONDecodeError):
-        SessionContextAssembler(store).truncate_tool_context_if_needed(
-            "s1",
-            context_config=LLMContextConfig(
-                tool_string_truncate_chars=5,
-                expected_output_reserve_tokens=0,
-                safety_margin_tokens=0,
-            ),
-            max_context_tokens=1,
-        )
+    result = SessionContextAssembler(store).truncate_tool_context_if_needed(
+        "s1",
+        context_config=LLMContextConfig(
+            tool_string_truncate_chars=5,
+            expected_output_reserve_tokens=0,
+            safety_margin_tokens=0,
+        ),
+        max_context_tokens=1,
+    )
 
     messages = store.list_session_messages("s1")
     assistant_after = messages[0]
-    invalid_tool_after = messages[1]
+    plain_tool_after = messages[1]
 
+    assert result.checked_message_ids == [assistant.id, plain_tool.id]
+    assert result.truncated_message_ids == [assistant.id, plain_tool.id]
     assert assistant_after.id == assistant.id
-    assert assistant_after.tool_calls[0]["function"]["arguments"] == valid_arguments
-    assert assistant_after.metadata == {}
-    assert invalid_tool_after.id == invalid_tool.id
-    assert invalid_tool_after.raw_content == "{not valid json"
-    assert invalid_tool_after.metadata == {}
+    assert json.loads(assistant_after.tool_calls[0]["function"]["arguments"]) == {
+        "body": "AAAAA<system-reminder>truncated</system-reminder>"
+    }
+    assert plain_tool_after.id == plain_tool.id
+    assert plain_tool_after.raw_content == "plain<system-reminder>truncated</system-reminder>"
+    assert plain_tool_after.metadata["tool_output_kind"] == "text"
+    assert plain_tool_after.metadata["truncate_checked"] is True
+    assert plain_tool_after.metadata["original_lengths"] == {"raw_content": 22}
 
 
 def test_truncate_tool_context_if_needed_marks_checked_without_truncating_short_strings(

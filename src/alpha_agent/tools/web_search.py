@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -108,7 +107,7 @@ class TavilyWebSearchTool:
         normalized = self._response_payload(response)
         return ToolResult(
             name=self.name,
-            content=json.dumps(normalized, sort_keys=True, separators=(",", ":")),
+            output=normalized,
             metadata={
                 "provider": "tavily",
                 "request_id": response.get("request_id"),

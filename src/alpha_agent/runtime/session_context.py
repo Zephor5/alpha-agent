@@ -248,25 +248,21 @@ def _prepare_tool_message_update(
     tool_string_truncate_chars: int,
 ) -> _ReplayPayloadUpdate:
     original_lengths: dict[str, int] = {}
-    raw_payload = json.loads(message.raw_content)
-    raw_content = _dump_replay_json(
-        _truncate_json_strings(
-            raw_payload,
-            tool_string_truncate_chars,
-            "raw_content",
-            original_lengths,
-        )
+    raw_content = _truncate_tool_message_content(
+        message.raw_content,
+        tool_string_truncate_chars,
+        "raw_content",
+        original_lengths,
+        message.metadata,
     )
     model_content = message.model_content
     if model_content is not None:
-        model_payload = json.loads(model_content)
-        model_content = _dump_replay_json(
-            _truncate_json_strings(
-                model_payload,
-                tool_string_truncate_chars,
-                "model_content",
-                original_lengths,
-            )
+        model_content = _truncate_tool_message_content(
+            model_content,
+            tool_string_truncate_chars,
+            "model_content",
+            original_lengths,
+            message.metadata,
         )
     return _ReplayPayloadUpdate(
         message_id=message.id,
@@ -275,6 +271,31 @@ def _prepare_tool_message_update(
         tool_calls=message.tool_calls,
         metadata=_truncate_checked_metadata(message.metadata, original_lengths),
         truncated=bool(original_lengths),
+    )
+
+
+def _truncate_tool_message_content(
+    content: str,
+    tool_string_truncate_chars: int,
+    path: str,
+    original_lengths: dict[str, int],
+    metadata: Mapping[str, Any],
+) -> str:
+    if metadata.get("tool_output_kind") == "text":
+        return _truncate_json_strings(
+            content,
+            tool_string_truncate_chars,
+            path,
+            original_lengths,
+        )
+    payload = json.loads(content)
+    return _dump_replay_json(
+        _truncate_json_strings(
+            payload,
+            tool_string_truncate_chars,
+            path,
+            original_lengths,
+        )
     )
 
 

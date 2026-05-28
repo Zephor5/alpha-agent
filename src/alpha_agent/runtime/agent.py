@@ -53,7 +53,7 @@ from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.base import ToolCall
+from alpha_agent.tools.base import ToolCall, tool_output_kind
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
@@ -970,6 +970,7 @@ class AlphaAgent:
                 metadata={
                     "trace_id": item.trace.id,
                     "result_metadata": dict(item.result.metadata),
+                    "tool_output_kind": tool_output_kind(item.result.output),
                 },
             )
             for item in results

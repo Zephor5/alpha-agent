@@ -99,7 +99,7 @@ def test_tavily_web_search_tool_posts_sanitized_request_and_formats_results() ->
         },
     }
     assert result.name == "web_search"
-    assert json.loads(result.content) == {
+    assert result.output == {
         "answer": "A short synthesized answer.",
         "query": "alpha agent web search",
         "request_id": "req_123",

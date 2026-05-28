@@ -9,7 +9,7 @@ from typing import Any
 from alpha_agent.llm.base import LLMToolCall
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.state.models import RuntimeTrace
-from alpha_agent.tools.base import ToolCall, ToolResult
+from alpha_agent.tools.base import ToolCall, ToolResult, tool_output_to_model_content
 from alpha_agent.tools.registry import ToolRegistry
 
 ToolTraceWriter = Callable[[str, str, dict[str, Any]], RuntimeTrace]
@@ -98,7 +98,7 @@ class ToolExecutor:
                 result = tool.run(dict(call.arguments))
                 check_canceled("after_tool")
                 result_payload = self._result_payload(result)
-                result_content = deterministic_json(result_payload)
+                result_content = tool_output_to_model_content(result.output)
                 completed_trace = write_trace(
                     "tool.completed",
                     result_content,
@@ -130,7 +130,7 @@ class ToolExecutor:
 
                 result = self._error_result(call, exc)
                 result_payload = self._result_payload(result)
-                result_content = deterministic_json(result_payload)
+                result_content = tool_output_to_model_content(result.output)
                 completed_trace = write_trace(
                     "tool.failed",
                     result_content,
@@ -180,16 +180,16 @@ class ToolExecutor:
 
     def _result_payload(self, result: ToolResult) -> dict[str, Any]:
         return {
-            "content": result.content,
             "metadata": dict(result.metadata),
             "name": result.name,
+            "output": result.output,
         }
 
     def _error_result(self, call: ToolCall, exc: Exception) -> ToolResult:
         message = str(exc)
         return ToolResult(
             name=call.name,
-            content=f"Tool execution failed: {message}",
+            output=f"Tool execution failed: {message}",
             metadata={
                 "failed": True,
                 "error": message,

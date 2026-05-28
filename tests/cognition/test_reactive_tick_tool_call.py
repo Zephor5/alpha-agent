@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 from alpha_agent.cognition.controller import CognitiveController, default_projection_registry
 from alpha_agent.cognition.event_log.memory import InMemoryEventLog
@@ -13,6 +14,7 @@ from alpha_agent.cognition.models import (
     ThreadId,
 )
 from alpha_agent.llm.base import (
+    AssistantChatMessage,
     ChatMessage,
     LLMResponse,
     LLMToolCall,
@@ -78,10 +80,11 @@ def test_default_effector_executes_tool_and_final_llm_round() -> None:
     )
 
     assert result.response_text == "final answer"
-    assert result.outcome.tool_results[0].content == "hello"
+    assert result.outcome.tool_results[0].output == "hello"
     assert result.debug["llm_round_count"] == 2
     assert [message["role"] for message in provider.messages[1][-2:]] == ["assistant", "tool"]
-    assert provider.messages[1][-2]["reasoning_content"] == "Need to call echo."
+    assistant_message = cast(AssistantChatMessage, provider.messages[1][-2])
+    assert assistant_message["reasoning_content"] == "Need to call echo."
     acted = [event for event in log.iter(kinds=[CognitiveEventKind.ACTED])][0]
     assert acted.payload["tool_call_count"] == 1
     assert acted.payload["tool_result_count"] == 1
@@ -127,4 +130,4 @@ class _EchoTool(Tool):
     description = "Echo input."
 
     def run(self, arguments):
-        return ToolResult(name=self.name, content=str(arguments["text"]), metadata={})
+        return ToolResult(name=self.name, output=str(arguments["text"]), metadata={})

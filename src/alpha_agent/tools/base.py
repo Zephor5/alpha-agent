@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+type JSONValue = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 
 
 @dataclass(frozen=True)
@@ -22,8 +25,22 @@ class ToolResult:
     """Result returned by a tool."""
 
     name: str
-    content: str
+    output: JSONValue
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def tool_output_kind(output: JSONValue) -> str:
+    """Return the persistence kind for a tool output payload."""
+
+    return "text" if isinstance(output, str) else "json"
+
+
+def tool_output_to_model_content(output: JSONValue) -> str:
+    """Serialize a tool output for provider tool-result message content."""
+
+    if isinstance(output, str):
+        return output
+    return json.dumps(output, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 class Tool(Protocol):
