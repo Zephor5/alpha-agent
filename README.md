@@ -4,7 +4,9 @@ Alpha Agent is a personal agent runtime for rebuilding cognition from first
 principles. The current baseline is intentionally small and controllable: it
 runs from the CLI, stores session-level and cognition state in SQLite, drives
 successful turns through a Reactive cognition tick, and uses either a mock LLM
-or an OpenAI-compatible chat completions provider.
+or a configured provider (`openai-compatible`, `deepseek`, or `codex`). Local
+`ask` and `chat` turns are daemon-owned, and the runtime has an explicit bounded
+LLM/tool loop with an optional Tavily-backed `web_search` tool.
 
 This is not a LangChain, LangGraph, LlamaIndex, AutoGen, CrewAI, or similar
 framework wrapper. The goal is to own the execution flow directly.
@@ -24,48 +26,52 @@ See `docs/todo/TODO.md` for the current Hermes-informed roadmap.
 
 ## Cognition Status
 
-Phase 00 cleared the previous long-term record subsystem. Phase 01 cognition
-foundations are now in place: typed models, the cognitive event log, projection
-infrastructure, the counterpart materialized view, and the single-subject
-LoopCoordinator.
+The previous long-term record subsystem has been removed. The current cognition
+runtime is built around typed models, an append-only cognitive event log,
+SQLite-backed projections, a counterpart materialized view, and a
+single-subject `LoopCoordinator`.
 
-Phase 02 Reactive tick is now wired into `AlphaAgent.respond()`. A successful
-user turn flows through Perceive, Attend, Interpret, Judge, Decide, Act,
-Feedback, Reflect, and Revise, with a shared `tick_id` in the cognitive event
-log. The Reactive loop uses non-blocking acquisition: when the single-subject
-coordinator is busy, `respond()` returns a busy result immediately, does not
-preempt the current holder, and does not write cognitive events or conversation
-messages for the rejected stimulus.
+The Reactive tick is wired into `AlphaAgent.respond()`. A successful user turn
+flows through Perceive, Attend, Interpret, Judge, Decide, Act, Feedback,
+Reflect, and Revise, with a shared `tick_id` in the cognitive event log. The
+Reactive loop uses non-blocking acquisition: when the single-subject coordinator
+is busy, `respond()` returns a busy result immediately, does not preempt the
+current holder, and does not write cognitive events or conversation messages for
+the rejected stimulus.
 
-The default Reactive Effector executes a bounded tool loop itself: one tool
-iteration followed by a final LLM round. Phase 09 renderer extraction is now in
-place: Effector receives a `CognitionView`, calls `TextChatRenderer` by default,
-and feeds rendered messages into the existing LLM/tool loop. The old
-`runtime/prompt_builder.py` path has been removed.
+The Reactive Effector now renders a `CognitionView` with `TextChatRenderer` and
+feeds the rendered prompt frame into AlphaAgent's existing LLM/tool loop. In
+daemon-owned turns, provider-returned tool calls are persisted as assistant
+`tool_calls` and matching tool messages, executed by `ToolExecutor`, bounded by
+`max_tool_iterations` and `max_llm_rounds`, and finalized with `tool_choice=none`
+when a limit is reached. The old `runtime/prompt_builder.py` path has been
+removed.
 
-Phase 03 BeliefProjection is complete: beliefs are materialized in SQLite and
-recallable across sessions through a deterministic projection over cognition
-events. Phase 04 ContextWindowProjection is also complete for foreground
-context: `context_window_view` stores thread-local foreground perception IDs,
-anchors, and rebuildable window state. Belief recall is joined into
-`ContextWindow.recalled` during the Reactive tick. Phase 05 L1 reflection is
-also complete: every tick emits a `reflected` event, with rule findings
-materialized into `reflection_view`. Phase 06 deterministic consolidation v1 is
-available through a synchronous `run_once`: it merges equivalent beliefs,
-archives expired beliefs, learns minimal procedures, compresses foreground
-context into background summaries, and maintains counterpart digest beliefs.
-Phase 07 deterministic ValueLens v1 is also in place: subject lenses persist in
-SQLite, queued conflicts resolve through lens-shaped scoring, ties are kept for
-human review, and a conservative consolidation worker can nudge lens
-sensitivity from repeated resolved tradeoffs. Phase 08 Reflector L2
-deterministic control v1 adds temporary strategy overrides:
-`strategy_view` stores active controls, L2 rules can emit `strategy_changed`,
-expired strategies are cleared by consolidation, and Reactive stages honor the
-implemented strategy names. Phase 10 Drive Loop v1 adds event-sourced goals in
-`goal_view` and a disabled-by-default synchronous manual loop that turns one
-eligible active goal into a cognition-thread `self_signal`. Phase 11 Reflector
-L3 v1 deterministically aggregates long-window cognition history into
-`Subject.self_model` and materializes it in `subject_view`.
+Beliefs are materialized in SQLite and recallable across sessions through a
+deterministic projection over cognition events. Foreground context is stored in
+`context_window_view` as thread-local perception IDs, anchors, and rebuildable
+window state, and belief recall is joined into `ContextWindow.recalled` during
+the Reactive tick. Every tick emits a `reflected` event, with rule findings
+materialized into `reflection_view`.
+
+Deterministic consolidation is available through a synchronous `run_once`: it
+merges equivalent beliefs, archives expired beliefs, learns minimal procedures,
+compresses foreground context into background summaries, maintains counterpart
+digest beliefs, resolves queued conflicts, learns conservative ValueLens
+sensitivity shifts, expires strategies, and can run the deterministic L3
+self-model worker. Subject lenses persist in SQLite; queued conflicts resolve
+through lens-shaped scoring, ties are kept for human review, and a conservative
+consolidation worker can nudge lens sensitivity from repeated resolved
+tradeoffs.
+
+Temporary strategy overrides are stored in `strategy_view`: L2 rules can emit
+`strategy_changed`, expired strategies are cleared by consolidation, and
+Reactive stages honor the implemented strategy names. The Drive Loop stores
+event-sourced goals in `goal_view` and exposes a disabled-by-default synchronous
+manual loop that turns one eligible active goal into a cognition-thread
+`self_signal`. The L3 reflector deterministically aggregates long-window
+cognition history into `Subject.self_model` and materializes it in
+`subject_view`.
 
 ## Install
 
@@ -133,6 +139,7 @@ Print a renderer prompt preview without calling the LLM:
 ```bash
 uv run alpha debug prompt "summarize the current session" --renderer text_chat
 uv run alpha debug prompt "summarize this channel" --session <session-id>
+uv run alpha debug prompt "summarize this channel" --session <session-id> --trace
 ```
 
 Inspect cognition renderer outputs:
@@ -145,8 +152,12 @@ uv run alpha cognition consolidate --now --dry-run
 uv run alpha cognition lens show
 uv run alpha cognition lens set --priority safety,honesty,efficiency
 uv run alpha cognition strategies --active
+uv run alpha cognition strategies --all
 uv run alpha cognition strategy-expire <strategy-id>
+uv run alpha cognition reflections --last 20
+uv run alpha cognition reflections --severity warning
 uv run alpha cognition goals set --description "answer pending question" --priority 5
+uv run alpha cognition goals set --description "answer pending question" --target-outcome "accepted answer"
 uv run alpha cognition goals list --active
 uv run alpha cognition goals satisfy <goal-id> --evidence "accepted"
 uv run alpha cognition goals abandon <goal-id> --reason "obsolete"
@@ -185,10 +196,15 @@ Run `uv run alpha config init` to create it. You can also point to another file
 with `ALPHA_CONFIG_PATH`.
 
 Use `alpha config set <section.key> <value>` for supported keys such as
-`llm.provider`, `llm.model`, `llm.debug_logging`, `deepseek.api_key`,
-`codex.access_token`, `tavily.api_key`,
+`runtime.db_path`, `runtime.log_dir`, `llm.provider`, `llm.model`,
+`llm.debug_logging`, `compatible.base_url`, `compatible.api_key`,
+`deepseek.api_key`, `deepseek.reasoning_enabled`,
+`deepseek.reasoning_effort`, `codex.access_token`, `tavily.api_key`,
 `llm.context.expected_output_reserve_tokens`, and
-`llm.providers.deepseek.max_context_tokens`.
+`llm.providers.deepseek.max_context_tokens`. Drive Loop settings are also
+settable through `cognition.drive.*`. Consolidation settings are loaded from
+TOML and environment variables but are not currently accepted by
+`alpha config get` or `alpha config set`.
 Secret values are masked by `alpha config get` unless you pass
 `--reveal-secret`.
 Config loading applies the same validation as `alpha config set`: token and
@@ -215,6 +231,7 @@ daemon_status_path = "~/.alpha-agent/daemon-status.json"
 [llm]
 provider = "mock"
 model = "" # empty means "use the selected provider's default"
+debug_logging = false
 
 [llm.context]
 tool_truncate_threshold_ratio = 0.60
@@ -234,21 +251,34 @@ max_context_tokens = 1000000
 base_url = "https://api.openai.com/v1"
 api_key = ""
 
-[deepseek]
-api_key = ""
-reasoning_enabled = true
-
-[codex]
-access_token = ""
-
-[tavily]
-api_key = ""
+[cognition.consolidation]
+enabled = true
+interval_seconds = 300
+judgment_repeat_window = 20
+judgment_repeat_threshold = 3
+procedure_success_threshold = 3
+context_foreground_max = 8
+context_absorb_batch = 4
+context_summary_chars = 480
+counterpart_digest_min_beliefs = 5
+counterpart_digest_min_new_beliefs = 3
 
 [cognition.drive]
 enabled = false
 interval_seconds = 300
 goal_cooldown_seconds = 3600
 active_goal_limit = 8
+
+[deepseek]
+api_key = ""
+reasoning_enabled = true
+reasoning_effort = ""
+
+[codex]
+access_token = ""
+
+[tavily]
+api_key = ""
 ```
 
 Useful environment overrides:
@@ -256,7 +286,7 @@ Useful environment overrides:
 - `ALPHA_CONFIG_PATH`: Config file path. Defaults to
   `~/.alpha-agent/config.toml`.
 - `ALPHA_DB_PATH`: SQLite database path. Defaults to `~/.alpha-agent/alpha.db`.
-- `ALPHA_LOG_DIR`: Gateway log directory. Defaults to `~/.alpha-agent/logs`.
+- `ALPHA_LOG_DIR`: Runtime log directory. Defaults to `~/.alpha-agent/logs`.
 - `ALPHA_GATEWAY_STATUS_PATH`: Gateway status JSON path. Defaults to
   `~/.alpha-agent/gateway-status.json`.
 - `ALPHA_DAEMON_SOCKET_PATH`: Daemon Unix socket path. Defaults to
@@ -272,8 +302,14 @@ Useful environment overrides:
 - `ALPHA_COMPATIBLE_BASE_URL`: Base URL for a chat completions compatible API.
 - `ALPHA_COMPATIBLE_API_KEY`: API key for the compatible provider.
 - `ALPHA_DEEPSEEK_API_KEY`: DeepSeek API key when `ALPHA_LLM_PROVIDER=deepseek`.
+- `ALPHA_DEEPSEEK_REASONING_ENABLED`: Enables DeepSeek thinking parameters for
+  thinking-capable models. Defaults to `true`.
+- `ALPHA_DEEPSEEK_REASONING_EFFORT`: Optional DeepSeek effort override: `low`,
+  `medium`, `high`, `max`, or `xhigh`.
 - `ALPHA_CODEX_ACCESS_TOKEN`: Optional Codex OAuth bearer token. If omitted,
   Alpha tries `CODEX_HOME/auth.json` or `~/.codex/auth.json`.
+- `ALPHA_CODEX_API_KEY`: Backward-compatible alias for
+  `ALPHA_CODEX_ACCESS_TOKEN`.
 - `ALPHA_TAVILY_API_KEY`: Tavily API key. Alpha also accepts `TAVILY_API_KEY`.
   When set, Alpha registers the provider-backed `web_search` tool for
   daemon-owned agent turns.
@@ -289,28 +325,59 @@ Useful environment overrides:
   Defaults to `4096`.
 - `ALPHA_LLM_CONTEXT_SAFETY_MARGIN_TOKENS`: Context estimate safety margin.
   Defaults to `1024`.
+- `ALPHA_COGNITION_CONSOLIDATION_ENABLED`: Enables manual consolidation passes.
+  Defaults to `true`.
+- `ALPHA_COGNITION_CONSOLIDATION_INTERVAL_SECONDS`: Worker schedule interval
+  setting; manual `--now` runs force a pass immediately.
+- `ALPHA_COGNITION_CONSOLIDATION_JUDGMENT_REPEAT_WINDOW`: Recent judgment
+  window inspected by repeat-detection workers.
+- `ALPHA_COGNITION_CONSOLIDATION_JUDGMENT_REPEAT_THRESHOLD`: Repetition count
+  needed before judgment promotion.
+- `ALPHA_COGNITION_CONSOLIDATION_PROCEDURE_SUCCESS_THRESHOLD`: Success count
+  needed before procedure learning.
+- `ALPHA_COGNITION_CONSOLIDATION_CONTEXT_FOREGROUND_MAX`: Foreground context
+  count before background compression is eligible.
+- `ALPHA_COGNITION_CONSOLIDATION_CONTEXT_ABSORB_BATCH`: Number of foreground
+  perceptions absorbed per compression worker pass.
+- `ALPHA_COGNITION_CONSOLIDATION_CONTEXT_SUMMARY_CHARS`: Deterministic
+  background summary length.
+- `ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_BELIEFS`: Minimum
+  active beliefs before counterpart digest summarization.
+- `ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_NEW_BELIEFS`: Minimum
+  new beliefs before refreshing a counterpart digest.
 - `ALPHA_COGNITION_DRIVE_ENABLED`: Enables scheduled Drive Loop use when a
   caller wires it in. Defaults to `false`.
 - `ALPHA_COGNITION_DRIVE_INTERVAL_SECONDS`: Global Drive Loop interval setting.
 - `ALPHA_COGNITION_DRIVE_GOAL_COOLDOWN_SECONDS`: Per-goal self-signal cooldown.
 - `ALPHA_COGNITION_DRIVE_ACTIVE_GOAL_LIMIT`: Maximum concurrently active goals.
 
+The daemon reads provider settings when it starts. After changing provider or
+tool credentials in config, restart the daemon before running `ask` or `chat`.
 The mock provider works without an API key:
 
 ```bash
-ALPHA_LLM_PROVIDER=mock uv run alpha ask "hello"
+uv run alpha config set llm.provider mock
+uv run alpha daemon restart
+uv run alpha ask "hello"
 ```
 
 DeepSeek and Codex provider examples:
 
 ```bash
-ALPHA_LLM_PROVIDER=deepseek ALPHA_DEEPSEEK_API_KEY=... uv run alpha ask "hello"
-ALPHA_LLM_PROVIDER=codex uv run alpha ask "hello"
+uv run alpha config set llm.provider deepseek
+uv run alpha config set deepseek.api_key ...
+uv run alpha daemon restart
+uv run alpha ask "hello"
+
+uv run alpha config set llm.provider codex
+uv run alpha daemon restart
+uv run alpha ask "hello"
 ```
 
 Codex uses OAuth-style bearer credentials. The simplest path is to log in with
 Codex CLI first so `~/.codex/auth.json` exists; `ALPHA_CODEX_ACCESS_TOKEN` is
-only an override.
+only an override. Environment overrides still work, but they must be present in
+the daemon process environment, not only on the client-side `ask` command.
 
 The built-in `web_search` tool is available when `tavily.api_key`,
 `ALPHA_TAVILY_API_KEY`, or `TAVILY_API_KEY` is configured:
@@ -330,26 +397,24 @@ The current SQLite state baseline is deliberately narrow:
 - `runtime_traces`: operational turn, provider, and tool traces.
 - `gateway_session_mappings`: platform/session routing state.
 - `gateway_dedup`: inbound gateway deduplication state.
-- `cognitive_events`: Phase 01 append-only cognition event log.
-- `counterpart_view`: Phase 01 materialized view for counterpart projection
-  queries.
-- `belief_view`: Phase 03 materialized view for active, superseded, and
-  retracted beliefs, with deterministic recall across sessions.
-- `context_window_view`: Phase 04 materialized view for thread-local foreground
+- `cognitive_events`: append-only cognition event log.
+- `counterpart_view`: materialized view for counterpart projection queries.
+- `belief_view`: materialized view for active, superseded, and retracted
+  beliefs, with deterministic recall across sessions.
+- `belief_entity_index` and `belief_about_index`: lookup indexes for belief
+  entity/about references.
+- `context_window_view`: materialized view for thread-local foreground
   ContextWindow state, including perception IDs and anchors.
-- `context_window_background`: Phase 06 deterministic background summaries for
-  compressed foreground context.
-- `reflection_view`: Phase 05 materialized view for L1 reflection findings.
-- `procedure_view`: Phase 06 minimal learned procedure projection.
-- `strategy_view`: Phase 08 temporary strategy overrides emitted by L2 or
-  manual expiry.
-- `goal_view`: Phase 10 active/satisfied/abandoned goal materialization for the
-  Drive Loop.
-- `subject_view`: Phase 11 current Subject materialization, including
-  `SelfModel`.
-- `cognition_worker_checkpoint`: Phase 06 consolidation worker progress.
-- `subject_value_lens`: Phase 07 current subject ValueLens priority and
-  sensitivity.
+- `context_window_background`: deterministic background summaries for compressed
+  foreground context.
+- `reflection_view`: materialized view for L1 reflection findings.
+- `procedure_view`: minimal learned procedure projection.
+- `strategy_view`: temporary strategy overrides emitted by L2 or manual expiry.
+- `goal_view`: active/satisfied/abandoned goal materialization for the Drive
+  Loop.
+- `subject_view`: current Subject materialization, including `SelfModel`.
+- `cognition_worker_checkpoint`: consolidation worker progress.
+- `subject_value_lens`: current subject ValueLens priority and sensitivity.
 
 Successful user turns now enter the Reactive tick before producing a response.
 BeliefProjection, ContextWindowProjection with background compression,
@@ -358,12 +423,15 @@ are now in place. Subject ValueLens persistence, deterministic conflict
 resolution, queued conflict consumption, and temporary strategy overrides are
 also in place. GoalProjection and manual DriveLoop self-signals are in place.
 SubjectProjection now persists the L3 SelfModel from `self_model_updated`.
-Semantic strategy/lens diff remains pending.
+The explicit tool execution subsystem is also in place, with `web_search`
+registered when Tavily credentials are configured. Semantic strategy/lens diff
+remains pending.
 
 ## Current Limitations
 
-- Consolidation is deterministic v1 only: no background daemon scheduler, no LLM
-  summarization policy, and no daemon-owned worker cadence.
+- Consolidation is deterministic v1 only: it runs through manual synchronous
+  CLI passes, not a daemon-owned cadence, and it has no LLM summarization
+  policy.
 - ValueLens v1 is deterministic: it uses explicit `ValueKind` weights and
   sensitivity, not semantic moral reasoning or full adaptive learning.
 - Reflector L2 v1 is deterministic: no strategy DSL, no semantic clustering,
@@ -371,7 +439,8 @@ Semantic strategy/lens diff remains pending.
   and CLI inspection/expiry.
 - Drive Loop v1 is synchronous and disabled by default: no daemon-owned drive
   cadence, no autonomous goal generation, and one self-signal per manual pass.
-- Reflector L3 v1 is deterministic: no LLM self-narration, no direct
+- Reflector L3 v1 is deterministic: it can run manually or through a manual
+  consolidation pass, but has no LLM self-narration, no direct
   belief/strategy/lens writes, and no daemon-owned L3 cadence.
 - Semantic strategy/lens diff is still pending.
 - No web UI.
@@ -380,27 +449,11 @@ Semantic strategy/lens diff remains pending.
 
 ## Roadmap
 
-1. Cognition runtime Phase 01: event log foundations. Completed.
-2. Cognition runtime Phase 02: reactive loop and counterpart routing. Completed.
-3. Cognition runtime Phase 03: belief projection. Completed.
-4. Cognition runtime Phase 04: foreground context window. Completed.
-5. Cognition runtime Phase 05: Reflector L1. Completed.
-6. Cognition runtime Phase 09: renderer extraction. Completed.
-7. Cognition runtime Phase 06: deterministic consolidation loop v1. Completed.
-8. Cognition runtime Phase 07: deterministic ValueLens conflict resolution v1.
-   Completed.
-9. Cognition runtime Phase 08: deterministic Reflector L2 control v1.
-   Completed.
-10. Cognition runtime Phase 10: goal projection and synchronous Drive Loop v1.
-    Completed.
-11. Cognition runtime Phase 11: deterministic Reflector L3 SelfModel v1.
-    Completed.
-12. Cognition runtime Phase 09+: semantic strategy/lens diff.
-13. Tool execution system.
-14. Local files / notes ingestion.
-15. API server.
-16. Web UI.
-17. Channel integrations.
+1. Semantic strategy/lens diff.
+2. Local files / notes ingestion.
+3. API server.
+4. Web UI.
+5. Channel integrations.
 
 ## Development
 
