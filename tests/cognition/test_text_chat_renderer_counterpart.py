@@ -6,7 +6,7 @@ from tests.cognition.render_helpers import counterpart, view
 from tests.cognition.test_belief_projection_apply import belief
 
 
-def test_counterpart_role_changes_system_template() -> None:
+def test_counterpart_role_does_not_change_system_prompt() -> None:
     user_prompt = TextChatRenderer().render(
         view(counterpart=counterpart(role=CounterpartRole.USER)),
         RenderBudget(),
@@ -16,8 +16,8 @@ def test_counterpart_role_changes_system_template() -> None:
         RenderBudget(),
     ).payload[0]["content"]
 
-    assert user_prompt != operator_prompt
-    assert "protocol-oriented" in operator_prompt
+    assert user_prompt == operator_prompt
+    assert "Identity: Alpha Agent" in user_prompt
 
 
 def test_communication_style_hint_appears_in_system_prompt() -> None:

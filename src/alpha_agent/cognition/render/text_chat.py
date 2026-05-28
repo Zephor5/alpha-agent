@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
-from alpha_agent.cognition.models import CounterpartRole
 from alpha_agent.cognition.render.base import RenderBudget, RenderResult
 from alpha_agent.cognition.render.view import CognitionView
 from alpha_agent.llm.base import ChatCompletionToolCall, ChatMessage, LLMToolDefinitionInput
@@ -96,9 +95,7 @@ class TextChatRenderer:
         )
 
     def _system_prompt(self, view: CognitionView, budget: RenderBudget) -> str:
-        role = view.counterpart.role if view.counterpart is not None else CounterpartRole.ANONYMOUS
-        template = _SYSTEM_PROMPTS.get(role, _SYSTEM_PROMPTS[CounterpartRole.ANONYMOUS])
-        parts = [template]
+        parts = [_SYSTEM_PROMPT]
         hints = _style_hints(view, budget)
         if hints:
             parts.append("Communication style: " + "; ".join(hints))
@@ -138,33 +135,11 @@ class TextChatRenderer:
         return ""
 
 
-_SYSTEM_PROMPTS = {
-    CounterpartRole.USER: (
-        "Identity: Alpha Agent.\n"
-        "Use the current reactive context and answer naturally, concisely, and usefully. "
-        "Call tools only when they are useful."
-    ),
-    CounterpartRole.OPERATOR: (
-        "Identity: Alpha Agent.\n"
-        "Respond to the operator in a compact, protocol-oriented form. Surface decisions, "
-        "constraints, and blockers directly. Call tools only when they are useful."
-    ),
-    CounterpartRole.PEER_AGENT: (
-        "Identity: Alpha Agent.\n"
-        "Coordinate with the peer agent using explicit state, assumptions, and next actions. "
-        "Call tools only when they are useful."
-    ),
-    CounterpartRole.SYSTEM: (
-        "Identity: Alpha Agent.\n"
-        "Handle system-originated input conservatively and report operational state clearly. "
-        "Call tools only when they are useful."
-    ),
-    CounterpartRole.ANONYMOUS: (
-        "Identity: Alpha Agent.\n"
-        "Use the current reactive context and answer concisely. "
-        "Call tools only when they are useful."
-    ),
-}
+_SYSTEM_PROMPT = (
+    "Identity: Alpha Agent.\n"
+    "Use the current reactive context and answer concisely. "
+    "Call tools only when they are useful."
+)
 
 
 def _style_hints(view: CognitionView, budget: RenderBudget) -> list[str]:
