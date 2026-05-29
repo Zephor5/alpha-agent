@@ -32,6 +32,7 @@ class Reviser:
         emitter: EventEmitter,
         tick_id: str,
         causal_parent: EventId,
+        feedback_event_id: EventId | None = None,
         interpretation: Interpretation | None = None,
         strategies: list[StrategyOverride] | None = None,
     ) -> Emitted[list[Revision]]:
@@ -68,6 +69,10 @@ class Reviser:
             payload={
                 "tick_id": tick_id,
                 "revisions": [revision.kind for revision in revisions],
+                "judgment_ids": [str(judgment.id) for judgment in judgments],
+                "reflection_ids": [str(reflection.id) for reflection in reflections],
+                "feedback_event_id": str(feedback_event_id or causal_parent),
+                "reflected_event_id": str(causal_parent),
                 "judgment_count": len(judgments),
                 "reflection_count": len(reflections),
                 "matched_expected": feedback.matched_expected,

@@ -45,6 +45,13 @@ is busy, `respond()` returns a busy result immediately, does not preempt the
 current holder, and does not write cognitive events or conversation messages for
 the rejected stimulus.
 
+Key write-side cognition events are validated before append for the payload
+fields consumed by projections and consolidation workers. Successful
+`AlphaAgent.respond()` turns also record session-source linkage: `perceived`
+events carry the user source message id, and a `turn_sources_recorded` event
+links the tick to the persisted assistant, provider tool messages, and runtime
+trace ids.
+
 The Reactive Effector now renders a `CognitionView` with `TextChatRenderer` and
 feeds the rendered prompt frame into AlphaAgent's existing LLM/tool loop. In
 daemon-owned turns, provider-returned tool calls are persisted as assistant

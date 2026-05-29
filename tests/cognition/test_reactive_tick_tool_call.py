@@ -47,12 +47,34 @@ def test_reactive_tick_tool_call_path_emits_acted_and_feedback(tmp_path) -> None
     assert messages[1].reasoning_content == "Need to call echo."
     assert messages[3].reasoning_content is None
     events = list(SQLiteEventLog(store).iter())
+    perceived = [event for event in events if event.kind == CognitiveEventKind.PERCEIVED][0]
     acted = [event for event in events if event.kind == CognitiveEventKind.ACTED][0]
     feedback = [event for event in events if event.kind == CognitiveEventKind.RECEIVED_FEEDBACK][0]
     decided = [event for event in events if event.kind == CognitiveEventKind.DECIDED][0]
+    source_recorded = [
+        event for event in events if event.kind.value == "turn_sources_recorded"
+    ][0]
     assert decided.payload["action"] == "use_tool"
     assert acted.payload["tool_call_count"] == 1
+    assert acted.payload["tool_call_ids"] == ["call_1"]
+    assert acted.payload["provider_tool_message_ids"] == [messages[1].id, messages[2].id]
+    assert acted.payload["provider_tool_trace_ids"] == [messages[2].tool_result_id]
     assert feedback.payload["matched_expected"] is True
+    assert perceived.payload["session_id"] == "s1"
+    assert perceived.payload["user_message_id"] == messages[0].id
+    assert {"kind": "session", "id": "s1"} in perceived.payload["source_refs"]
+    assert {"kind": "session_message", "id": messages[0].id} in perceived.payload[
+        "source_refs"
+    ]
+    assert source_recorded.payload["tick_id"] == acted.payload["tick_id"]
+    assert source_recorded.payload["session_id"] == "s1"
+    assert source_recorded.payload["user_message_id"] == messages[0].id
+    assert source_recorded.payload["assistant_message_id"] == messages[3].id
+    assert source_recorded.payload["provider_tool_message_ids"] == [
+        messages[1].id,
+        messages[2].id,
+    ]
+    assert source_recorded.payload["provider_tool_trace_ids"] == [messages[2].tool_result_id]
 
 
 def test_default_effector_executes_tool_and_final_llm_round() -> None:

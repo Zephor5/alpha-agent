@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from alpha_agent.cognition.models._ids import (
@@ -11,6 +11,7 @@ from alpha_agent.cognition.models._ids import (
     Instant,
     IntentMarker,
     PerceptionId,
+    Reference,
     SituationRef,
     SubjectRef,
 )
@@ -28,6 +29,7 @@ class Stimulus:
     payload: Any
     thread_id: ThreadId
     received_at: Instant
+    source_refs: list[Reference] = field(default_factory=list)
 
     def to_record(self) -> dict[str, object]:
         return dataclass_to_record(self)

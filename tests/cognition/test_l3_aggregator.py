@@ -42,7 +42,12 @@ from alpha_agent.cognition.reflectors.l3_aggregators import (
     TradeoffAggregator,
 )
 from alpha_agent.state.store import StateStore
-from tests.cognition.helpers import clock_factory, counterpart_payload, id_factory
+from tests.cognition.helpers import (
+    clock_factory,
+    counterpart_payload,
+    id_factory,
+    perceived_payload,
+)
 from tests.cognition.test_belief_projection_apply import belief
 
 
@@ -186,10 +191,11 @@ def test_l3_aggregators_derive_self_model_fields(tmp_path: Path) -> None:
         emitter,
         projections,
         CognitiveEventKind.PERCEIVED,
-        {
-            "tick_id": "tick-user-a",
-            "from_counterpart": counterpart_ref(CounterpartId("counterpart:user-a")).to_record(),
-        },
+        perceived_payload(
+            index="user-a",
+            tick_id="tick-user-a",
+            counterpart=counterpart_ref(CounterpartId("counterpart:user-a")),
+        ),
     )
     _emit_apply(
         emitter,

@@ -73,6 +73,7 @@ class CognitiveEventKind(StrEnum):
     COUNTERPART_FIRST_OBSERVED = "counterpart_first_observed"
     COUNTERPART_IDENTIFIED = "counterpart_identified"
     COUNTERPART_RELATIONSHIP_CHANGED = "counterpart_relationship_changed"
+    TURN_SOURCES_RECORDED = "turn_sources_recorded"
     SERVICE_COMMITTED = "service_committed"
     SERVICE_FULFILLED = "service_fulfilled"
     SERVICE_FAILED = "service_failed"

@@ -50,6 +50,26 @@ def test_reactive_tick_emits_nine_events_with_causal_chain() -> None:
     for previous, current in zip(events[:-1], events[1:], strict=True):
         assert current.causal_parents == [previous.id]
 
+    judged = [event for event in events if event.kind == CognitiveEventKind.JUDGED][0]
+    decided = [event for event in events if event.kind == CognitiveEventKind.DECIDED][0]
+    acted = [event for event in events if event.kind == CognitiveEventKind.ACTED][0]
+    feedback = [
+        event for event in events if event.kind == CognitiveEventKind.RECEIVED_FEEDBACK
+    ][0]
+    revised = [event for event in events if event.kind == CognitiveEventKind.REVISED][0]
+
+    assert judged.payload["claim"] == "hello"
+    assert judged.payload["judgments"][0]["claim"] == "hello"
+    assert decided.payload["message"] == "hello"
+    assert decided.payload["decision"]["payload"]["message"] == "hello"
+    assert acted.payload["decision_id"] == decided.payload["decision"]["id"]
+    assert acted.payload["tool_call_ids"] == []
+    assert acted.payload["response_text_digest"]
+    assert feedback.payload["decision_id"] == decided.payload["decision"]["id"]
+    assert feedback.payload["acted_event_id"] == str(acted.id)
+    assert revised.payload["judgment_ids"] == [judged.payload["judgments"][0]["id"]]
+    assert revised.payload["feedback_event_id"] == str(feedback.id)
+
 
 class _StaticProvider:
     name = "static"

@@ -64,6 +64,9 @@ class Perceiver:
                 "payload_digest": digest_payload(stimulus.payload),
                 "thread_id": stimulus.thread_id.to_record(),
                 "perception": perception.to_record(),
+                "source_refs": [ref.to_record() for ref in stimulus.source_refs],
+                "session_id": _source_ref_id(stimulus.source_refs, "session"),
+                "user_message_id": _source_ref_id(stimulus.source_refs, "session_message"),
                 "from_counterpart": stimulus.source.to_record()
                 if stimulus.source is not None
                 else None,
@@ -79,3 +82,7 @@ def _raised_entities(source: CounterpartRef | None) -> list[Reference]:
     if source is None:
         return []
     return [counterpart_ref(CounterpartId(source.id))]
+
+
+def _source_ref_id(source_refs: list[Reference], kind: str) -> str | None:
+    return next((ref.id for ref in source_refs if ref.kind == kind), None)

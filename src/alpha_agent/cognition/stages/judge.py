@@ -57,6 +57,14 @@ class Judger:
             causal_parents=[causal_parent],
             payload={
                 "tick_id": tick_id,
+                "claim": claim,
+                "judgments": [item.to_record() for item in judgments],
+                "support_ids": [
+                    ref.id for item in judgments for ref in item.supports
+                ],
+                "undermined_by_ids": [
+                    ref.id for item in judgments for ref in item.undermined_by
+                ],
                 "judgment_count": len(judgments),
                 "thread_id": thread_id.to_record() if thread_id is not None else None,
             },

@@ -206,6 +206,7 @@ class CognitiveController:
             emitter=self.emitter,
             tick_id=tick_id,
             causal_parent=reflected.event.id,
+            feedback_event_id=feedback.event.id,
             interpretation=interpreted.value,
             strategies=active_strategies,
         )

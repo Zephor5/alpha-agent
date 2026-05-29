@@ -513,6 +513,8 @@ def _run(log, projections, store, workers, *, config=None, emitter=None):
 
 
 def _emit_apply(emitter, projections, kind, payload):
+    if kind == CognitiveEventKind.RECEIVED_FEEDBACK and "tick_id" not in payload:
+        payload = {**payload, "tick_id": f"tick-feedback-{emitter.log.length() + 1}"}
     event = emitter.emit(kind, payload=payload)
     for projection in projections.all():
         if event.kind in projection.handles:

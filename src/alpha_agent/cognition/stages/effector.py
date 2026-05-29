@@ -17,6 +17,7 @@ from alpha_agent.cognition.models import (
 from alpha_agent.cognition.render.base import RenderBudget, Renderer, RenderResult
 from alpha_agent.cognition.render.text_chat import TextChatRenderer
 from alpha_agent.cognition.render.view import CognitionView
+from alpha_agent.cognition.stages._payload import digest_payload
 from alpha_agent.cognition.stages.types import Emitted, Outcome
 from alpha_agent.llm.base import (
     ChatCompletionToolCall,
@@ -75,9 +76,22 @@ class Effector:
             causal_parents=[causal_parent],
             payload={
                 "tick_id": tick_id,
+                "decision_id": str(decision.id),
+                "response_text_digest": digest_payload(outcome.text or ""),
                 "outcome_text_len": len(outcome.text or ""),
                 "tool_call_count": len(outcome.tool_calls),
                 "tool_result_count": len(outcome.tool_results),
+                "tool_call_ids": _tool_call_ids(outcome.tool_calls),
+                "tool_names": [call.name for call in outcome.tool_calls],
+                "tool_result_names": [result.name for result in outcome.tool_results],
+                "provider_tool_message_ids": _string_list(
+                    outcome.debug.get("provider_tool_message_ids")
+                ),
+                "provider_tool_trace_ids": _string_list(
+                    outcome.debug.get("provider_tool_trace_ids")
+                ),
+                "llm_call_ids": _string_list(outcome.debug.get("llm_call_ids")),
+                "llm_trace_ids": _string_list(outcome.debug.get("llm_trace_ids")),
             },
         )
         return Emitted(outcome, event)
@@ -98,8 +112,9 @@ class Effector:
         )
         tool_calls = self.tool_executor.normalize_calls(response.tool_calls)
         tool_results: list[ToolResult] = []
+        executed_results = []
         if tool_calls and self.max_tool_iterations > 0:
-            executed = self.tool_executor.execute(
+            executed_results = self.tool_executor.execute(
                 calls=tool_calls,
                 session_id=str(view.window.thread_id),
                 output_dir=Path(".alpha-agent/tool-results"),
@@ -107,7 +122,7 @@ class Effector:
                 check_canceled=lambda _stage: None,
                 recover_errors=True,
             )
-            tool_results = [item.result for item in executed]
+            tool_results = [item.result for item in executed_results]
             messages.append(_assistant_tool_call_message(response, tool_calls))
             messages.extend(
                 _tool_result_message(call, result)
@@ -135,6 +150,11 @@ class Effector:
                 "tool_iteration_count": 1 if tool_results else 0,
                 "tool_call_count": len(tool_results),
                 "provider_tool_call_count": len(tool_calls),
+                "provider_tool_call_ids": _tool_call_ids(tool_calls),
+                "provider_tool_message_ids": [],
+                "provider_tool_trace_ids": [item.trace.id for item in executed_results],
+                "llm_call_ids": [],
+                "llm_trace_ids": [],
                 "final_finish_reason": response.finish_reason,
             },
         )
@@ -180,6 +200,16 @@ def _required_tool_call_id(call: ToolCall) -> str:
     if not call.id:
         raise ValueError(f"Provider tool call for {call.name} is missing an id")
     return call.id
+
+
+def _tool_call_ids(tool_calls: Sequence[ToolCall]) -> list[str]:
+    return [call.id for call in tool_calls if call.id]
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [str(item) for item in value if item is not None]
 
 
 def _in_memory_trace(event_type: str, content: str, metadata: dict[str, Any]) -> RuntimeTrace:

@@ -20,6 +20,7 @@ from alpha_agent.cognition.models import (
     subject_ref,
 )
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
+from alpha_agent.cognition.payload_contract import validate_event_payload
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
 
@@ -57,6 +58,8 @@ class EventEmitter:
         payload: dict[str, Any] | None = None,
         timestamp: Instant | None = None,
     ) -> CognitiveEvent:
+        event_payload = payload or {}
+        validate_event_payload(kind, event_payload)
         event = CognitiveEvent(
             id=EventId(self.id_factory()),
             kind=kind,
@@ -69,7 +72,7 @@ class EventEmitter:
             timestamp=timestamp or Instant(self.clock()),
             actor=actor or self.actor,
             causal_parents=causal_parents or [],
-            payload=payload or {},
+            payload=event_payload,
         )
         self.log.append(event)
         return event

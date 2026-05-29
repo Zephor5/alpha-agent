@@ -4,15 +4,15 @@ from alpha_agent.cognition.models import CognitiveEventKind
 from alpha_agent.cognition.projection_runner import ProjectionRunner
 from alpha_agent.cognition.projections.event_count import EventCountByKind
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
-from tests.cognition.helpers import clock_factory, id_factory
+from tests.cognition.helpers import clock_factory, id_factory, perceived_payload
 
 
 def test_projection_runner_idempotent_rebuild_and_late_projection() -> None:
     log = InMemoryEventLog()
     emitter = EventEmitter(log, id_factory=id_factory(), clock=clock_factory())
-    emitter.emit(CognitiveEventKind.PERCEIVED)
-    emitter.emit(CognitiveEventKind.JUDGED)
-    emitter.emit(CognitiveEventKind.JUDGED)
+    emitter.emit(CognitiveEventKind.PERCEIVED, payload=perceived_payload())
+    emitter.emit(CognitiveEventKind.JUDGED, payload={"claim": "one"})
+    emitter.emit(CognitiveEventKind.JUDGED, payload={"claim": "two"})
 
     registry = ProjectionRegistry()
     projection = EventCountByKind()

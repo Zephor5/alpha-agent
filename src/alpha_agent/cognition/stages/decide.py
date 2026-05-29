@@ -62,8 +62,11 @@ class Decider:
             payload={
                 "tick_id": tick_id,
                 "action": str(decision.action),
+                "message": latest_claim,
+                "decision": decision.to_record(),
                 "expected_feedback": str(decision.expected_feedback),
                 "procedure_count": len(procedures),
+                "procedure_ids": [ref.id for ref in procedures],
             },
         )
         return Emitted(decision, event)

@@ -23,7 +23,15 @@ from alpha_agent.cognition.coordinator import (
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
-from alpha_agent.cognition.models import Instant, LoopPriority, Stimulus, StimulusKind
+from alpha_agent.cognition.models import (
+    CognitiveEventKind,
+    EventId,
+    Instant,
+    LoopPriority,
+    Reference,
+    Stimulus,
+    StimulusKind,
+)
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.render import (
@@ -132,6 +140,9 @@ def _copy_chat_message(message: ChatMessage) -> ChatMessage:
 class RetriedLLMCompletion:
     response: LLMResponse
     retry_count: int
+    llm_call_id: str = ""
+    started_trace_id: str = ""
+    completed_trace_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -145,6 +156,9 @@ class AgentLoopResult:
     tool_iteration_count: int
     tool_call_count: int
     provider_tool_call_count: int
+    provider_tool_trace_ids: list[str]
+    llm_call_ids: list[str]
+    llm_trace_ids: list[str]
 
 
 class LLMCompletionService:
@@ -340,6 +354,10 @@ class AlphaAgent:
                     session_id=session_id,
                 ),
                 received_at=Instant(utc_now_iso()),
+                source_refs=[
+                    Reference("session", session_id),
+                    Reference("session_message", user_record.id),
+                ],
             )
 
             controller = CognitiveController(
@@ -380,6 +398,12 @@ class AlphaAgent:
             assistant_record = self._write_assistant_message(session_id, llm_response)
             debug["assistant_message_id"] = assistant_record.id
             debug["assistant_message_ordinal"] = assistant_record.ordinal
+            self._emit_turn_sources_recorded(
+                session_id=session_id,
+                user_record=user_record,
+                assistant_record=assistant_record,
+                loop_result=loop_result,
+            )
             return AgentTurnResult(
                 response=loop_result.response_text,
                 session_id=session_id,
@@ -463,6 +487,15 @@ class AlphaAgent:
                 "tool_iteration_count": loop_result.tool_iteration_count,
                 "tool_call_count": loop_result.tool_call_count,
                 "provider_tool_call_count": loop_result.provider_tool_call_count,
+                "provider_tool_call_ids": [
+                    call.id for call in loop_result.provider_tool_calls if call.id
+                ],
+                "provider_tool_message_ids": [
+                    message.id for message in loop_result.provider_tool_messages
+                ],
+                "provider_tool_trace_ids": list(loop_result.provider_tool_trace_ids),
+                "llm_call_ids": list(loop_result.llm_call_ids),
+                "llm_trace_ids": list(loop_result.llm_trace_ids),
                 "final_finish_reason": llm_response.finish_reason,
             },
         )
@@ -706,6 +739,9 @@ class AlphaAgent:
         llm_messages = list(messages)
         provider_tool_messages: list[SessionMessage] = []
         provider_tool_calls_seen: list[ToolCall] = []
+        provider_tool_trace_ids: list[str] = []
+        llm_call_ids: list[str] = []
+        llm_trace_ids: list[str] = []
         tool_results_seen: list[Any] = []
         llm_round_count = llm_retry_count = tool_iteration_count = 0
         tool_call_count = provider_tool_call_count = 0
@@ -739,6 +775,14 @@ class AlphaAgent:
             )
             llm_round_count += 1
             llm_retry_count += completion.retry_count
+            llm_call_ids.append(completion.llm_call_id)
+            llm_trace_ids.extend(
+                [
+                    item
+                    for item in [completion.started_trace_id, completion.completed_trace_id]
+                    if item
+                ]
+            )
             response = completion.response
             debug["llm_round_count"] = llm_round_count
             debug["llm_retry_count"] = llm_retry_count
@@ -754,6 +798,9 @@ class AlphaAgent:
                     tool_iteration_count=tool_iteration_count,
                     tool_call_count=tool_call_count,
                     provider_tool_call_count=provider_tool_call_count,
+                    provider_tool_trace_ids=provider_tool_trace_ids,
+                    llm_call_ids=llm_call_ids,
+                    llm_trace_ids=llm_trace_ids,
                 )
             if finalizing_reason is not None:
                 self._emit_tool_loop_event(
@@ -789,6 +836,7 @@ class AlphaAgent:
                 calls=provider_tool_calls,
                 recover_errors=True,
             )
+            provider_tool_trace_ids.extend(item.trace.id for item in provider_results)
             tool_results_seen.extend(item.result for item in provider_results)
             provider_result_messages = self._write_tool_result_messages(
                 session_id=session_id,
@@ -884,7 +932,7 @@ class AlphaAgent:
                     "response": _llm_response_log(completion.response),
                 },
             )
-        self.store.append_runtime_trace(
+        completed_trace = self.store.append_runtime_trace(
             session_id=session_id,
             event_type="llm.completed",
             content="LLM call completed.",
@@ -900,7 +948,13 @@ class AlphaAgent:
                 "response_metadata": _llm_metadata_summary(completion.response.metadata),
             },
         )
-        return completion
+        return RetriedLLMCompletion(
+            response=completion.response,
+            retry_count=completion.retry_count,
+            llm_call_id=llm_call_id,
+            started_trace_id=started_trace.id,
+            completed_trace_id=completed_trace.id,
+        )
 
     def _append_llm_trace(self, *, event: str, metadata: dict[str, Any]) -> None:
         if not self.llm_debug_logging or self.llm_trace_log_path is None:
@@ -981,6 +1035,48 @@ class AlphaAgent:
             )
             for item in results
         ]
+
+    def _emit_turn_sources_recorded(
+        self,
+        *,
+        session_id: str,
+        user_record: SessionMessage,
+        assistant_record: SessionMessage,
+        loop_result: Any,
+    ) -> None:
+        debug = loop_result.debug if isinstance(loop_result.debug, dict) else {}
+        provider_tool_message_ids = _string_list(debug.get("provider_tool_message_ids"))
+        provider_tool_trace_ids = _string_list(debug.get("provider_tool_trace_ids"))
+        llm_call_ids = _string_list(debug.get("llm_call_ids"))
+        llm_trace_ids = _string_list(debug.get("llm_trace_ids"))
+        reactive_event_ids = _string_list(debug.get("event_ids"))
+        tick_id = str(debug.get("tick_id") or "")
+        source_refs = [
+            Reference("session_message", user_record.id),
+            Reference("session_message", assistant_record.id),
+            *[Reference("session_message", item) for item in provider_tool_message_ids],
+            *[Reference("runtime_trace", item) for item in provider_tool_trace_ids],
+            *[Reference("runtime_trace", item) for item in llm_trace_ids],
+        ]
+        self.emitter.emit(
+            CognitiveEventKind.TURN_SOURCES_RECORDED,
+            inputs=[Reference("cognitive_tick", tick_id)] if tick_id else [],
+            outputs=source_refs,
+            rationale="Recorded persisted session and trace ids for the reactive turn.",
+            causal_parents=[EventId(reactive_event_ids[-1])] if reactive_event_ids else [],
+            payload={
+                "tick_id": tick_id,
+                "session_id": session_id,
+                "user_message_id": user_record.id,
+                "assistant_message_id": assistant_record.id,
+                "assistant_message_ordinal": assistant_record.ordinal,
+                "provider_tool_message_ids": provider_tool_message_ids,
+                "provider_tool_trace_ids": provider_tool_trace_ids,
+                "llm_call_ids": llm_call_ids,
+                "llm_trace_ids": llm_trace_ids,
+                "reactive_event_ids": reactive_event_ids,
+            },
+        )
 
     def _emit_turn_failed(
         self,
@@ -1180,6 +1276,12 @@ def _default_max_context_tokens(provider_name: object) -> int:
         provider_key,
         DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS["openai-compatible"],
     )
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+        return []
+    return [str(item) for item in value if item is not None]
 
 
 def _json_safe(value: Any) -> Any:
