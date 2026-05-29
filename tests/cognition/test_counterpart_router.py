@@ -3,6 +3,7 @@ from __future__ import annotations
 from alpha_agent.cognition.controller import CognitiveController, default_projection_registry
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.memory import InMemoryEventLog
+from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
     Instant,
@@ -10,9 +11,90 @@ from alpha_agent.cognition.models import (
     StimulusKind,
     ThreadId,
 )
+from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.llm.base import ChatMessage, LLMResponse
-from alpha_agent.runtime.counterpart_router import CounterpartRouter
+from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID, CounterpartRouter
+from alpha_agent.state.store import StateStore
 from alpha_agent.tools.registry import ToolRegistry
+
+
+def test_counterpart_router_maps_local_and_first_channel_user_to_default() -> None:
+    log = InMemoryEventLog()
+    emitter = EventEmitter(log)
+    router = CounterpartRouter(log)
+
+    local = router.upsert_from_source_metadata(
+        {"channel": "cli", "command": "ask"},
+        emitter=emitter,
+    )
+    first_channel_user = router.upsert_from_source_metadata(
+        {
+            "channel": "gateway",
+            "platform": "slack",
+            "user_id": "u1",
+            "user_name": "Eric",
+        },
+        emitter=emitter,
+    )
+
+    assert local is not None
+    assert local.id == str(DEFAULT_COUNTERPART_ID)
+    assert first_channel_user == local
+
+
+def test_default_counterpart_claim_updates_projection_identity(tmp_path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    log = SQLiteEventLog(store)
+    emitter = EventEmitter(log)
+    projection = CounterpartProjection(store)
+    router = CounterpartRouter(log, counterpart_projection=projection)
+
+    local = router.upsert_from_source_metadata(
+        {"channel": "cli", "command": "ask"},
+        emitter=emitter,
+    )
+    first_channel_user = router.upsert_from_source_metadata(
+        {
+            "channel": "gateway",
+            "platform": "slack",
+            "user_id": "u1",
+            "user_name": "Eric",
+        },
+        emitter=emitter,
+    )
+
+    stored = projection.get(DEFAULT_COUNTERPART_ID)
+    assert stored is not None
+    assert local == first_channel_user
+    assert stored.identity["platform"] == "slack"
+    assert stored.identity["user_id"] == "u1"
+    assert stored.identity["display_name"] == "Eric"
+
+
+def test_counterpart_router_distinguishes_channel_users_after_default_claim() -> None:
+    log = InMemoryEventLog()
+    emitter = EventEmitter(log)
+    router = CounterpartRouter(log)
+
+    first = router.upsert_from_source_metadata(
+        {"channel": "gateway", "platform": "slack", "user_id": "u1"},
+        emitter=emitter,
+    )
+    same_first = router.upsert_from_source_metadata(
+        {"channel": "gateway", "platform": "slack", "user_id": "u1"},
+        emitter=emitter,
+    )
+    second = router.upsert_from_source_metadata(
+        {"channel": "gateway", "platform": "slack", "user_id": "u2"},
+        emitter=emitter,
+    )
+
+    assert first is not None
+    assert first.id == str(DEFAULT_COUNTERPART_ID)
+    assert same_first == first
+    assert second is not None
+    assert second != first
 
 
 def test_counterpart_router_first_observed_no_duplicate_and_perception_source() -> None:

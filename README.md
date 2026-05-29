@@ -31,6 +31,12 @@ runtime is built around typed models, an append-only cognitive event log,
 SQLite-backed projections, a counterpart materialized view, and a
 single-subject `LoopCoordinator`.
 
+User-originated turns route through a stable default counterpart,
+`counterpart:main-user`. Local CLI turns without platform identity use that
+counterpart directly, and the first platform user observed through a gateway
+claims the same counterpart. Later distinct platform users receive their own
+counterpart identities.
+
 The Reactive tick is wired into `AlphaAgent.respond()`. A successful user turn
 flows through Perceive, Attend, Interpret, Judge, Decide, Act, Feedback,
 Reflect, and Revise, with a shared `tick_id` in the cognitive event log. The
