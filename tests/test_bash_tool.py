@@ -4,17 +4,31 @@ import json
 import shlex
 import sys
 from pathlib import Path
+from typing import Any, NotRequired, TypedDict, cast
 
 import pytest
 
 from alpha_agent.config import BashToolConfig
-from alpha_agent.tools.base import ToolExecutionContext
+from alpha_agent.tools.base import ToolExecutionContext, ToolResult
 from alpha_agent.tools.bash import BashTool
 from alpha_agent.tools.shell.policy import blocked_command_reason
 
 
+class _BashOutput(TypedDict):
+    status: str
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    elapsed_ms: int
+    workdir: str
+    truncated: bool
+    omitted_chars: int
+    return_code_interpretation: str | None
+    error: NotRequired[str]
+
+
 def _config(workdir: Path, **overrides: object) -> BashToolConfig:
-    values = {
+    values: dict[str, Any] = {
         "enabled": True,
         "default_workdir": workdir.resolve(),
         "allowed_workdirs": (workdir.resolve(),),
@@ -25,6 +39,11 @@ def _config(workdir: Path, **overrides: object) -> BashToolConfig:
     }
     values.update(overrides)
     return BashToolConfig(**values)
+
+
+def _bash_output(result: ToolResult) -> _BashOutput:
+    assert isinstance(result.output, dict)
+    return cast(_BashOutput, result.output)
 
 
 def _context(tmp_path: Path, check_canceled=lambda _stage: None) -> ToolExecutionContext:
@@ -52,16 +71,17 @@ def test_bash_tool_echo_returns_structured_completed_result(tmp_path: Path) -> N
     tool = BashTool(config=_config(workspace))
 
     result = tool.run({"command": "printf 'ok\\n'"}, _context(tmp_path))
+    output = _bash_output(result)
 
     assert result.name == "bash"
-    assert result.output["status"] == "completed"
-    assert result.output["exit_code"] == 0
-    assert result.output["stdout"] == "ok\n"
-    assert result.output["stderr"] == ""
-    assert result.output["truncated"] is False
-    assert result.output["omitted_chars"] == 0
-    assert result.output["return_code_interpretation"] is None
-    assert str(workspace) not in result.output["workdir"]
+    assert output["status"] == "completed"
+    assert output["exit_code"] == 0
+    assert output["stdout"] == "ok\n"
+    assert output["stderr"] == ""
+    assert output["truncated"] is False
+    assert output["omitted_chars"] == 0
+    assert output["return_code_interpretation"] is None
+    assert str(workspace) not in output["workdir"]
     assert result.metadata["status"] == "completed"
     assert result.metadata["exit_code"] == 0
     assert result.metadata["shell"] in {"bash", "sh"}
@@ -73,10 +93,11 @@ def test_bash_tool_nonzero_exit_code_is_a_completed_tool_result(tmp_path: Path) 
     tool = BashTool(config=_config(workspace))
 
     result = tool.run({"command": "printf 'bad' >&2; exit 7"}, _context(tmp_path))
+    output = _bash_output(result)
 
-    assert result.output["status"] == "completed"
-    assert result.output["exit_code"] == 7
-    assert result.output["stderr"] == "bad"
+    assert output["status"] == "completed"
+    assert output["exit_code"] == 7
+    assert output["stderr"] == "bad"
     assert result.metadata["failed"] is False
 
 
@@ -86,9 +107,10 @@ def test_bash_tool_times_out_and_kills_command(tmp_path: Path) -> None:
     tool = BashTool(config=_config(workspace, default_timeout_seconds=1, max_timeout_seconds=1))
 
     result = tool.run({"command": "sleep 5"}, _context(tmp_path))
+    output = _bash_output(result)
 
-    assert result.output["status"] == "timeout"
-    assert result.output["exit_code"] is not None
+    assert output["status"] == "timeout"
+    assert output["exit_code"] is not None
     assert result.metadata["status"] == "timeout"
 
 
@@ -100,9 +122,10 @@ def test_bash_tool_timeout_kills_descendant_holding_output_pipes(tmp_path: Path)
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
     result = tool.run({"command": command}, _context(tmp_path))
+    output = _bash_output(result)
 
-    assert result.output["status"] == "timeout"
-    assert result.output["elapsed_ms"] < 2500
+    assert output["status"] == "timeout"
+    assert output["elapsed_ms"] < 2500
 
 
 def test_bash_tool_cancels_running_command(tmp_path: Path) -> None:
@@ -122,8 +145,9 @@ def test_bash_tool_cancels_running_command(tmp_path: Path) -> None:
 
     tool = BashTool(config=_config(workspace))
     result = tool.run({"command": "sleep 5"}, _context(tmp_path, CancelAfterFirstCheck()))
+    output = _bash_output(result)
 
-    assert result.output["status"] == "canceled"
+    assert output["status"] == "canceled"
     assert result.metadata["status"] == "canceled"
 
 
@@ -138,9 +162,10 @@ def test_bash_tool_blocks_workdir_outside_allowed_roots(tmp_path: Path) -> None:
         {"command": "printf nope", "workdir": str(outside)},
         _context(tmp_path),
     )
+    output = _bash_output(result)
 
-    assert result.output["status"] == "blocked"
-    assert "allowed workdirs" in result.output["stderr"]
+    assert output["status"] == "blocked"
+    assert "allowed workdirs" in output["stderr"]
 
 
 def test_bash_tool_rejects_unknown_arguments(tmp_path: Path) -> None:
@@ -149,9 +174,10 @@ def test_bash_tool_rejects_unknown_arguments(tmp_path: Path) -> None:
     tool = BashTool(config=_config(workspace))
 
     result = tool.run({"command": "printf ok", "background": True}, _context(tmp_path))
+    output = _bash_output(result)
 
-    assert result.output["status"] == "blocked"
-    assert "Unknown bash argument" in result.output["stderr"]
+    assert output["status"] == "blocked"
+    assert "Unknown bash argument" in output["stderr"]
 
 
 def test_bash_tool_does_not_trace_or_return_absolute_workdir(tmp_path: Path) -> None:
@@ -166,10 +192,11 @@ def test_bash_tool_does_not_trace_or_return_absolute_workdir(tmp_path: Path) -> 
         {"command": "printf ok", "workdir": str(outside)},
         _context(tmp_path),
     )
+    output = _bash_output(result)
 
     assert str(outside) not in json.dumps(trace)
-    assert result.output["status"] == "blocked"
-    assert str(outside) not in json.dumps(result.output)
+    assert output["status"] == "blocked"
+    assert str(outside) not in json.dumps(output)
 
 
 def test_bash_tool_trace_arguments_summarizes_large_or_secret_commands() -> None:
@@ -197,13 +224,14 @@ def test_bash_tool_cleans_redacts_and_truncates_output(tmp_path: Path) -> None:
     )
 
     result = tool.run({"command": command}, _context(tmp_path))
+    output = _bash_output(result)
 
-    assert result.output["status"] == "completed"
-    assert "\x1b" not in result.output["stdout"]
-    assert "[REDACTED]" in result.output["stdout"]
-    assert "[output truncated:" in result.output["stdout"]
-    assert result.output["truncated"] is True
-    assert result.output["omitted_chars"] > 0
+    assert output["status"] == "completed"
+    assert "\x1b" not in output["stdout"]
+    assert "[REDACTED]" in output["stdout"]
+    assert "[output truncated:" in output["stdout"]
+    assert output["truncated"] is True
+    assert output["omitted_chars"] > 0
 
 
 @pytest.mark.parametrize(
@@ -271,13 +299,16 @@ def test_bash_tool_interprets_common_nonzero_exit_codes(tmp_path: Path) -> None:
         _context(tmp_path),
     )
     grep_error = tool.run({"command": "grep beta missing.txt"}, _context(tmp_path))
+    grep_output = _bash_output(grep_result)
+    diff_output = _bash_output(diff_result)
+    grep_error_output = _bash_output(grep_error)
 
-    assert grep_result.output["exit_code"] == 1
-    assert grep_result.output["return_code_interpretation"] == "No matches found"
-    assert diff_result.output["exit_code"] == 1
-    assert diff_result.output["return_code_interpretation"] == "Files differ"
-    assert grep_error.output["exit_code"] == 2
-    assert grep_error.output["return_code_interpretation"] is None
+    assert grep_output["exit_code"] == 1
+    assert grep_output["return_code_interpretation"] == "No matches found"
+    assert diff_output["exit_code"] == 1
+    assert diff_output["return_code_interpretation"] == "Files differ"
+    assert grep_error_output["exit_code"] == 2
+    assert grep_error_output["return_code_interpretation"] is None
 
 
 def test_bash_tool_uses_clean_environment_and_opt_in_passthrough(
@@ -305,5 +336,6 @@ def test_bash_tool_uses_clean_environment_and_opt_in_passthrough(
         },
         _context(tmp_path),
     )
+    output = _bash_output(result)
 
-    assert result.output["stdout"] == "shown|missing"
+    assert output["stdout"] == "shown|missing"

@@ -9,6 +9,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
+from typing import BinaryIO, cast
 
 from alpha_agent.tools.base import ToolExecutionContext
 from alpha_agent.tools.shell.backend import ShellRequest, ShellResult
@@ -137,8 +138,8 @@ class LocalShellBackend:
         keys: list[tuple[selectors.SelectorKey, int]],
     ) -> None:
         for key, _mask in keys:
-            stream = key.fileobj
-            capture = key.data
+            stream = cast(BinaryIO, key.fileobj)
+            capture = cast(_ByteCapture, key.data)
             try:
                 chunk = os.read(stream.fileno(), READ_CHUNK_BYTES)
             except BlockingIOError:
@@ -168,7 +169,7 @@ class LocalShellBackend:
 
     def _close_selector(self, selector: selectors.DefaultSelector) -> None:
         for key in list(selector.get_map().values()):
-            stream = key.fileobj
+            stream = cast(BinaryIO, key.fileobj)
             try:
                 selector.unregister(stream)
             except Exception:

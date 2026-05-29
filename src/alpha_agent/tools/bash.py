@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from alpha_agent.config import BashToolConfig
-from alpha_agent.tools.base import ToolExecutionContext, ToolResult
+from alpha_agent.tools.base import JSONValue, ToolExecutionContext, ToolResult
 from alpha_agent.tools.shell.backend import ShellBackend
 from alpha_agent.tools.shell.local import LocalShellBackend
 from alpha_agent.tools.shell.output import govern_output
@@ -161,7 +161,7 @@ class BashTool:
         return_code_interpretation: str | None,
         error: str | None = None,
     ) -> ToolResult:
-        output = {
+        output: dict[str, JSONValue] = {
             "status": status,
             "exit_code": exit_code,
             "stdout": stdout,
