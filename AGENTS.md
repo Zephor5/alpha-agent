@@ -51,3 +51,12 @@ src/
 tests/                Test coverage for CLI, runtime, config, daemon, gateway, LLM providers, and session/context behavior.
   cognition/          Cognition-specific tests for events, projections, renderers, reflectors, loops, drive behavior, and CLI inspection commands.
 ```
+
+## Validation Commands
+Run these from the project root to mirror the current CI gate:
+
+```bash
+uv run ruff check .
+uv run mypy src tests
+uv run pytest -q
+```
