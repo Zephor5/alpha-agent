@@ -12,6 +12,7 @@ from typing import Any, TypeVar
 from alpha_agent.state.models import (
     LLMRole,
     RuntimeTrace,
+    SessionCounterpart,
     SessionMessage,
     SessionMessageKind,
     SessionProfileSnapshot,
@@ -298,14 +299,66 @@ class StateStore:
             ).fetchone()
         return self._session_message_from_row(row) if row is not None else None
 
+    def get_session_counterpart(
+        self,
+        session_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionCounterpart | None:
+        """Return the counterpart bound to a session, if any."""
+
+        def op(db: sqlite3.Connection) -> SessionCounterpart | None:
+            row = db.execute(
+                """
+                SELECT *
+                FROM session_counterparts
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            return self._session_counterpart_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def create_session_counterpart(
+        self,
+        *,
+        session_id: str,
+        counterpart_id: str,
+        source_metadata: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionCounterpart:
+        """Bind a session to its first counterpart, or return the existing binding."""
+
+        timestamp = created_at or utc_now_iso()
+
+        def op(db: sqlite3.Connection) -> SessionCounterpart:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO session_counterparts
+                    (session_id, counterpart_id, source_metadata, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, counterpart_id, _dumps(source_metadata or {}), timestamp),
+            )
+            binding = self.get_session_counterpart(session_id, conn=db)
+            if binding is None:
+                raise RuntimeError(f"failed to bind counterpart for session {session_id!r}")
+            return binding
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
     def get_session_profile_snapshot(
         self,
         session_id: str,
-        counterpart_id: str,
         *,
         conn: sqlite3.Connection | None = None,
     ) -> SessionProfileSnapshot | None:
-        """Return the stable profile snapshot for one session/counterpart, if any."""
+        """Return the stable profile snapshot for one session, if any."""
 
         def op(db: sqlite3.Connection) -> SessionProfileSnapshot | None:
             row = db.execute(
@@ -313,9 +366,8 @@ class StateStore:
                 SELECT *
                 FROM session_profile_snapshots
                 WHERE session_id = ?
-                  AND counterpart_id = ?
                 """,
-                (session_id, counterpart_id),
+                (session_id,),
             ).fetchone()
             return self._session_profile_snapshot_from_row(row) if row is not None else None
 
@@ -331,7 +383,7 @@ class StateStore:
         created_at: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> SessionProfileSnapshot:
-        """Create or return the stable profile snapshot for one session/counterpart."""
+        """Create or return the stable profile snapshot for one session."""
 
         timestamp = created_at or utc_now_iso()
 
@@ -344,16 +396,9 @@ class StateStore:
                 """,
                 (session_id, counterpart_id, source_belief_id, content, timestamp),
             )
-            snapshot = self.get_session_profile_snapshot(
-                session_id,
-                counterpart_id,
-                conn=db,
-            )
+            snapshot = self.get_session_profile_snapshot(session_id, conn=db)
             if snapshot is None:
-                raise RuntimeError(
-                    "failed to create profile snapshot for "
-                    f"session {session_id!r} counterpart {counterpart_id!r}"
-                )
+                raise RuntimeError(f"failed to create profile snapshot for {session_id!r}")
             return snapshot
 
         if conn is not None:
@@ -574,6 +619,17 @@ class StateStore:
             counterpart_id=row["counterpart_id"],
             source_belief_id=row["source_belief_id"],
             content=row["content"],
+            created_at=row["created_at"],
+        )
+
+    def _session_counterpart_from_row(
+        self,
+        row: sqlite3.Row,
+    ) -> SessionCounterpart:
+        return SessionCounterpart(
+            session_id=row["session_id"],
+            counterpart_id=row["counterpart_id"],
+            source_metadata=_loads_dict(row["source_metadata"]),
             created_at=row["created_at"],
         )
 

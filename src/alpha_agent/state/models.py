@@ -40,12 +40,22 @@ class SessionMessage:
 
 @dataclass(frozen=True)
 class SessionProfileSnapshot:
-    """Stable counterpart profile selected for a session/counterpart pair."""
+    """Stable counterpart profile selected for a session."""
 
     session_id: str
     counterpart_id: str
     source_belief_id: str
     content: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class SessionCounterpart:
+    """Counterpart identity bound to a session."""
+
+    session_id: str
+    counterpart_id: str
+    source_metadata: dict[str, Any]
     created_at: str
 
 

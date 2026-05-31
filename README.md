@@ -470,8 +470,9 @@ The current SQLite state baseline is deliberately narrow:
 - `session_messages`: append-only source stream for user, assistant, tool, and
   compressed handover messages used to assemble LLM-visible session context,
   including assistant `reasoning_content` when a provider supplies it.
+- `session_counterparts`: first counterpart identity bound to each session.
 - `session_profile_snapshots`: session-stable counterpart profile snapshots
-  keyed by session and counterpart.
+  keyed by session.
 - `runtime_traces`: operational turn, provider, and tool traces.
 - `gateway_session_mappings`: platform/session routing state.
 - `gateway_dedup`: inbound gateway deduplication state.

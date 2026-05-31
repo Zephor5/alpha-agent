@@ -910,6 +910,11 @@ def prompt(
         session_id=session_id,
         message=message,
         chat_history=context.chat_messages,
+        counterpart_profile=(
+            snapshot.content
+            if (snapshot := store.get_session_profile_snapshot(session_id)) is not None
+            else None
+        ),
     )
     rendered = TextChatRenderer().render(view, RenderBudget())
     messages = rendered.payload

@@ -160,12 +160,12 @@ def test_agent_reuses_session_profile_snapshot_before_history(tmp_path) -> None:
         "first answer",
         "second turn",
     ]
-    snapshot = store.get_session_profile_snapshot("s1", str(DEFAULT_COUNTERPART_ID))
+    snapshot = store.get_session_profile_snapshot("s1")
     assert snapshot is not None
     assert snapshot.content == "Stable profile v1."
 
 
-def test_session_profile_snapshots_are_keyed_by_counterpart(tmp_path) -> None:
+def test_session_profile_snapshots_are_keyed_by_session(tmp_path) -> None:
     store = _store(tmp_path)
 
     first = store.create_session_profile_snapshot(
@@ -175,14 +175,14 @@ def test_session_profile_snapshots_are_keyed_by_counterpart(tmp_path) -> None:
         content="Profile A.",
     )
     second = store.create_session_profile_snapshot(
-        session_id="s1",
+        session_id="s2",
         counterpart_id="counterpart:b",
         source_belief_id="belief:digest:b",
         content="Profile B.",
     )
     duplicate = store.create_session_profile_snapshot(
         session_id="s1",
-        counterpart_id="counterpart:a",
+        counterpart_id="counterpart:b",
         source_belief_id="belief:digest:a-new",
         content="Profile A new.",
     )
@@ -190,12 +190,12 @@ def test_session_profile_snapshots_are_keyed_by_counterpart(tmp_path) -> None:
     assert first.content == "Profile A."
     assert second.content == "Profile B."
     assert duplicate.content == "Profile A."
-    assert store.get_session_profile_snapshot("s1", "counterpart:a") == first
-    assert store.get_session_profile_snapshot("s1", "counterpart:b") == second
-    assert store.get_session_profile_snapshot("s1", "counterpart:missing") is None
+    assert store.get_session_profile_snapshot("s1") == first
+    assert store.get_session_profile_snapshot("s2") == second
+    assert store.get_session_profile_snapshot("missing") is None
 
 
-def test_agent_uses_counterpart_specific_profile_snapshots_in_shared_session(tmp_path) -> None:
+def test_agent_binds_session_counterpart_and_reuses_session_profile(tmp_path) -> None:
     store = _store(tmp_path)
     log = SQLiteEventLog(store)
     bob_counterpart_id = _routed_counterpart_id("local", "bob")
@@ -228,14 +228,15 @@ def test_agent_uses_counterpart_specific_profile_snapshots_in_shared_session(tmp
 
     assert "Counterpart profile: Alice stable profile." in str(provider.calls[0])
     assert "Bob stable profile." not in str(provider.calls[0])
-    assert "Counterpart profile: Bob stable profile." in str(provider.calls[1])
-    assert "Alice stable profile." not in str(provider.calls[1])
-    alice_snapshot = store.get_session_profile_snapshot("shared", str(DEFAULT_COUNTERPART_ID))
-    bob_snapshot = store.get_session_profile_snapshot("shared", bob_counterpart_id)
-    assert alice_snapshot is not None
-    assert bob_snapshot is not None
-    assert alice_snapshot.content == "Alice stable profile."
-    assert bob_snapshot.content == "Bob stable profile."
+    assert "Counterpart profile: Alice stable profile." in str(provider.calls[1])
+    assert "Bob stable profile." not in str(provider.calls[1])
+    binding = store.get_session_counterpart("shared")
+    assert binding is not None
+    assert binding.counterpart_id == str(DEFAULT_COUNTERPART_ID)
+    snapshot = store.get_session_profile_snapshot("shared")
+    assert snapshot is not None
+    assert snapshot.content == "Alice stable profile."
+    assert store.get_session_counterpart("missing") is None
 
 
 def test_first_turn_profile_snapshot_participates_in_pre_user_budget(tmp_path) -> None:
@@ -262,7 +263,7 @@ def test_first_turn_profile_snapshot_participates_in_pre_user_budget(tmp_path) -
 
     assert provider.calls == []
     assert store.list_session_messages("s1") == []
-    snapshot = store.get_session_profile_snapshot("s1", str(DEFAULT_COUNTERPART_ID))
+    snapshot = store.get_session_profile_snapshot("s1")
     assert snapshot is not None
     assert snapshot.content.startswith("profileword0")
 

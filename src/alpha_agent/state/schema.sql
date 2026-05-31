@@ -73,13 +73,22 @@ CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_timestamp
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_event_type_timestamp
     ON runtime_traces(event_type, timestamp);
 
+CREATE TABLE IF NOT EXISTS session_counterparts (
+    session_id TEXT PRIMARY KEY,
+    counterpart_id TEXT NOT NULL,
+    source_metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_counterparts_counterpart
+    ON session_counterparts(counterpart_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS session_profile_snapshots (
-    session_id TEXT NOT NULL,
+    session_id TEXT PRIMARY KEY,
     counterpart_id TEXT NOT NULL,
     source_belief_id TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY(session_id, counterpart_id)
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_profile_counterpart

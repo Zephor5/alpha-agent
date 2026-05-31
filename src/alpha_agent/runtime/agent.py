@@ -26,12 +26,14 @@ from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
+    CounterpartId,
     EventId,
     Instant,
     LoopPriority,
     Reference,
     Stimulus,
     StimulusKind,
+    counterpart_ref,
 )
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.belief import BeliefProjection
@@ -336,14 +338,10 @@ class AlphaAgent:
         try:
             self._check_canceled(session_id, "before_user_event")
             model_tools = self.tool_registry.to_llm_tool_definitions()
-            counterpart_ref = self.counterpart_router.upsert_from_source_metadata(
-                source_metadata,
-                emitter=self.emitter,
-            )
-            profile_snapshot = self._session_profile_snapshot(session_id, counterpart_ref)
+            source_ref = self._session_counterpart_ref(session_id, source_metadata)
+            profile_snapshot = self._session_profile_snapshot(session_id, source_ref)
             self._run_pre_user_context_maintenance(
                 session_id=session_id,
-                counterpart=counterpart_ref,
                 pending_user_message=user_message,
                 model_tools=model_tools or None,
                 model_tool_choice="auto" if model_tools else None,
@@ -367,7 +365,7 @@ class AlphaAgent:
 
             stimulus = Stimulus(
                 kind=StimulusKind.USER_MESSAGE,
-                source=counterpart_ref,
+                source=source_ref,
                 payload=user_message,
                 thread_id=StimulusRouter.route_kind(
                     StimulusKind.USER_MESSAGE,
@@ -548,14 +546,13 @@ class AlphaAgent:
         self,
         *,
         session_id: str,
-        counterpart: Reference | None,
         pending_user_message: str,
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         debug: dict[str, Any],
     ) -> None:
         pending_message: ChatMessage = {"role": "user", "content": pending_user_message}
-        profile_messages = self._session_profile_context_messages(session_id, counterpart)
+        profile_messages = self._session_profile_context_messages(session_id)
         pending_only_estimate = self._estimate_context_budget(
             [self._default_system_message(), *profile_messages, pending_message],
             tools=model_tools,
@@ -566,7 +563,6 @@ class AlphaAgent:
         planning_messages = [self._default_system_message(), *profile_messages, pending_message]
         projected_messages = self._source_prompt_messages(
             session_id=session_id,
-            counterpart=counterpart,
             extra_source_messages=[pending_message],
         )
         estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
@@ -587,7 +583,6 @@ class AlphaAgent:
             )
             projected_messages = self._source_prompt_messages(
                 session_id=session_id,
-                counterpart=counterpart,
                 extra_source_messages=[pending_message],
             )
             estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
@@ -595,10 +590,7 @@ class AlphaAgent:
         if self._needs_handover(estimate) and self.session_context.load(
             session_id
         ).source_messages:
-            compression_messages = self._source_prompt_messages(
-                session_id=session_id,
-                counterpart=counterpart,
-            )
+            compression_messages = self._source_prompt_messages(session_id=session_id)
             result = compress_session_context(
                 session_id=session_id,
                 assembler=self.session_context,
@@ -611,7 +603,6 @@ class AlphaAgent:
             debug["pre_user_compression_point_ordinal"] = result.compression_point_ordinal
             projected_messages = self._source_prompt_messages(
                 session_id=session_id,
-                counterpart=counterpart,
                 extra_source_messages=[pending_message],
             )
             estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
@@ -681,12 +672,11 @@ class AlphaAgent:
         self,
         *,
         session_id: str,
-        counterpart: Reference | None = None,
         extra_source_messages: Sequence[ChatMessage] | None = None,
     ) -> list[ChatMessage]:
         return [
             self._default_system_message(),
-            *self._session_profile_context_messages(session_id, counterpart),
+            *self._session_profile_context_messages(session_id),
             *self.session_context.load(session_id).chat_messages,
             *(extra_source_messages or ()),
         ]
@@ -796,15 +786,34 @@ class AlphaAgent:
     def _default_system_message(self) -> ChatMessage:
         return _copy_chat_message(_DEFAULT_RUNTIME_SYSTEM_MESSAGE)
 
+    def _session_counterpart_ref(
+        self,
+        session_id: str,
+        source_metadata: Mapping[str, Any] | None,
+    ) -> Reference | None:
+        binding = self.store.get_session_counterpart(session_id)
+        if binding is not None:
+            return counterpart_ref(CounterpartId(binding.counterpart_id))
+        routed = self.counterpart_router.upsert_from_source_metadata(
+            source_metadata,
+            emitter=self.emitter,
+        )
+        if routed is None:
+            return None
+        binding = self.store.create_session_counterpart(
+            session_id=session_id,
+            counterpart_id=routed.id,
+            source_metadata=dict(source_metadata or {}),
+        )
+        return counterpart_ref(CounterpartId(binding.counterpart_id))
+
     def _session_profile_snapshot(
         self,
         session_id: str,
         counterpart: Reference | None,
     ) -> SessionProfileSnapshot | None:
-        if counterpart is None:
-            return None
-        snapshot = self.store.get_session_profile_snapshot(session_id, counterpart.id)
-        if snapshot is not None:
+        snapshot = self.store.get_session_profile_snapshot(session_id)
+        if snapshot is not None or counterpart is None:
             return snapshot
         projection = BeliefProjection(
             self.store,
@@ -827,11 +836,8 @@ class AlphaAgent:
     def _session_profile_context_messages(
         self,
         session_id: str,
-        counterpart: Reference | None,
     ) -> list[ChatMessage]:
-        if counterpart is None:
-            return []
-        snapshot = self.store.get_session_profile_snapshot(session_id, counterpart.id)
+        snapshot = self.store.get_session_profile_snapshot(session_id)
         if snapshot is None:
             return []
         return [

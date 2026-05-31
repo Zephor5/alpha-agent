@@ -37,6 +37,7 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
         }
         assert tables == {
             "session_messages",
+            "session_counterparts",
             "session_profile_snapshots",
             "runtime_traces",
             "gateway_session_mappings",
@@ -49,13 +50,13 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
             "context_window_view",
             "context_window_background",
             "reflection_view",
-                "procedure_view",
-                "strategy_view",
-                "goal_view",
-                "subject_view",
-                "subject_value_lens",
-                "cognition_worker_checkpoint",
-            }
+            "procedure_view",
+            "strategy_view",
+            "goal_view",
+            "subject_view",
+            "subject_value_lens",
+            "cognition_worker_checkpoint",
+        }
 
 
 def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path) -> None:
@@ -89,7 +90,7 @@ def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path
     assert "continue" in result.output
 
 
-def test_debug_prompt_does_not_render_session_profile_without_current_counterpart(
+def test_debug_prompt_renders_session_profile_snapshot(
     tmp_path: Path,
 ) -> None:
     store = StateStore(tmp_path / "alpha.db")
@@ -116,8 +117,7 @@ def test_debug_prompt_does_not_render_session_profile_without_current_counterpar
 
     assert result.exit_code == 0
     assert "Message 1 [system]" in result.output
-    assert "Stable debug profile." not in result.output
-    assert "Counterpart profile:" not in result.output
+    assert "Counterpart profile: Stable debug profile." in result.output
     assert "hello" in result.output
 
 
