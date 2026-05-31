@@ -137,6 +137,10 @@ CHAT_DISPLAY_MESSAGE_KINDS = {
     "tool_message",
     "compressed_message",
 }
+CHAT_TURN_DISPLAY_MESSAGE_KINDS = {
+    "assistant_message",
+    "tool_message",
+}
 
 
 def _display_model(config: AlphaConfig) -> str:
@@ -234,6 +238,41 @@ def _render_assistant_reply(content: str) -> None:
     )
 
 
+def _render_tool_reply(content: str) -> None:
+    console.print(
+        Panel(
+            Text(content),
+            title="Tool",
+            box=box.ROUNDED,
+            border_style="yellow",
+            padding=(0, 1),
+        )
+    )
+
+
+def _render_chat_turn_messages(
+    messages: list[SessionMessage],
+    *,
+    fallback_response: str,
+) -> None:
+    if not messages:
+        _render_assistant_reply(fallback_response)
+        return
+
+    for message in messages:
+        content = _chat_turn_content(message)
+        if message.llm_role == "tool":
+            _render_tool_reply(content)
+        else:
+            _render_assistant_reply(content)
+
+
+def _chat_turn_content(message: SessionMessage) -> str:
+    if message.kind == "assistant_message" and not message.tool_calls:
+        return message.model_content if message.model_content is not None else message.raw_content
+    return _chat_history_content(message)
+
+
 def _displayable_session_messages(store: StateStore, session_id: str) -> list[SessionMessage]:
     projection = SessionContextAssembler(store).load(session_id)
     return [
@@ -241,6 +280,26 @@ def _displayable_session_messages(store: StateStore, session_id: str) -> list[Se
         for message in projection.source_messages
         if message.kind in CHAT_DISPLAY_MESSAGE_KINDS
     ]
+
+
+def _displayable_chat_turn_messages(
+    store: StateStore,
+    session_id: str,
+    *,
+    after_ordinal: int,
+) -> list[SessionMessage]:
+    return [
+        message
+        for message in store.list_session_messages(session_id, after_ordinal=after_ordinal)
+        if message.kind in CHAT_TURN_DISPLAY_MESSAGE_KINDS
+    ]
+
+
+def _latest_session_ordinal(store: StateStore, session_id: str) -> int:
+    messages = store.list_session_messages(session_id)
+    if not messages:
+        return 0
+    return messages[-1].ordinal
 
 
 def _chat_history_role_label(message: SessionMessage) -> str:
@@ -780,18 +839,32 @@ def chat(
             break
         if message.strip().lower() in {"/exit", "/quit"}:
             break
+        request_session_id = session_id
+        before_ordinal = _latest_session_ordinal(store, request_session_id)
         response = _client_response_or_exit(
             client.request(
                 {
                     "type": "chat_turn",
                     "message": message,
-                    "session_id": session_id,
+                    "session_id": request_session_id,
                     "source_metadata": _source_metadata("chat"),
                 }
             )
         )
-        session_id = str(response.get("session_id") or session_id)
-        _render_assistant_reply(str(response.get("response", "")))
+        session_id = str(response.get("session_id") or request_session_id)
+        turn_messages = (
+            _displayable_chat_turn_messages(
+                store,
+                session_id,
+                after_ordinal=before_ordinal,
+            )
+            if session_id == request_session_id
+            else []
+        )
+        _render_chat_turn_messages(
+            turn_messages,
+            fallback_response=str(response.get("response", "")),
+        )
 
 
 @skills_app.command("list")

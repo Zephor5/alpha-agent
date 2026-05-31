@@ -140,6 +140,8 @@ uv run alpha chat --session <session-id>
 
 Passing `--session` resumes that session and prints a compact preview of recent
 user/assistant messages before accepting the next turn.
+When a chat turn uses tools, the CLI renders the current turn's assistant
+tool-call messages and tool results in order before the final answer.
 
 Run a single turn:
 

@@ -172,6 +172,101 @@ def test_chat_sends_turns_over_ipc(tmp_path: Path, monkeypatch) -> None:
     ]
 
 
+def test_chat_renders_current_turn_tool_rounds(tmp_path: Path, monkeypatch) -> None:
+    _reset_fake_client()
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+
+    class WritingFakeClient:
+        def __init__(self, socket_path: Path):
+            self.socket_path = socket_path
+
+        def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+            session_id = str(payload["session_id"])
+            store.append_session_message(
+                session_id=session_id,
+                kind="user_message",
+                llm_role="user",
+                raw_content=str(payload["message"]),
+            )
+            store.append_session_message(
+                session_id=session_id,
+                kind="assistant_message",
+                llm_role="assistant",
+                raw_content="I will check the first source.",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": '{"query":"first"}',
+                        },
+                    }
+                ],
+            )
+            store.append_session_message(
+                session_id=session_id,
+                kind="tool_message",
+                llm_role="tool",
+                raw_content='{"result":"first"}',
+                tool_call_id="call_1",
+                provider_metadata={"tool_name": "lookup"},
+            )
+            store.append_session_message(
+                session_id=session_id,
+                kind="assistant_message",
+                llm_role="assistant",
+                raw_content="I will verify with the second source.",
+                tool_calls=[
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": '{"query":"second"}',
+                        },
+                    }
+                ],
+            )
+            store.append_session_message(
+                session_id=session_id,
+                kind="tool_message",
+                llm_role="tool",
+                raw_content='{"result":"second"}',
+                tool_call_id="call_2",
+                provider_metadata={"tool_name": "lookup"},
+            )
+            store.append_session_message(
+                session_id=session_id,
+                kind="assistant_message",
+                llm_role="assistant",
+                raw_content="final answer",
+            )
+            return {"ok": True, "session_id": session_id, "response": "final answer"}
+
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", WritingFakeClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["chat"],
+        input="hello\n/exit\n",
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "I will check the first source." in result.output
+    assert "Tool call: lookup" in result.output
+    assert '{"query":"first"}' in result.output
+    assert "Tool result: lookup" in result.output
+    assert '{"result":"first"}' in result.output
+    assert "I will verify with the second source." in result.output
+    assert '{"query":"second"}' in result.output
+    assert '{"result":"second"}' in result.output
+    assert "final answer" in result.output
+
+
 def test_chat_with_existing_session_renders_recent_history(tmp_path: Path, monkeypatch) -> None:
     _reset_fake_client()
     store = StateStore(tmp_path / "alpha.db")
