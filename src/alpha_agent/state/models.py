@@ -39,6 +39,17 @@ class SessionMessage:
 
 
 @dataclass(frozen=True)
+class SessionProfileSnapshot:
+    """Stable counterpart profile selected for a session/counterpart pair."""
+
+    session_id: str
+    counterpart_id: str
+    source_belief_id: str
+    content: str
+    created_at: str
+
+
+@dataclass(frozen=True)
 class RuntimeTrace:
     """Narrow diagnostic record for runtime behavior."""
 

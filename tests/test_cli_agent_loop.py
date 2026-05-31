@@ -37,6 +37,7 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
         }
         assert tables == {
             "session_messages",
+            "session_profile_snapshots",
             "runtime_traces",
             "gateway_session_mappings",
             "gateway_dedup",
@@ -86,6 +87,38 @@ def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path
     assert "hello" in result.output
     assert "hi" in result.output
     assert "continue" in result.output
+
+
+def test_debug_prompt_does_not_render_session_profile_without_current_counterpart(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.create_session_profile_snapshot(
+        session_id="s1",
+        counterpart_id="counterpart:main-user",
+        source_belief_id="belief:digest:v1",
+        content="Stable debug profile.",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["debug", "prompt", "continue", "--session", "s1"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "Message 1 [system]" in result.output
+    assert "Stable debug profile." not in result.output
+    assert "Counterpart profile:" not in result.output
+    assert "hello" in result.output
 
 
 def test_debug_prompt_uses_latest_compressed_boundary(tmp_path: Path) -> None:

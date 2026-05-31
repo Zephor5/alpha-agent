@@ -28,6 +28,7 @@ def test_controller_recalls_after_context_window_supplies_counterpart() -> None:
     recalled_belief = belief("belief:ctx", "User A prefers Python.")
     belief_projection = _RecordingBeliefProjection(recalled_belief)
     interpreter = _RecordingInterpreter()
+    provider = _StaticProvider()
     registry = ProjectionRegistry()
     registry.register(SubjectProjection(log))
     registry.register(belief_projection)
@@ -36,7 +37,7 @@ def test_controller_recalls_after_context_window_supplies_counterpart() -> None:
     controller = CognitiveController(
         event_log=log,
         projections=registry,
-        llm=_StaticProvider(),
+        llm=provider,
         tools=build_tool_registry(),
         interpreter=interpreter,
     )
@@ -57,6 +58,7 @@ def test_controller_recalls_after_context_window_supplies_counterpart() -> None:
     assert belief_projection.last_params.counterpart == counterpart
     assert interpreter.last_window is not None
     assert [item.id for item in interpreter.last_window.recalled] == ["belief:ctx"]
+    assert "Recalled beliefs:" not in str(provider.calls)
 
 
 class _RecordingBeliefProjection(BeliefProjection):
@@ -87,5 +89,9 @@ class _RecordingInterpreter(Interpreter):
 class _StaticProvider:
     name = "static"
 
+    def __init__(self) -> None:
+        self.calls: list[list[ChatMessage]] = []
+
     def complete(self, messages: list[ChatMessage], **_kwargs) -> LLMResponse:
+        self.calls.append(messages)
         return LLMResponse(content="ok", model="test", provider=self.name)

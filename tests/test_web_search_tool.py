@@ -10,6 +10,7 @@ from alpha_agent.config import AlphaConfig, BashToolConfig
 from alpha_agent.tools.base import ToolExecutionContext
 from alpha_agent.tools.default import build_tool_registry
 from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_TOOL_NAME
+from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
 from alpha_agent.tools.web_search import TavilyWebSearchTool
 
 
@@ -204,20 +205,24 @@ def test_tool_registry_includes_memory_propose_and_configured_tools(
 
     empty_registry = build_tool_registry(empty_config)
 
-    assert empty_registry.names() == [MEMORY_PROPOSE_TOOL_NAME]
+    assert empty_registry.names() == [MEMORY_PROPOSE_TOOL_NAME, MEMORY_RECALL_TOOL_NAME]
     assert [tool.name for tool in empty_registry.to_llm_tool_definitions()] == [
-        MEMORY_PROPOSE_TOOL_NAME
+        MEMORY_PROPOSE_TOOL_NAME,
+        MEMORY_RECALL_TOOL_NAME,
     ]
     assert build_tool_registry(configured).names() == [
         MEMORY_PROPOSE_TOOL_NAME,
+        MEMORY_RECALL_TOOL_NAME,
         "web_search",
     ]
     assert build_tool_registry(bash_configured).names() == [
         MEMORY_PROPOSE_TOOL_NAME,
+        MEMORY_RECALL_TOOL_NAME,
         "bash",
     ]
     assert build_tool_registry(both_configured).names() == [
         MEMORY_PROPOSE_TOOL_NAME,
+        MEMORY_RECALL_TOOL_NAME,
         "bash",
         "web_search",
     ]
@@ -225,6 +230,7 @@ def test_tool_registry_includes_memory_propose_and_configured_tools(
         tool.name for tool in build_tool_registry(both_configured).to_llm_tool_definitions()
     ] == [
         MEMORY_PROPOSE_TOOL_NAME,
+        MEMORY_RECALL_TOOL_NAME,
         "bash",
         "web_search",
     ]

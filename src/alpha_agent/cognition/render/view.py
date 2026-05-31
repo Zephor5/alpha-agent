@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from alpha_agent.cognition.models import (
-    Belief,
     ContextWindow,
     Counterpart,
     Instant,
@@ -26,8 +25,7 @@ class CognitionView:
     counterpart: Counterpart | None
     situation: Situation
     window: ContextWindow
-    recalled_beliefs: list[Belief] = field(default_factory=list)
-    counterpart_digest: Belief | None = None
+    counterpart_profile: str | None = None
     active_judgments: list[Judgment] = field(default_factory=list)
     matched_procedures: list[Any] = field(default_factory=list)
     active_strategies: list[Any] = field(default_factory=list)

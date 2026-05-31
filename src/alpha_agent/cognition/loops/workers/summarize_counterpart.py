@@ -5,6 +5,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import ClassVar
 
+from alpha_agent.cognition.counterpart_profile import (
+    COUNTERPART_DIGEST_OBJECT_PREFIX,
+    counterpart_digest_object,
+    latest_counterpart_digest,
+)
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.loops.scheduler import (
@@ -32,8 +37,6 @@ from alpha_agent.cognition.models import (
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
-
-DIGEST_OBJECT_PREFIX = "counterpart_digest:"
 
 
 class SummarizeCounterpartWorker:
@@ -73,9 +76,11 @@ class SummarizeCounterpartWorker:
             ref = counterpart_ref(CounterpartId(str(counterpart.id)))
             beliefs = belief_projection.recall_about(ref)
             source_beliefs = [
-                item for item in beliefs if not str(item.object).startswith(DIGEST_OBJECT_PREFIX)
+                item
+                for item in beliefs
+                if not str(item.object).startswith(COUNTERPART_DIGEST_OBJECT_PREFIX)
             ]
-            old_digest = _active_digest(beliefs, str(counterpart.id))
+            old_digest = latest_counterpart_digest(beliefs, str(counterpart.id))
             source_ids = [str(item.id) for item in source_beliefs]
             if not _should_digest(source_ids, old_digest, config):
                 if coordinator.yield_to_higher_priority():
@@ -95,7 +100,7 @@ class SummarizeCounterpartWorker:
                     digest_id,
                     content,
                     about=[ref],
-                    object_=f"{DIGEST_OBJECT_PREFIX}{counterpart.id}",
+                    object_=counterpart_digest_object(str(counterpart.id)),
                     cognitive_type=CognitiveType.CONCEPT,
                     confidence=0.7,
                     sources=belief_source_refs(source_ids),
@@ -144,12 +149,6 @@ class SummarizeCounterpartWorker:
         )
 
 
-def _active_digest(beliefs: Sequence[Belief], counterpart_id: str) -> Belief | None:
-    object_id = f"{DIGEST_OBJECT_PREFIX}{counterpart_id}"
-    digests = [belief for belief in beliefs if str(belief.object) == object_id]
-    return max(digests, key=lambda item: str(item.held_since)) if digests else None
-
-
 def _should_digest(source_ids: list[str], old_digest: Belief | None, config: object) -> bool:
     if old_digest is None:
         return len(source_ids) >= int(getattr(config, "counterpart_digest_min_beliefs", 5))
@@ -163,8 +162,5 @@ def _digest_content(beliefs: Sequence[Belief]) -> str:
         beliefs,
         key=lambda item: (item.cognitive_type.value, -float(item.confidence), str(item.id)),
     )
-    parts = [
-        f"{belief.cognitive_type.value}: {belief.content}"
-        for belief in ordered[:8]
-    ]
-    return "Counterpart digest: " + " | ".join(parts)
+    parts = [f"{belief.cognitive_type.value}: {belief.content}" for belief in ordered[:8]]
+    return " | ".join(parts)

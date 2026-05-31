@@ -72,6 +72,19 @@ CREATE INDEX IF NOT EXISTS idx_runtime_traces_session_timestamp
     ON runtime_traces(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_runtime_traces_event_type_timestamp
     ON runtime_traces(event_type, timestamp);
+
+CREATE TABLE IF NOT EXISTS session_profile_snapshots (
+    session_id TEXT NOT NULL,
+    counterpart_id TEXT NOT NULL,
+    source_belief_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(session_id, counterpart_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_profile_counterpart
+    ON session_profile_snapshots(counterpart_id, created_at DESC);
+
 CREATE INDEX IF NOT EXISTS idx_gateway_session_lookup
     ON gateway_session_mappings(platform, session_mode, session_key);
 CREATE INDEX IF NOT EXISTS idx_gateway_session_session_id

@@ -11,7 +11,6 @@ from alpha_agent.cognition.render import (
 from alpha_agent.llm.base import AssistantChatMessage
 from alpha_agent.state.models import SessionMessage
 from tests.cognition.render_helpers import view
-from tests.cognition.test_belief_projection_apply import belief
 
 
 def _message(
@@ -46,20 +45,27 @@ def _message(
 
 
 def test_renderer_orders_system_sections_and_current_user_message() -> None:
+    history = [
+        source_message_to_chat(
+            _message(message_id="msg_1", ordinal=1, role="user", content="hello")
+        )
+    ]
     rendered = TextChatRenderer().render(
         view(
-            recalled_beliefs=[belief("belief:1", "User prefers Python.")],
+            counterpart_profile="User prefers Python.",
+            chat_history=history,
             current_query="what now?",
         ),
         RenderBudget(),
     )
 
     messages = rendered.payload
-    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    assert [message["role"] for message in messages] == ["system", "user", "user", "user"]
     assert "Identity: Alpha Agent" in messages[0]["content"]
-    assert "Recalled beliefs:" in messages[1]["content"]
+    assert "Counterpart profile:" in messages[1]["content"]
     assert "<system-reminder>" in messages[1]["content"]
     assert "<context-reminder>" not in messages[1]["content"]
+    assert messages[2]["content"] == "hello"
     assert "Foreground:" not in "\n".join(str(message["content"]) for message in messages)
     assert messages[-1]["content"] == "what now?"
 
@@ -111,7 +117,7 @@ def test_renderer_budget_does_not_prune_source_history_messages() -> None:
 def test_renderer_uses_user_role_for_non_transcript_context() -> None:
     rendered = TextChatRenderer().render(
         view(
-            recalled_beliefs=[belief("belief:1", "User prefers Python.")],
+            counterpart_profile="User prefers Python.",
             current_query="what now?",
         ),
         RenderBudget(),
@@ -173,13 +179,13 @@ def test_source_assistant_message_preserves_reasoning_content() -> None:
 
 def test_budget_drops_zero_budget_section() -> None:
     rendered = TextChatRenderer().render(
-        view(recalled_beliefs=[belief("belief:1", "User prefers Python.")]),
-        RenderBudget(per_section_tokens={"recalled_beliefs": 0}),
+        view(counterpart_profile="User prefers Python."),
+        RenderBudget(per_section_tokens={"counterpart_profile": 0}),
     )
 
-    assert "recalled_beliefs" in rendered.dropped_sections
+    assert "counterpart_profile" in rendered.dropped_sections
     contents = "\n".join(str(message.get("content", "")) for message in rendered.payload)
-    assert "Recalled beliefs:" not in contents
+    assert "Counterpart profile:" not in contents
 
 
 def test_wrap_system_reminder() -> None:

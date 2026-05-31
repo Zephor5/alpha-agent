@@ -20,6 +20,7 @@ from alpha_agent.cognition.coordinator import (
     LoopAcquireRequest,
     LoopCoordinator,
 )
+from alpha_agent.cognition.counterpart_profile import active_counterpart_digest
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
@@ -36,8 +37,10 @@ from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.render import (
+    COUNTERPART_PROFILE_LABEL,
     RenderResult,
     estimate_chat_tokens,
+    render_counterpart_profile,
     source_message_to_chat,
     wrap_system_reminder,
 )
@@ -60,11 +63,12 @@ from alpha_agent.runtime.counterpart_router import CounterpartRouter
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
-from alpha_agent.state.models import RuntimeTrace, SessionMessage
+from alpha_agent.state.models import RuntimeTrace, SessionMessage, SessionProfileSnapshot
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import ToolCall, tool_output_kind
 from alpha_agent.tools.default import build_tool_registry
 from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_CONTEXT_KEY
+from alpha_agent.tools.memory_recall import MEMORY_RECALL_CONTEXT_KEY
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
@@ -119,7 +123,11 @@ _DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {
     "content": (
         "Identity: Alpha Agent.\n"
         "Use the current reactive context and answer concisely. "
-        "Call tools only when they are useful."
+        "Call tools only when they are useful. "
+        "When stable counterpart profile context is present, it is already visible near "
+        "the start of the prompt. Use memory_recall for explicit long-term belief "
+        "lookups, and use memory_propose only for explicit long-term memory write "
+        "proposals."
     ),
 }
 
@@ -163,6 +171,13 @@ class AgentLoopResult:
     llm_call_ids: list[str]
     llm_trace_ids: list[str]
     tool_cognitive_event_ids: list[str]
+
+
+@dataclass(frozen=True)
+class PromptFrame:
+    system_message: ChatMessage
+    prefix_context_messages: list[ChatMessage]
+    suffix_context_messages: list[ChatMessage]
 
 
 class LLMCompletionService:
@@ -321,16 +336,18 @@ class AlphaAgent:
         try:
             self._check_canceled(session_id, "before_user_event")
             model_tools = self.tool_registry.to_llm_tool_definitions()
+            counterpart_ref = self.counterpart_router.upsert_from_source_metadata(
+                source_metadata,
+                emitter=self.emitter,
+            )
+            profile_snapshot = self._session_profile_snapshot(session_id, counterpart_ref)
             self._run_pre_user_context_maintenance(
                 session_id=session_id,
+                counterpart=counterpart_ref,
                 pending_user_message=user_message,
                 model_tools=model_tools or None,
                 model_tool_choice="auto" if model_tools else None,
                 debug=debug,
-            )
-            counterpart_ref = self.counterpart_router.upsert_from_source_metadata(
-                source_metadata,
-                emitter=self.emitter,
             )
             user_record = self.store.append_session_message(
                 session_id=session_id,
@@ -390,6 +407,7 @@ class AlphaAgent:
                 stimulus=stimulus,
                 thread_id=stimulus.thread_id,
                 chat_history=chat_history,
+                counterpart_profile=profile_snapshot.content if profile_snapshot else None,
             )
             debug.update(loop_result.debug)
             llm_response = loop_result.outcome.raw_llm_response
@@ -452,14 +470,13 @@ class AlphaAgent:
     ) -> Outcome:
         del decision
         self._check_canceled(session_id, "before_prompt")
-        system_message, transient_context_messages = self._prompt_frame_from_rendered(
+        prompt_frame = self._prompt_frame_from_rendered(
             view=view,
             rendered=rendered,
         )
         messages = self._rebuild_runtime_llm_messages(
             session_id=session_id,
-            system_message=system_message,
-            transient_context_messages=transient_context_messages,
+            prompt_frame=prompt_frame,
         )
         prompt_token_estimate = estimate_chat_tokens(messages, tools=model_tools)
         debug["context_window_foreground_count"] = len(view.window.foreground)
@@ -479,15 +496,24 @@ class AlphaAgent:
             "situation": view.window.situation_at,
             "counterpart": view.window.counterpart,
         }
+        memory_recall_context = {
+            "session_id": session_id,
+            "counterpart": view.window.counterpart,
+            "belief_projection": BeliefProjection(
+                self.store,
+                event_log=self.event_log,
+                auto_rebuild=True,
+            ),
+        }
         loop_result = self._run_agent_loop(
             session_id=session_id,
             messages=messages,
-            system_message=system_message,
-            transient_context_messages=transient_context_messages,
+            prompt_frame=prompt_frame,
             model_tools=model_tools,
             model_tool_choice=model_tool_choice,
             initial_prompt_token_estimate=prompt_token_estimate,
             memory_propose_context=memory_propose_context,
+            memory_recall_context=memory_recall_context,
             debug=debug,
         )
         llm_response = loop_result.response
@@ -522,22 +548,25 @@ class AlphaAgent:
         self,
         *,
         session_id: str,
+        counterpart: Reference | None,
         pending_user_message: str,
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         debug: dict[str, Any],
     ) -> None:
         pending_message: ChatMessage = {"role": "user", "content": pending_user_message}
+        profile_messages = self._session_profile_context_messages(session_id, counterpart)
         pending_only_estimate = self._estimate_context_budget(
-            [self._default_system_message(), pending_message],
+            [self._default_system_message(), *profile_messages, pending_message],
             tools=model_tools,
         )
         if pending_only_estimate.used_context_tokens > self.max_context_tokens:
             self._raise_pending_user_too_large(pending_only_estimate)
 
-        planning_messages = [self._default_system_message(), pending_message]
+        planning_messages = [self._default_system_message(), *profile_messages, pending_message]
         projected_messages = self._source_prompt_messages(
             session_id=session_id,
+            counterpart=counterpart,
             extra_source_messages=[pending_message],
         )
         estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
@@ -558,6 +587,7 @@ class AlphaAgent:
             )
             projected_messages = self._source_prompt_messages(
                 session_id=session_id,
+                counterpart=counterpart,
                 extra_source_messages=[pending_message],
             )
             estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
@@ -565,7 +595,10 @@ class AlphaAgent:
         if self._needs_handover(estimate) and self.session_context.load(
             session_id
         ).source_messages:
-            compression_messages = self._source_prompt_messages(session_id=session_id)
+            compression_messages = self._source_prompt_messages(
+                session_id=session_id,
+                counterpart=counterpart,
+            )
             result = compress_session_context(
                 session_id=session_id,
                 assembler=self.session_context,
@@ -578,6 +611,7 @@ class AlphaAgent:
             debug["pre_user_compression_point_ordinal"] = result.compression_point_ordinal
             projected_messages = self._source_prompt_messages(
                 session_id=session_id,
+                counterpart=counterpart,
                 extra_source_messages=[pending_message],
             )
             estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
@@ -593,16 +627,14 @@ class AlphaAgent:
         self,
         *,
         session_id: str,
-        system_message: ChatMessage,
-        transient_context_messages: Sequence[ChatMessage],
+        prompt_frame: PromptFrame,
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         debug: dict[str, Any],
     ) -> list[ChatMessage]:
         llm_messages = self._rebuild_runtime_llm_messages(
             session_id=session_id,
-            system_message=system_message,
-            transient_context_messages=transient_context_messages,
+            prompt_frame=prompt_frame,
         )
         estimate = self._estimate_context_budget(llm_messages, tools=model_tools)
         debug["tool_loop_context_used_tokens"] = estimate.used_context_tokens
@@ -614,12 +646,15 @@ class AlphaAgent:
                 context_config=self.llm_context_config,
                 max_context_tokens=self.max_context_tokens,
                 tools=model_tools,
-                planning_messages=[system_message, *transient_context_messages],
+                planning_messages=[
+                    prompt_frame.system_message,
+                    *prompt_frame.prefix_context_messages,
+                    *prompt_frame.suffix_context_messages,
+                ],
             )
             llm_messages = self._rebuild_runtime_llm_messages(
                 session_id=session_id,
-                system_message=system_message,
-                transient_context_messages=transient_context_messages,
+                prompt_frame=prompt_frame,
             )
             estimate = self._estimate_context_budget(llm_messages, tools=model_tools)
 
@@ -638,8 +673,7 @@ class AlphaAgent:
             debug["tool_loop_compression_point_ordinal"] = result.compression_point_ordinal
             llm_messages = self._rebuild_runtime_llm_messages(
                 session_id=session_id,
-                system_message=system_message,
-                transient_context_messages=transient_context_messages,
+                prompt_frame=prompt_frame,
             )
         return llm_messages
 
@@ -647,10 +681,12 @@ class AlphaAgent:
         self,
         *,
         session_id: str,
+        counterpart: Reference | None = None,
         extra_source_messages: Sequence[ChatMessage] | None = None,
     ) -> list[ChatMessage]:
         return [
             self._default_system_message(),
+            *self._session_profile_context_messages(session_id, counterpart),
             *self.session_context.load(session_id).chat_messages,
             *(extra_source_messages or ()),
         ]
@@ -659,13 +695,19 @@ class AlphaAgent:
         self,
         *,
         session_id: str,
-        system_message: ChatMessage,
-        transient_context_messages: Sequence[ChatMessage],
+        prompt_frame: PromptFrame,
     ) -> list[ChatMessage]:
         return [
-            _copy_chat_message(system_message),
+            _copy_chat_message(prompt_frame.system_message),
+            *[
+                _copy_chat_message(message)
+                for message in prompt_frame.prefix_context_messages
+            ],
             *self.session_context.load(session_id).chat_messages,
-            *[_copy_chat_message(message) for message in transient_context_messages],
+            *[
+                _copy_chat_message(message)
+                for message in prompt_frame.suffix_context_messages
+            ],
         ]
 
     def _prompt_frame_from_rendered(
@@ -673,19 +715,43 @@ class AlphaAgent:
         *,
         view: CognitionView,
         rendered: RenderResult,
-    ) -> tuple[ChatMessage, list[ChatMessage]]:
+    ) -> PromptFrame:
         rendered_messages = cast(list[ChatMessage], rendered.payload)
         if not rendered_messages:
-            return self._default_system_message(), []
+            return PromptFrame(self._default_system_message(), [], [])
         system_message = _copy_chat_message(rendered_messages[0])
+        remaining = list(rendered_messages[1:])
+        prefix_messages: list[ChatMessage] = []
+        if remaining and self._is_counterpart_profile_message(
+            remaining[0],
+            view.counterpart_profile,
+        ):
+            prefix_messages.append(_copy_chat_message(remaining.pop(0)))
         source_count = len(view.chat_history)
-        transient_messages = list(rendered_messages[1 + source_count :])
-        if transient_messages and self._is_current_query_message(
-            transient_messages[-1],
+        suffix_messages = list(remaining[source_count:])
+        if suffix_messages and self._is_current_query_message(
+            suffix_messages[-1],
             view.current_query,
         ):
-            transient_messages = transient_messages[:-1]
-        return system_message, [_copy_chat_message(message) for message in transient_messages]
+            suffix_messages = suffix_messages[:-1]
+        return PromptFrame(
+            system_message=system_message,
+            prefix_context_messages=prefix_messages,
+            suffix_context_messages=[_copy_chat_message(message) for message in suffix_messages],
+        )
+
+    def _is_counterpart_profile_message(
+        self,
+        message: ChatMessage,
+        counterpart_profile: str | None,
+    ) -> bool:
+        content = str(message.get("content") or "").strip()
+        return (
+            bool(counterpart_profile)
+            and message.get("role") == "user"
+            and content.startswith("<system-reminder>")
+            and COUNTERPART_PROFILE_LABEL in content
+        )
 
     def _is_current_query_message(
         self,
@@ -730,6 +796,51 @@ class AlphaAgent:
     def _default_system_message(self) -> ChatMessage:
         return _copy_chat_message(_DEFAULT_RUNTIME_SYSTEM_MESSAGE)
 
+    def _session_profile_snapshot(
+        self,
+        session_id: str,
+        counterpart: Reference | None,
+    ) -> SessionProfileSnapshot | None:
+        if counterpart is None:
+            return None
+        snapshot = self.store.get_session_profile_snapshot(session_id, counterpart.id)
+        if snapshot is not None:
+            return snapshot
+        projection = BeliefProjection(
+            self.store,
+            event_log=self.event_log,
+            auto_rebuild=True,
+        )
+        digest = active_counterpart_digest(projection, counterpart)
+        if digest is None:
+            return None
+        content = str(digest.content).strip()
+        if not content:
+            return None
+        return self.store.create_session_profile_snapshot(
+            session_id=session_id,
+            counterpart_id=counterpart.id,
+            source_belief_id=str(digest.id),
+            content=content,
+        )
+
+    def _session_profile_context_messages(
+        self,
+        session_id: str,
+        counterpart: Reference | None,
+    ) -> list[ChatMessage]:
+        if counterpart is None:
+            return []
+        snapshot = self.store.get_session_profile_snapshot(session_id, counterpart.id)
+        if snapshot is None:
+            return []
+        return [
+            {
+                "role": "user",
+                "content": wrap_system_reminder(render_counterpart_profile(snapshot.content)),
+            }
+        ]
+
     def _raise_pending_user_too_large(self, estimate: ContextBudgetEstimate) -> None:
         raise ContextWindowExceededError(
             "pending user message exceeds configured context window "
@@ -747,12 +858,12 @@ class AlphaAgent:
         *,
         session_id: str,
         messages: list[ChatMessage],
-        system_message: ChatMessage,
-        transient_context_messages: Sequence[ChatMessage],
+        prompt_frame: PromptFrame,
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         initial_prompt_token_estimate: int,
         memory_propose_context: Mapping[str, Any] | None,
+        memory_recall_context: Mapping[str, Any] | None,
         debug: dict[str, Any],
     ) -> AgentLoopResult:
         llm_messages = list(messages)
@@ -867,6 +978,7 @@ class AlphaAgent:
                         if item
                     ],
                 },
+                memory_recall_context=memory_recall_context,
                 recover_errors=True,
             )
             provider_tool_trace_ids.extend(item.trace.id for item in provider_results)
@@ -889,8 +1001,7 @@ class AlphaAgent:
             )
             llm_messages = self._run_tool_result_context_maintenance(
                 session_id=session_id,
-                system_message=system_message,
-                transient_context_messages=transient_context_messages,
+                prompt_frame=prompt_frame,
                 model_tools=model_tools,
                 model_tool_choice=model_tool_choice,
                 debug=debug,
@@ -1209,6 +1320,7 @@ class AlphaAgent:
         session_id: str,
         calls: list[ToolCall],
         memory_propose_context: Mapping[str, Any] | None = None,
+        memory_recall_context: Mapping[str, Any] | None = None,
         recover_errors: bool = False,
     ) -> list[ExecutedToolResult]:
         return self.tool_executor.execute(
@@ -1217,6 +1329,7 @@ class AlphaAgent:
             output_dir=self.tool_output_dir,
             extensions={
                 MEMORY_PROPOSE_CONTEXT_KEY: dict(memory_propose_context or {}),
+                MEMORY_RECALL_CONTEXT_KEY: dict(memory_recall_context or {}),
             },
             write_trace=lambda event_type, content, metadata: self.store.append_runtime_trace(
                 session_id=session_id,

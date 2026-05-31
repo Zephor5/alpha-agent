@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from typing import cast
 
 import pytest
 
+from alpha_agent.cognition.emitter import EventEmitter
+from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
+from alpha_agent.cognition.models import CognitiveEventKind, CounterpartId, counterpart_ref
+from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.config import LLMContextConfig
 from alpha_agent.llm.base import (
     AssistantChatMessage,
@@ -13,15 +18,20 @@ from alpha_agent.llm.base import (
     LLMResponse,
     LLMToolCall,
     LLMToolChoice,
+    LLMToolDefinition,
     LLMToolDefinitionInput,
     ToolChatMessage,
 )
 from alpha_agent.llm.mock import MockLLMProvider
-from alpha_agent.runtime.agent import AlphaAgent
+from alpha_agent.runtime.agent import AlphaAgent, ContextWindowExceededError
 from alpha_agent.runtime.context_handover import DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION
+from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from alpha_agent.tools.default import build_tool_registry
+from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
+from alpha_agent.tools.registry import ToolRegistry
+from tests.cognition.test_belief_projection_apply import belief
 
 
 def _store(tmp_path) -> StateStore:
@@ -106,6 +116,157 @@ def test_agent_two_turn_prompt_is_append_only_without_fixed_tail(tmp_path) -> No
     assert contents[1:] == [*(f"old {index}" for index in range(1, 12)), "new turn"]
 
 
+def test_agent_reuses_session_profile_snapshot_before_history(tmp_path) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    projection = _seed_active_digest(
+        store,
+        log,
+        "belief:digest:v1",
+        "Stable profile v1.",
+    )
+    provider = _QueuedRecordingProvider(["first answer", "second answer"])
+    agent = AlphaAgent(store=store, llm_provider=provider, event_log=log)
+
+    agent.respond("first turn", session_id="s1")
+
+    _seed_active_digest(
+        store,
+        log,
+        "belief:digest:v2",
+        "Stable profile v2.",
+        projection=projection,
+        held_since="2026-01-01T00:00:01+00:00",
+    )
+    agent.respond("second turn", session_id="s1")
+
+    first_call = provider.calls[0]
+    assert [message["role"] for message in first_call] == ["system", "user", "user"]
+    assert "Counterpart profile: Stable profile v1." in str(first_call[1]["content"])
+    assert first_call[2]["content"] == "first turn"
+
+    second_call = provider.calls[1]
+    assert [message["role"] for message in second_call] == [
+        "system",
+        "user",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert "Counterpart profile: Stable profile v1." in str(second_call[1]["content"])
+    assert "Stable profile v2." not in str(second_call)
+    assert [message.get("content") for message in second_call[2:]] == [
+        "first turn",
+        "first answer",
+        "second turn",
+    ]
+    snapshot = store.get_session_profile_snapshot("s1", str(DEFAULT_COUNTERPART_ID))
+    assert snapshot is not None
+    assert snapshot.content == "Stable profile v1."
+
+
+def test_session_profile_snapshots_are_keyed_by_counterpart(tmp_path) -> None:
+    store = _store(tmp_path)
+
+    first = store.create_session_profile_snapshot(
+        session_id="s1",
+        counterpart_id="counterpart:a",
+        source_belief_id="belief:digest:a",
+        content="Profile A.",
+    )
+    second = store.create_session_profile_snapshot(
+        session_id="s1",
+        counterpart_id="counterpart:b",
+        source_belief_id="belief:digest:b",
+        content="Profile B.",
+    )
+    duplicate = store.create_session_profile_snapshot(
+        session_id="s1",
+        counterpart_id="counterpart:a",
+        source_belief_id="belief:digest:a-new",
+        content="Profile A new.",
+    )
+
+    assert first.content == "Profile A."
+    assert second.content == "Profile B."
+    assert duplicate.content == "Profile A."
+    assert store.get_session_profile_snapshot("s1", "counterpart:a") == first
+    assert store.get_session_profile_snapshot("s1", "counterpart:b") == second
+    assert store.get_session_profile_snapshot("s1", "counterpart:missing") is None
+
+
+def test_agent_uses_counterpart_specific_profile_snapshots_in_shared_session(tmp_path) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    bob_counterpart_id = _routed_counterpart_id("local", "bob")
+    _seed_active_digest(
+        store,
+        log,
+        "belief:digest:alice",
+        "Alice stable profile.",
+    )
+    _seed_active_digest(
+        store,
+        log,
+        "belief:digest:bob",
+        "Bob stable profile.",
+        counterpart_id=bob_counterpart_id,
+    )
+    provider = _QueuedRecordingProvider(["alice answer", "bob answer"])
+    agent = AlphaAgent(store=store, llm_provider=provider, event_log=log)
+
+    agent.respond(
+        "first turn",
+        session_id="shared",
+        source_metadata={"platform": "local", "user_id": "alice"},
+    )
+    agent.respond(
+        "second turn",
+        session_id="shared",
+        source_metadata={"platform": "local", "user_id": "bob"},
+    )
+
+    assert "Counterpart profile: Alice stable profile." in str(provider.calls[0])
+    assert "Bob stable profile." not in str(provider.calls[0])
+    assert "Counterpart profile: Bob stable profile." in str(provider.calls[1])
+    assert "Alice stable profile." not in str(provider.calls[1])
+    alice_snapshot = store.get_session_profile_snapshot("shared", str(DEFAULT_COUNTERPART_ID))
+    bob_snapshot = store.get_session_profile_snapshot("shared", bob_counterpart_id)
+    assert alice_snapshot is not None
+    assert bob_snapshot is not None
+    assert alice_snapshot.content == "Alice stable profile."
+    assert bob_snapshot.content == "Bob stable profile."
+
+
+def test_first_turn_profile_snapshot_participates_in_pre_user_budget(tmp_path) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    _seed_active_digest(
+        store,
+        log,
+        "belief:digest:large",
+        " ".join(f"profileword{index}" for index in range(80)),
+    )
+    provider = _RecordingProvider("should not be called")
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        tool_registry=ToolRegistry(),
+        llm_context_config=_zero_reserve_context(),
+        max_context_tokens=55,
+        event_log=log,
+    )
+
+    with pytest.raises(ContextWindowExceededError):
+        agent.respond("short", session_id="s1")
+
+    assert provider.calls == []
+    assert store.list_session_messages("s1") == []
+    snapshot = store.get_session_profile_snapshot("s1", str(DEFAULT_COUNTERPART_ID))
+    assert snapshot is not None
+    assert snapshot.content.startswith("profileword0")
+
+
 def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> None:
     store = _store(tmp_path)
     registry = build_tool_registry()
@@ -177,6 +338,66 @@ def test_agent_sends_only_structured_tool_output_to_llm_context(tmp_path) -> Non
         "name": "structured",
         "output": {"items": [{"title": "Alpha"}], "ok": True},
     }
+
+
+def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    _seed_active_belief(
+        store,
+        log,
+        "belief:python",
+        "User prefers Python examples.",
+        object_="python",
+    )
+    provider = _MemoryRecallCallingProvider()
+    agent = AlphaAgent(store=store, llm_provider=provider, event_log=log)
+
+    result = agent.respond("What examples do I prefer?", session_id="s1")
+
+    assert result.response == "You prefer Python examples."
+    assert MEMORY_RECALL_TOOL_NAME in provider.tool_names_seen[0]
+    assert len(provider.calls) == 2
+    follow_up_tool_message = cast(ToolChatMessage, provider.calls[1][-1])
+    assert follow_up_tool_message["role"] == "tool"
+    assert follow_up_tool_message["tool_call_id"] == "call_recall"
+    assert json.loads(follow_up_tool_message["content"]) == {
+        "results": [
+            {
+                "content": "User prefers Python examples.",
+                "type": "preference",
+                "scope": "counterpart",
+            }
+        ]
+    }
+
+    messages = store.list_session_messages("s1")
+    assert [message.kind for message in messages] == [
+        "user_message",
+        "assistant_message",
+        "tool_message",
+        "assistant_message",
+    ]
+    assert messages[1].metadata == {"tool_call_ids": ["call_recall"]}
+    assert messages[2].provider_metadata == {"tool_name": MEMORY_RECALL_TOOL_NAME}
+    assert json.loads(messages[2].raw_content) == {
+        "results": [
+            {
+                "content": "User prefers Python examples.",
+                "type": "preference",
+                "scope": "counterpart",
+            }
+        ]
+    }
+    assert messages[2].metadata["tool_output_kind"] == "json"
+    assert [trace.event_type for trace in store.list_runtime_traces("s1")] == [
+        "llm.started",
+        "llm.completed",
+        "tool.started",
+        "tool.completed",
+        "llm.started",
+        "llm.completed",
+    ]
 
 
 def test_llm_debug_payloads_are_written_to_jsonl_not_database(tmp_path) -> None:
@@ -271,7 +492,7 @@ def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path)
         store=store,
         llm_provider=provider,
         llm_context_config=_compression_context(),
-        max_context_tokens=150,
+        max_context_tokens=300,
     )
 
     result = agent.respond("pending user must stay out of compression", session_id="s1")
@@ -316,7 +537,7 @@ def test_failed_pre_user_compression_does_not_persist_pending_user(tmp_path) -> 
         store=store,
         llm_provider=provider,
         llm_context_config=_compression_context(),
-        max_context_tokens=150,
+        max_context_tokens=300,
     )
 
     with pytest.raises(RuntimeError, match="provider failed"):
@@ -344,7 +565,7 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
         llm_provider=provider,
         tool_registry=registry,
         llm_context_config=_compression_context(),
-        max_context_tokens=150,
+        max_context_tokens=300,
     )
 
     result = agent.respond("use tool", session_id="s1")
@@ -423,6 +644,66 @@ class _RecordingProvider:
     ) -> LLMResponse:
         self.calls.append(messages)
         return LLMResponse(content=self.response, model="test", provider=self.name)
+
+
+def _seed_active_digest(
+    store: StateStore,
+    log: SQLiteEventLog,
+    belief_id: str,
+    content: str,
+    *,
+    projection: BeliefProjection | None = None,
+    counterpart_id: str = str(DEFAULT_COUNTERPART_ID),
+    held_since: str = "2026-01-01T00:00:00+00:00",
+) -> BeliefProjection:
+    projection = projection or BeliefProjection(store)
+    counterpart = counterpart_ref(CounterpartId(counterpart_id))
+    event = EventEmitter(log).emit(
+        CognitiveEventKind.BELIEF_FORMED,
+        payload={
+            "belief": belief(
+                belief_id,
+                content,
+                about=[counterpart],
+                object_=f"counterpart_digest:{counterpart_id}",
+                held_since=held_since,
+            ).to_record()
+        },
+    )
+    projection.apply(event)
+    return projection
+
+
+def _routed_counterpart_id(platform: str, user_id: str) -> str:
+    digest = hashlib.sha1(f"{platform}:{user_id}".encode()).hexdigest()[:16]
+    return f"counterpart:{digest}"
+
+
+def _seed_active_belief(
+    store: StateStore,
+    log: SQLiteEventLog,
+    belief_id: str,
+    content: str,
+    *,
+    object_: str,
+    held_since: str = "2026-01-01T00:00:00+00:00",
+) -> BeliefProjection:
+    projection = BeliefProjection(store)
+    counterpart = counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))
+    event = EventEmitter(log).emit(
+        CognitiveEventKind.BELIEF_FORMED,
+        payload={
+            "belief": belief(
+                belief_id,
+                content,
+                about=[counterpart],
+                object_=object_,
+                held_since=held_since,
+            ).to_record()
+        },
+    )
+    projection.apply(event)
+    return projection
 
 
 class _QueuedRecordingProvider:
@@ -587,6 +868,56 @@ class _StructuredToolCallingProvider:
                 ],
             )
         return LLMResponse(content="final answer", model="test", provider=self.name)
+
+
+class _MemoryRecallCallingProvider:
+    name = "memory-recall-provider"
+
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.calls: list[list[ChatMessage]] = []
+        self.tool_names_seen: list[list[str]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        del tool_choice
+        self.call_count += 1
+        self.calls.append([_copy_chat_message(message) for message in messages])
+        self.tool_names_seen.append([_tool_name(tool) for tool in tools or []])
+        if self.call_count == 1:
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_recall",
+                        name=MEMORY_RECALL_TOOL_NAME,
+                        arguments={"query": "Python", "scope": "counterpart"},
+                        raw_arguments='{"query":"Python","scope":"counterpart"}',
+                    )
+                ],
+            )
+        return LLMResponse(
+            content="You prefer Python examples.",
+            model="test",
+            provider=self.name,
+        )
+
+
+def _tool_name(tool: LLMToolDefinitionInput) -> str:
+    if isinstance(tool, LLMToolDefinition):
+        return tool.name
+    function = tool.get("function")
+    if isinstance(function, dict):
+        return str(function.get("name") or "")
+    return str(tool.get("name") or "")
 
 
 class _EchoTool(Tool):

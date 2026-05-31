@@ -5,6 +5,7 @@ from __future__ import annotations
 from alpha_agent.config import AlphaConfig
 from alpha_agent.tools.bash import BashTool
 from alpha_agent.tools.memory_propose import MemoryProposeTool
+from alpha_agent.tools.memory_recall import MemoryRecallTool
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.tools.web_search import TavilyWebSearchTool
 
@@ -14,6 +15,7 @@ def build_tool_registry(config: AlphaConfig | None = None) -> ToolRegistry:
 
     registry = ToolRegistry()
     registry.register(MemoryProposeTool())
+    registry.register(MemoryRecallTool())
     if config is None:
         return registry
     if config.bash_tool.enabled:

@@ -9,7 +9,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, TypeVar
 
-from alpha_agent.state.models import LLMRole, RuntimeTrace, SessionMessage, SessionMessageKind
+from alpha_agent.state.models import (
+    LLMRole,
+    RuntimeTrace,
+    SessionMessage,
+    SessionMessageKind,
+    SessionProfileSnapshot,
+)
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
 
@@ -292,6 +298,69 @@ class StateStore:
             ).fetchone()
         return self._session_message_from_row(row) if row is not None else None
 
+    def get_session_profile_snapshot(
+        self,
+        session_id: str,
+        counterpart_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionProfileSnapshot | None:
+        """Return the stable profile snapshot for one session/counterpart, if any."""
+
+        def op(db: sqlite3.Connection) -> SessionProfileSnapshot | None:
+            row = db.execute(
+                """
+                SELECT *
+                FROM session_profile_snapshots
+                WHERE session_id = ?
+                  AND counterpart_id = ?
+                """,
+                (session_id, counterpart_id),
+            ).fetchone()
+            return self._session_profile_snapshot_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def create_session_profile_snapshot(
+        self,
+        *,
+        session_id: str,
+        counterpart_id: str,
+        source_belief_id: str,
+        content: str,
+        created_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionProfileSnapshot:
+        """Create or return the stable profile snapshot for one session/counterpart."""
+
+        timestamp = created_at or utc_now_iso()
+
+        def op(db: sqlite3.Connection) -> SessionProfileSnapshot:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO session_profile_snapshots
+                    (session_id, counterpart_id, source_belief_id, content, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (session_id, counterpart_id, source_belief_id, content, timestamp),
+            )
+            snapshot = self.get_session_profile_snapshot(
+                session_id,
+                counterpart_id,
+                conn=db,
+            )
+            if snapshot is None:
+                raise RuntimeError(
+                    "failed to create profile snapshot for "
+                    f"session {session_id!r} counterpart {counterpart_id!r}"
+                )
+            return snapshot
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
     def update_session_message_replay_payload(
         self,
         message_id: str,
@@ -494,6 +563,18 @@ class StateStore:
             content=row["content"],
             timestamp=row["timestamp"],
             metadata=_loads_dict(row["metadata"]),
+        )
+
+    def _session_profile_snapshot_from_row(
+        self,
+        row: sqlite3.Row,
+    ) -> SessionProfileSnapshot:
+        return SessionProfileSnapshot(
+            session_id=row["session_id"],
+            counterpart_id=row["counterpart_id"],
+            source_belief_id=row["source_belief_id"],
+            content=row["content"],
+            created_at=row["created_at"],
         )
 
     def _validate_session_message_shape(

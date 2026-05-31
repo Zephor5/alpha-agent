@@ -87,6 +87,7 @@ class CognitiveController:
         thread_id: ThreadId,
         *,
         chat_history: list[ChatMessage] | None = None,
+        counterpart_profile: str | None = None,
     ) -> LoopResult:
         tick_id = str(uuid.uuid4())
         subject = self.projections.get_typed(SubjectProjection).current()
@@ -161,7 +162,7 @@ class CognitiveController:
             situation=situation_from_ref(context_window.situation_at),
             projections=self.projections,
             window=context_window,
-            recalled_beliefs=recalled,
+            counterpart_profile=counterpart_profile,
             matched_procedures=procedures,
             current_query=str(decided.value.payload.get("message", ""))
             if isinstance(decided.value.payload, dict)

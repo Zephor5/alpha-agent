@@ -107,7 +107,12 @@ def test_agent_factory_registers_configured_default_tools(tmp_path: Path) -> Non
 
     agent = AgentFactory(config, store).create()
 
-    assert agent.tool_registry.names() == ["memory_propose", "bash", "web_search"]
+    assert agent.tool_registry.names() == [
+        "memory_propose",
+        "memory_recall",
+        "bash",
+        "web_search",
+    ]
 
 
 class _MonotonicClock:

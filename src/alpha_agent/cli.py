@@ -45,6 +45,7 @@ from alpha_agent.cognition.models import (
     situation_ref,
     subject_ref,
 )
+from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.cognition.projections.reflection import ReflectionProjection, target_to_parts
 from alpha_agent.cognition.projections.strategy import StrategyProjection
@@ -956,6 +957,7 @@ def _debug_prompt_view(
     session_id: str,
     message: str,
     chat_history: list[ChatMessage],
+    counterpart_profile: str | None = None,
 ) -> CognitionView:
     situation = Situation(id=SituationId("situation:debug-prompt"))
     thread_id = ThreadId.from_session(session_id)
@@ -980,6 +982,7 @@ def _debug_prompt_view(
         assembled_at=Instant(""),
         current_query=message,
         chat_history=chat_history,
+        counterpart_profile=counterpart_profile,
     )
 
 
@@ -1008,7 +1011,11 @@ def cognition_graph(
         situation=Situation(id=SituationId("situation:cognition-graph")),
         projections=projections,
     )
-    rendered = GraphSnapshotRenderer(format=format).render(view, RenderBudget(max_tokens=128))
+    rendered = GraphSnapshotRenderer(format=format).render(
+        view,
+        RenderBudget(max_tokens=128),
+        beliefs=projections.get_typed(BeliefProjection).list_active(),
+    )
     console.print(str(rendered.payload), markup=False)
 
 

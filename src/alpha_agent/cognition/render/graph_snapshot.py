@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 
 from alpha_agent.cognition.models import Belief
 from alpha_agent.cognition.render.base import RenderBudget, RenderResult
@@ -19,14 +20,20 @@ class GraphSnapshotRenderer:
             raise ValueError("graph snapshot format must be 'mermaid' or 'dot'")
         self.format = format
 
-    def render(self, view: CognitionView, budget: RenderBudget) -> RenderResult:
-        beliefs = view.recalled_beliefs[: max(0, budget.max_tokens)]
+    def render(
+        self,
+        view: CognitionView,
+        budget: RenderBudget,
+        *,
+        beliefs: Sequence[Belief] | None = None,
+    ) -> RenderResult:
+        belief_list = list(beliefs or ())[: max(0, budget.max_tokens)]
         payload = (
-            self._mermaid(view, beliefs)
+            self._mermaid(view, belief_list)
             if self.format == "mermaid"
-            else self._dot(view, beliefs)
+            else self._dot(view, belief_list)
         )
-        notes = ["no beliefs available"] if not beliefs else []
+        notes = ["no beliefs available"] if not belief_list else []
         return RenderResult(payload=payload, used_tokens=len(payload) // 4, notes=notes)
 
     def _mermaid(self, view: CognitionView, beliefs: list[Belief]) -> str:

@@ -6,7 +6,6 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from alpha_agent.cognition.models import (
-    Belief,
     ContextWindow,
     Counterpart,
     Instant,
@@ -17,7 +16,6 @@ from alpha_agent.cognition.models import (
     SituationId,
     ThreadId,
 )
-from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.context_window import ContextWindowProjection
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.projections.reflection import ReflectionProjection
@@ -35,7 +33,7 @@ def build_view(
     projections: ProjectionRegistry,
     clock: Callable[[], str] = utc_now_iso,
     window: ContextWindow | None = None,
-    recalled_beliefs: Sequence[Belief] | None = None,
+    counterpart_profile: str | None = None,
     active_judgments: Sequence[Judgment] | None = None,
     matched_procedures: Sequence[Any] | None = None,
     active_strategies: Sequence[Any] | None = None,
@@ -45,7 +43,7 @@ def build_view(
 ) -> CognitionView:
     """Build the renderer-facing view for one thread.
 
-    Current phases have concrete subject, counterpart, context-window, belief,
+    Current phases have concrete subject, counterpart, context-window,
     procedure, and L1 reflection projections. Later strategy/lens projections
     can feed the optional sequence fields without changing renderer contracts.
     """
@@ -54,11 +52,6 @@ def build_view(
     if window is None:
         window = projections.get_typed(ContextWindowProjection).get(thread_id, subject)
     counterpart = _counterpart(window, projections)
-    beliefs = (
-        list(recalled_beliefs)
-        if recalled_beliefs is not None
-        else _beliefs(window, projections)
-    )
     reflections = (
         list(recent_reflections)
         if recent_reflections is not None
@@ -69,8 +62,7 @@ def build_view(
         counterpart=counterpart,
         situation=situation,
         window=window,
-        recalled_beliefs=beliefs,
-        counterpart_digest=None,
+        counterpart_profile=counterpart_profile,
         active_judgments=list(active_judgments or []),
         matched_procedures=list(matched_procedures or []),
         active_strategies=list(active_strategies or []),
@@ -92,19 +84,6 @@ def _counterpart(window: ContextWindow, projections: ProjectionRegistry) -> Coun
         return projections.get_typed(CounterpartProjection).get(window.counterpart.id)
     except KeyError:
         return None
-
-
-def _beliefs(window: ContextWindow, projections: ProjectionRegistry) -> list[Belief]:
-    try:
-        projection = projections.get_typed(BeliefProjection)
-    except KeyError:
-        return []
-    beliefs: list[Belief] = []
-    for ref in window.recalled:
-        belief = projection.get_by_id(ref.id)
-        if belief is not None:
-            beliefs.append(belief)
-    return beliefs
 
 
 def _recent_reflections(projections: ProjectionRegistry) -> list[Reflection]:

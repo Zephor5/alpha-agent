@@ -60,18 +60,28 @@ daemon-owned turns, provider-returned tool calls are persisted as assistant
 when a limit is reached. The old `runtime/prompt_builder.py` path has been
 removed.
 
-The `memory_propose` tool is always present in runtime tool definitions. It can
-propose explicit long-term preferences, constraints, procedures, and corrections
-during a Reactive turn. Accepted low-risk proposals emit `memory_proposed`, then
-`belief_formed`, and apply immediately to `belief_view`; pending or rejected
-proposals remain audit-only.
+Stable counterpart profile context is selected from counterpart digest beliefs
+once per ordinary session and rendered near the start of the prompt when
+available. It is a compact always-visible relationship profile, not a dynamic
+search result.
+
+The `memory_recall` and `memory_propose` tools are always present in runtime
+tool definitions. `memory_recall` is the read path for explicit long-term belief
+lookup during the normal provider tool loop; it returns compact belief content
+without ids, confidence scores, sources, or evidence. `memory_propose` is the
+write-proposal path for explicit long-term preferences, constraints, procedures,
+and corrections during a Reactive turn. Accepted low-risk proposals emit
+`memory_proposed`, then `belief_formed`, and apply immediately to `belief_view`;
+pending or rejected proposals remain audit-only.
 
 Beliefs are materialized in SQLite and recallable across sessions through a
 deterministic projection over cognition events. Foreground context is stored in
 `context_window_view` as thread-local perception IDs, anchors, and rebuildable
-window state, and belief recall is joined into `ContextWindow.recalled` during
-the Reactive tick. Every tick emits a `reflected` event, with rule findings
-materialized into `reflection_view`.
+window state. Internal cognition-stage belief recall is still joined into
+`ContextWindow.recalled` during the Reactive tick for interpretation and
+judgment, while model-facing dynamic lookup goes through `memory_recall`. Every
+tick emits a `reflected` event, with rule findings materialized into
+`reflection_view`.
 
 Deterministic consolidation is available through a synchronous `run_once`: it
 merges equivalent beliefs, archives expired beliefs, learns minimal procedures,
@@ -460,6 +470,8 @@ The current SQLite state baseline is deliberately narrow:
 - `session_messages`: append-only source stream for user, assistant, tool, and
   compressed handover messages used to assemble LLM-visible session context,
   including assistant `reasoning_content` when a provider supplies it.
+- `session_profile_snapshots`: session-stable counterpart profile snapshots
+  keyed by session and counterpart.
 - `runtime_traces`: operational turn, provider, and tool traces.
 - `gateway_session_mappings`: platform/session routing state.
 - `gateway_dedup`: inbound gateway deduplication state.
@@ -490,8 +502,9 @@ resolution, queued conflict consumption, and temporary strategy overrides are
 also in place. GoalProjection and manual DriveLoop self-signals are in place.
 SubjectProjection now persists the L3 SelfModel from `self_model_updated`.
 The explicit tool execution subsystem is also in place, with `memory_propose`
-always registered, `web_search` registered when Tavily credentials are
-configured, and `bash` registered only when `tools.bash.enabled=true`.
+and `memory_recall` always registered, `web_search` registered when Tavily
+credentials are configured, and `bash` registered only when
+`tools.bash.enabled=true`.
 Semantic strategy/lens diff remains pending.
 
 ## Current Limitations

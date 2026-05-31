@@ -7,12 +7,9 @@ from tests.cognition.test_belief_projection_apply import belief, counterpart_a
 
 def test_graph_snapshot_renders_mermaid() -> None:
     rendered = GraphSnapshotRenderer(format="mermaid").render(
-        view(
-            recalled_beliefs=[
-                belief("belief:1", "User prefers Python.", about=[counterpart_a()])
-            ]
-        ),
+        view(),
         RenderBudget(),
+        beliefs=[belief("belief:1", "User prefers Python.", about=[counterpart_a()])],
     )
 
     assert str(rendered.payload).startswith("graph TD")
@@ -22,8 +19,9 @@ def test_graph_snapshot_renders_mermaid() -> None:
 
 def test_graph_snapshot_renders_dot() -> None:
     rendered = GraphSnapshotRenderer(format="dot").render(
-        view(recalled_beliefs=[belief("belief:1", "User prefers Python.")]),
+        view(),
         RenderBudget(),
+        beliefs=[belief("belief:1", "User prefers Python.")],
     )
 
     assert str(rendered.payload).startswith("digraph cognition {")

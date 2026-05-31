@@ -223,6 +223,12 @@ def test_counterpart_digest_supersedes_and_replays(tmp_path) -> None:
     assert second.emitted == 2
     assert first_digest != second_digest
     assert len(second_digest) == 1
+    active_digest = _active_digests(
+        projections.get_typed(BeliefProjection),
+        counterpart_id,
+    )[0]
+    assert not str(active_digest.content).startswith("Counterpart digest:")
+    assert "preference: User A preference 0." in str(active_digest.content)
 
     with store.immediate_transaction() as conn:
         conn.execute("DROP TABLE belief_view")
@@ -507,8 +513,12 @@ def _emit_apply(emitter, projections, kind, payload):
 
 
 def _active_digest_ids(projection: BeliefProjection, counterpart_id: str) -> list[str]:
+    return [str(item.id) for item in _active_digests(projection, counterpart_id)]
+
+
+def _active_digests(projection: BeliefProjection, counterpart_id: str):
     return [
-        str(item.id)
+        item
         for item in projection.recall_about(counterpart_ref(CounterpartId(counterpart_id)))
         if item.object == f"counterpart_digest:{counterpart_id}"
     ]

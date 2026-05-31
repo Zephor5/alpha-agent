@@ -13,10 +13,15 @@ from alpha_agent.state.models import SessionMessage
 
 SYSTEM_REMINDER_OPEN = "<system-reminder>"
 SYSTEM_REMINDER_CLOSE = "</system-reminder>"
+COUNTERPART_PROFILE_LABEL = "Counterpart profile:"
 
 
 def wrap_system_reminder(content: str) -> str:
     return f"{SYSTEM_REMINDER_OPEN}\n{content.strip()}\n{SYSTEM_REMINDER_CLOSE}"
+
+
+def render_counterpart_profile(content: str) -> str:
+    return f"{COUNTERPART_PROFILE_LABEL} {content}"
 
 
 def estimate_chat_tokens(
@@ -66,27 +71,40 @@ class TextChatRenderer:
         messages: list[ChatMessage] = [
             {"role": "system", "content": self._system_prompt(view, budget)}
         ]
+        context_sections: list[tuple[int, str]] = []
+        self._append_section(
+            messages,
+            context_sections,
+            dropped,
+            "counterpart_profile",
+            self._counterpart_profile(view),
+            budget,
+            droppable=False,
+        )
         messages.extend(view.chat_history)
-        first_reminder_index = len(messages)
         sections = [
             ("strategy_reminders", self._strategy_reminders(view)),
-            ("counterpart_digest", self._counterpart_digest(view)),
-            ("recalled_beliefs", self._recalled_beliefs(view)),
             ("background", self._background(view)),
         ]
         for section, content in sections:
-            if not content:
-                continue
-            clipped = _clip_to_budget(content, budget.per_section_tokens.get(section))
-            if clipped is None:
-                dropped.append(section)
-                continue
-            messages.append({"role": "user", "content": wrap_system_reminder(clipped)})
+            self._append_section(
+                messages,
+                context_sections,
+                dropped,
+                section,
+                content,
+                budget,
+            )
         messages.append({"role": "user", "content": self._current_query(view)})
         used_tokens = estimate_chat_tokens(messages)
-        while used_tokens > budget.max_tokens and len(messages) - 1 > first_reminder_index:
-            removed = messages.pop(-2)
-            dropped.append(_section_name_from_message(removed))
+        while used_tokens > budget.max_tokens and context_sections:
+            index, section = context_sections.pop()
+            messages.pop(index)
+            dropped.append(section)
+            context_sections = [
+                (item_index - 1 if item_index > index else item_index, item_section)
+                for item_index, item_section in context_sections
+            ]
             used_tokens = estimate_chat_tokens(messages)
         return RenderResult(
             payload=messages,
@@ -106,22 +124,10 @@ class TextChatRenderer:
             return ""
         return "Strategy reminders:\n" + "\n".join(f"- {item}" for item in view.active_strategies)
 
-    def _counterpart_digest(self, view: CognitionView) -> str:
-        if view.counterpart_digest is None:
+    def _counterpart_profile(self, view: CognitionView) -> str:
+        if not view.counterpart_profile:
             return ""
-        return f"Counterpart digest: {view.counterpart_digest.content}"
-
-    def _recalled_beliefs(self, view: CognitionView) -> str:
-        if not view.recalled_beliefs:
-            return ""
-        prefix = ""
-        if view.counterpart is not None and view.counterpart.trust_level < 0.5:
-            prefix = "User-reported, not verified by agent: "
-        lines = [
-            f"- {prefix}{belief.content} (confidence={belief.confidence:.2f}, id={belief.id})"
-            for belief in view.recalled_beliefs
-        ]
-        return "Recalled beliefs:\n" + "\n".join(lines)
+        return render_counterpart_profile(view.counterpart_profile)
 
     def _background(self, view: CognitionView) -> str:
         return f"Context background: {view.window.background}" if view.window.background else ""
@@ -134,11 +140,35 @@ class TextChatRenderer:
                 return str(perception.raw)
         return ""
 
+    def _append_section(
+        self,
+        messages: list[ChatMessage],
+        context_sections: list[tuple[int, str]],
+        dropped: list[str],
+        section: str,
+        content: str,
+        budget: RenderBudget,
+        *,
+        droppable: bool = True,
+    ) -> None:
+        if not content:
+            return
+        clipped = _clip_to_budget(content, budget.per_section_tokens.get(section))
+        if clipped is None:
+            dropped.append(section)
+            return
+        if droppable:
+            context_sections.append((len(messages), section))
+        messages.append({"role": "user", "content": wrap_system_reminder(clipped)})
+
 
 _SYSTEM_PROMPT = (
     "Identity: Alpha Agent.\n"
     "Use the current reactive context and answer concisely. "
     "Call tools only when they are useful.\n"
+    "When counterpart profile context is present, treat it as already-visible stable "
+    "relationship context near the start of the prompt. Use memory_recall for explicit "
+    "long-term belief lookup when details are needed beyond the visible context.\n"
     "Use memory_propose only for explicit long-term user preferences, stable "
     "constraints, reusable procedures, or direct corrections to remembered cognition. "
     "Do not call memory_propose for ordinary facts, transient session context, or guesses. "
@@ -165,19 +195,6 @@ def _clip_to_budget(content: str, token_budget: int | None) -> str | None:
     if len(content) <= max_chars:
         return content
     return content[: max(0, max_chars - 3)].rstrip() + "..."
-
-
-def _section_name_from_message(message: ChatMessage) -> str:
-    content = str(message.get("content") or "")
-    if "Recalled beliefs:" in content:
-        return "recalled_beliefs"
-    if "Context background:" in content:
-        return "background"
-    if "Counterpart digest:" in content:
-        return "counterpart_digest"
-    if "Strategy reminders:" in content:
-        return "strategy_reminders"
-    return "unknown"
 
 
 def _source_tool_call(payload: Mapping[str, Any]) -> ChatCompletionToolCall:
