@@ -49,6 +49,7 @@ class CognitiveEventKind(StrEnum):
     RECEIVED_FEEDBACK = "received_feedback"
     REFLECTED = "reflected"
     REVISED = "revised"
+    MEMORY_PROPOSED = "memory_proposed"
     BELIEF_FORMED = "belief_formed"
     BELIEF_STRENGTHENED = "belief_strengthened"
     BELIEF_WEAKENED = "belief_weakened"

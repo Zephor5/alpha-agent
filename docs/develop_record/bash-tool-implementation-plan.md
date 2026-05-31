@@ -356,11 +356,12 @@ v1 不实现用户审批流，直接拒绝高风险命令。拒绝结果返回 `
 
 ## 默认注册策略
 
-`build_default_tool_registry(config)`：
+`build_tool_registry(config)`：
 
+- 始终注册 `memory_propose`。
 - `tools.bash.enabled = true` 时注册 `BashTool`。
 - `tavily.api_key` 仍独立控制 `web_search`。
-- deterministic name order 由现有 registry 保证。
+- deterministic registration order 由现有 registry 保证。
 
 测试期可以构造 `AlphaConfig(bash_tool=...)` 直接验证 registry names。
 

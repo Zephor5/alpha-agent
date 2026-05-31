@@ -74,6 +74,7 @@ class ToolExecutor:
         calls: Sequence[ToolCall],
         session_id: str = "unknown",
         output_dir: str | Path = Path(".alpha-agent/tool-results"),
+        extensions: Mapping[str, Any] | None = None,
         write_trace: ToolTraceWriter,
         check_canceled: CancelCheck,
         recover_errors: bool = False,
@@ -112,6 +113,7 @@ class ToolExecutor:
                     tool_call_id=call.id,
                     output_dir=Path(output_dir).expanduser(),
                     check_canceled=check_canceled,
+                    extensions=dict(extensions or {}),
                 )
                 result = tool.run(dict(call.arguments), context)
                 if not self._is_canceled_result(result):

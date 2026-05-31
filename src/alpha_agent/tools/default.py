@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from alpha_agent.config import AlphaConfig
 from alpha_agent.tools.bash import BashTool
+from alpha_agent.tools.memory_propose import MemoryProposeTool
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.tools.web_search import TavilyWebSearchTool
 
 
-def build_default_tool_registry(config: AlphaConfig) -> ToolRegistry:
-    """Build the default tool registry for configured runtime agents."""
+def build_tool_registry(config: AlphaConfig | None = None) -> ToolRegistry:
+    """Build the complete runtime tool registry."""
 
     registry = ToolRegistry()
+    registry.register(MemoryProposeTool())
+    if config is None:
+        return registry
     if config.bash_tool.enabled:
         registry.register(BashTool(config=config.bash_tool, secret_values=_config_secrets(config)))
     if config.tavily_api_key:

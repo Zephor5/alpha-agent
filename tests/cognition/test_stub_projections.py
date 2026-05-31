@@ -8,7 +8,7 @@ from alpha_agent.cognition.projections.context_window import ContextWindowProjec
 from alpha_agent.cognition.projections.procedure import ProcedureProjection
 from alpha_agent.cognition.projections.subject import SubjectProjection
 from alpha_agent.llm.base import ChatMessage, LLMResponse
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 
 
 def test_default_projections_return_expected_shapes() -> None:
@@ -18,7 +18,7 @@ def test_default_projections_return_expected_shapes() -> None:
         event_log=log,
         projections=registry,
         llm=_StaticProvider(),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
     )
     thread_id = ThreadId.from_session("s1")
     for message in ["one", "two", "three"]:

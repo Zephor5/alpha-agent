@@ -24,13 +24,13 @@ from alpha_agent.llm.base import (
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import Tool, ToolExecutionContext, ToolResult
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 
 
 def test_reactive_tick_tool_call_path_emits_acted_and_feedback(tmp_path) -> None:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
-    registry = ToolRegistry()
+    registry = build_tool_registry()
     registry.register(_EchoTool())
     agent = AlphaAgent(store=store, llm_provider=_ToolCallingProvider(), tool_registry=registry)
 
@@ -79,7 +79,7 @@ def test_reactive_tick_tool_call_path_emits_acted_and_feedback(tmp_path) -> None
 
 def test_default_effector_executes_tool_and_final_llm_round() -> None:
     log = InMemoryEventLog()
-    registry = ToolRegistry()
+    registry = build_tool_registry()
     registry.register(_EchoTool())
     provider = _ToolCallingProvider()
     thread_id = ThreadId.from_session("s1")

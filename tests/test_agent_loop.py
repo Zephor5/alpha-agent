@@ -21,7 +21,7 @@ from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.runtime.context_handover import DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import Tool, ToolExecutionContext, ToolResult
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 
 
 def _store(tmp_path) -> StateStore:
@@ -108,7 +108,7 @@ def test_agent_two_turn_prompt_is_append_only_without_fixed_tail(tmp_path) -> No
 
 def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> None:
     store = _store(tmp_path)
-    registry = ToolRegistry()
+    registry = build_tool_registry()
     registry.register(_EchoTool())
     provider = _ToolCallingProvider()
     agent = AlphaAgent(store=store, llm_provider=provider, tool_registry=registry)
@@ -139,7 +139,7 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
 
 def test_agent_sends_only_structured_tool_output_to_llm_context(tmp_path) -> None:
     store = _store(tmp_path)
-    registry = ToolRegistry()
+    registry = build_tool_registry()
     registry.register(_StructuredTool())
     provider = _StructuredToolCallingProvider()
     agent = AlphaAgent(store=store, llm_provider=provider, tool_registry=registry)
@@ -271,7 +271,7 @@ def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path)
         store=store,
         llm_provider=provider,
         llm_context_config=_compression_context(),
-        max_context_tokens=100,
+        max_context_tokens=150,
     )
 
     result = agent.respond("pending user must stay out of compression", session_id="s1")
@@ -316,7 +316,7 @@ def test_failed_pre_user_compression_does_not_persist_pending_user(tmp_path) -> 
         store=store,
         llm_provider=provider,
         llm_context_config=_compression_context(),
-        max_context_tokens=100,
+        max_context_tokens=150,
     )
 
     with pytest.raises(RuntimeError, match="provider failed"):
@@ -336,7 +336,7 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
-    registry = ToolRegistry()
+    registry = build_tool_registry()
     registry.register(_EchoTool())
     provider = _ToolLoopCompressionProvider()
     agent = AlphaAgent(
@@ -344,7 +344,7 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
         llm_provider=provider,
         tool_registry=registry,
         llm_context_config=_compression_context(),
-        max_context_tokens=100,
+        max_context_tokens=150,
     )
 
     result = agent.respond("use tool", session_id="s1")

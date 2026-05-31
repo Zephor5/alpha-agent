@@ -19,7 +19,7 @@ from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.projections.subject import SubjectProjection
 from alpha_agent.cognition.stages.interpret import Interpreter
 from alpha_agent.llm.base import ChatMessage, LLMResponse
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 from tests.cognition.test_belief_projection_apply import belief
 
 
@@ -37,7 +37,7 @@ def test_controller_recalls_after_context_window_supplies_counterpart() -> None:
         event_log=log,
         projections=registry,
         llm=_StaticProvider(),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
         interpreter=interpreter,
     )
     counterpart = counterpart_ref(CounterpartId("counterpart:user-a"))

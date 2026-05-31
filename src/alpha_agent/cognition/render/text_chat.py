@@ -138,7 +138,11 @@ class TextChatRenderer:
 _SYSTEM_PROMPT = (
     "Identity: Alpha Agent.\n"
     "Use the current reactive context and answer concisely. "
-    "Call tools only when they are useful."
+    "Call tools only when they are useful.\n"
+    "Use memory_propose only for explicit long-term user preferences, stable "
+    "constraints, reusable procedures, or direct corrections to remembered cognition. "
+    "Do not call memory_propose for ordinary facts, transient session context, or guesses. "
+    "Corrections are proposals only; do not claim memory was changed unless asked."
 )
 
 

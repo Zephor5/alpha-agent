@@ -10,7 +10,7 @@ from alpha_agent.cognition.models import (
     ThreadId,
 )
 from alpha_agent.llm.base import ChatMessage, LLMResponse
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 
 
 def test_reactive_tick_emits_nine_events_with_causal_chain() -> None:
@@ -19,7 +19,7 @@ def test_reactive_tick_emits_nine_events_with_causal_chain() -> None:
         event_log=log,
         projections=default_projection_registry(log),
         llm=_StaticProvider("hello back"),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
     )
 
     result = controller.reactive_tick(

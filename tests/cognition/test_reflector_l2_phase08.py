@@ -58,7 +58,7 @@ from alpha_agent.cognition.stages.interpret import Interpreter
 from alpha_agent.cognition.stages.types import AttentionFocus, Feedback
 from alpha_agent.llm.base import ChatMessage, LLMResponse
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 from tests.cognition.helpers import clock_factory, id_factory
 
 
@@ -468,7 +468,7 @@ def test_controller_skips_procedure_match_for_trigger_strategy(tmp_path: Path) -
         event_log=log,
         projections=projections,
         llm=_StaticProvider(),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
         emitter=emitter,
     ).reactive_tick(
         stimulus=Stimulus(
@@ -593,7 +593,7 @@ def _controller(log, projections):
         event_log=log,
         projections=projections,
         llm=_StaticProvider(),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
     )
 
 

@@ -15,7 +15,7 @@ from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.llm.base import ChatMessage, LLMResponse
 from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID, CounterpartRouter
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 
 
 def test_counterpart_router_maps_local_and_first_channel_user_to_default() -> None:
@@ -117,7 +117,7 @@ def test_counterpart_router_first_observed_no_duplicate_and_perception_source() 
         event_log=log,
         projections=default_projection_registry(log),
         llm=_StaticProvider(),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
         emitter=emitter,
     )
     controller.reactive_tick(

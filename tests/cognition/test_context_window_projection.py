@@ -37,7 +37,7 @@ from alpha_agent.cognition.stages.perceive import Perceiver
 from alpha_agent.cognition.stages.types import Outcome
 from alpha_agent.llm.base import ChatMessage, LLMResponse
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 
 
 def test_context_window_foreground_roll_keeps_last_k_perceptions(tmp_path) -> None:
@@ -186,10 +186,10 @@ def test_real_reactive_tick_populates_recalled_and_recent_judgments(tmp_path) ->
         event_log=log,
         projections=registry,
         llm=_StaticProvider(),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
         effector=Effector(
             llm_provider=_StaticProvider(),
-            tool_registry=ToolRegistry(),
+            tool_registry=build_tool_registry(),
             completion_runner=capture_window,
         ),
     )

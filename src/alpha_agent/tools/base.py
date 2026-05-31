@@ -38,6 +38,7 @@ class ToolExecutionContext:
     tool_call_id: str | None
     output_dir: Path
     check_canceled: Callable[[str], None]
+    extensions: Mapping[str, Any] = field(default_factory=dict)
 
 
 def tool_output_kind(output: JSONValue) -> str:

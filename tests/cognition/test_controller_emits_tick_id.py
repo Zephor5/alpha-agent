@@ -4,7 +4,7 @@ from alpha_agent.cognition.controller import CognitiveController, default_projec
 from alpha_agent.cognition.event_log.memory import InMemoryEventLog
 from alpha_agent.cognition.models import Instant, Stimulus, StimulusKind, ThreadId
 from alpha_agent.llm.base import ChatMessage, LLMResponse
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 
 
 def test_controller_emits_same_tick_id_on_all_reactive_events() -> None:
@@ -14,7 +14,7 @@ def test_controller_emits_same_tick_id_on_all_reactive_events() -> None:
         event_log=log,
         projections=default_projection_registry(log),
         llm=_StaticProvider(),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
     )
 
     result = controller.reactive_tick(

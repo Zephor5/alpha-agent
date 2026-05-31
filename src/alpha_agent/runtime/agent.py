@@ -33,6 +33,7 @@ from alpha_agent.cognition.models import (
     StimulusKind,
 )
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
+from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.render import (
     RenderResult,
@@ -62,6 +63,8 @@ from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, To
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import ToolCall, tool_output_kind
+from alpha_agent.tools.default import build_tool_registry
+from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_CONTEXT_KEY
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
@@ -159,6 +162,7 @@ class AgentLoopResult:
     provider_tool_trace_ids: list[str]
     llm_call_ids: list[str]
     llm_trace_ids: list[str]
+    tool_cognitive_event_ids: list[str]
 
 
 class LLMCompletionService:
@@ -238,7 +242,7 @@ class AlphaAgent:
         self.max_context_tokens = max_context_tokens or _default_max_context_tokens(
             getattr(llm_provider, "name", None)
         )
-        self.tool_registry = tool_registry or ToolRegistry()
+        self.tool_registry = tool_registry or build_tool_registry()
         self.tool_executor = ToolExecutor(self.tool_registry)
         self.max_tool_iterations = max(0, max_tool_iterations)
         self.max_llm_rounds = (
@@ -463,6 +467,18 @@ class AlphaAgent:
         debug["renderer"] = "text_chat"
         debug["render_used_tokens"] = rendered.used_tokens
         debug["render_dropped_sections"] = list(rendered.dropped_sections)
+        reactive_metadata = _mapping(view.metadata.get("_reactive_completion_context"))
+        memory_propose_context = {
+            "tick_id": str(reactive_metadata.get("tick_id") or ""),
+            "session_id": session_id,
+            "user_message_id": str(debug.get("user_message_id") or ""),
+            "decision_event_id": str(reactive_metadata.get("decision_event_id") or ""),
+            "emitter": self.emitter,
+            "apply_cognitive_event": self._apply_tool_cognitive_event,
+            "subject": view.subject,
+            "situation": view.window.situation_at,
+            "counterpart": view.window.counterpart,
+        }
         loop_result = self._run_agent_loop(
             session_id=session_id,
             messages=messages,
@@ -471,6 +487,7 @@ class AlphaAgent:
             model_tools=model_tools,
             model_tool_choice=model_tool_choice,
             initial_prompt_token_estimate=prompt_token_estimate,
+            memory_propose_context=memory_propose_context,
             debug=debug,
         )
         llm_response = loop_result.response
@@ -496,6 +513,7 @@ class AlphaAgent:
                 "provider_tool_trace_ids": list(loop_result.provider_tool_trace_ids),
                 "llm_call_ids": list(loop_result.llm_call_ids),
                 "llm_trace_ids": list(loop_result.llm_trace_ids),
+                "tool_cognitive_event_ids": list(loop_result.tool_cognitive_event_ids),
                 "final_finish_reason": llm_response.finish_reason,
             },
         )
@@ -554,7 +572,7 @@ class AlphaAgent:
                 llm_provider=self.llm_provider,
                 llm_messages=compression_messages,
                 tools=model_tools,
-                tool_choice=model_tool_choice,
+                tool_choice="none" if model_tools else None,
             )
             debug["pre_user_compressed_message_id"] = result.message.id
             debug["pre_user_compression_point_ordinal"] = result.compression_point_ordinal
@@ -614,7 +632,7 @@ class AlphaAgent:
                 llm_provider=self.llm_provider,
                 llm_messages=llm_messages,
                 tools=model_tools,
-                tool_choice=model_tool_choice,
+                tool_choice="none" if model_tools else None,
             )
             debug["tool_loop_compressed_message_id"] = result.message.id
             debug["tool_loop_compression_point_ordinal"] = result.compression_point_ordinal
@@ -734,6 +752,7 @@ class AlphaAgent:
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         initial_prompt_token_estimate: int,
+        memory_propose_context: Mapping[str, Any] | None,
         debug: dict[str, Any],
     ) -> AgentLoopResult:
         llm_messages = list(messages)
@@ -742,6 +761,7 @@ class AlphaAgent:
         provider_tool_trace_ids: list[str] = []
         llm_call_ids: list[str] = []
         llm_trace_ids: list[str] = []
+        tool_cognitive_event_ids: list[str] = []
         tool_results_seen: list[Any] = []
         llm_round_count = llm_retry_count = tool_iteration_count = 0
         tool_call_count = provider_tool_call_count = 0
@@ -801,6 +821,7 @@ class AlphaAgent:
                     provider_tool_trace_ids=provider_tool_trace_ids,
                     llm_call_ids=llm_call_ids,
                     llm_trace_ids=llm_trace_ids,
+                    tool_cognitive_event_ids=tool_cognitive_event_ids,
                 )
             if finalizing_reason is not None:
                 self._emit_tool_loop_event(
@@ -834,10 +855,28 @@ class AlphaAgent:
             provider_results = self._execute_tool_calls(
                 session_id=session_id,
                 calls=provider_tool_calls,
+                memory_propose_context={
+                    **dict(memory_propose_context or {}),
+                    "llm_call_id": completion.llm_call_id,
+                    "llm_trace_ids": [
+                        item
+                        for item in [
+                            completion.started_trace_id,
+                            completion.completed_trace_id,
+                        ]
+                        if item
+                    ],
+                },
                 recover_errors=True,
             )
             provider_tool_trace_ids.extend(item.trace.id for item in provider_results)
             tool_results_seen.extend(item.result for item in provider_results)
+            for item in provider_results:
+                tool_cognitive_event_ids.extend(
+                    _string_list(item.result.metadata.get("cognitive_event_ids"))
+                )
+            if tool_cognitive_event_ids:
+                debug["tool_cognitive_event_ids"] = list(tool_cognitive_event_ids)
             provider_result_messages = self._write_tool_result_messages(
                 session_id=session_id,
                 results=provider_results,
@@ -1009,7 +1048,9 @@ class AlphaAgent:
                 "finish_reason": llm_response.finish_reason,
                 "metadata": _llm_metadata_summary(llm_response.metadata),
             },
-            metadata={"tool_call_ids": [self._required_tool_call_id(call) for call in calls]},
+            metadata={
+                "tool_call_ids": [self._required_tool_call_id(call) for call in calls],
+            },
         )
 
     def _write_tool_result_messages(
@@ -1050,6 +1091,7 @@ class AlphaAgent:
         llm_call_ids = _string_list(debug.get("llm_call_ids"))
         llm_trace_ids = _string_list(debug.get("llm_trace_ids"))
         reactive_event_ids = _string_list(debug.get("event_ids"))
+        tool_cognitive_event_ids = _string_list(debug.get("tool_cognitive_event_ids"))
         tick_id = str(debug.get("tick_id") or "")
         source_refs = [
             Reference("session_message", user_record.id),
@@ -1075,6 +1117,7 @@ class AlphaAgent:
                 "llm_call_ids": llm_call_ids,
                 "llm_trace_ids": llm_trace_ids,
                 "reactive_event_ids": reactive_event_ids,
+                "tool_cognitive_event_ids": tool_cognitive_event_ids,
             },
         )
 
@@ -1165,12 +1208,16 @@ class AlphaAgent:
         *,
         session_id: str,
         calls: list[ToolCall],
+        memory_propose_context: Mapping[str, Any] | None = None,
         recover_errors: bool = False,
     ) -> list[ExecutedToolResult]:
         return self.tool_executor.execute(
             calls=calls,
             session_id=session_id,
             output_dir=self.tool_output_dir,
+            extensions={
+                MEMORY_PROPOSE_CONTEXT_KEY: dict(memory_propose_context or {}),
+            },
             write_trace=lambda event_type, content, metadata: self.store.append_runtime_trace(
                 session_id=session_id,
                 event_type=event_type,
@@ -1180,6 +1227,11 @@ class AlphaAgent:
             check_canceled=lambda stage: self._check_canceled(session_id, stage),
             recover_errors=recover_errors,
         )
+
+    def _apply_tool_cognitive_event(self, event: Any) -> None:
+        projection = BeliefProjection(self.store)
+        if event.kind in projection.handles:
+            projection.apply(event)
 
     def _check_canceled(self, session_id: str, stage: str) -> None:
         if self.is_canceled(session_id):
@@ -1282,6 +1334,12 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         return []
     return [str(item) for item in value if item is not None]
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
 
 
 def _json_safe(value: Any) -> Any:

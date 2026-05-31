@@ -34,20 +34,20 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def list(self) -> builtins.list[Tool]:
-        """Return registered tools in deterministic name order."""
+        """Return registered tools in registration order."""
 
-        return [self._tools[name] for name in sorted(self._tools)]
+        return [self._tools[name] for name in self.names()]
 
     def names(self) -> builtins.list[str]:
-        """Return registered tool names in deterministic order."""
+        """Return registered tool names in registration order."""
 
-        return sorted(self._tools)
+        return list(self._tools)
 
     def to_llm_tool_definitions(self) -> builtins.list[LLMToolDefinition]:
-        """Return provider-neutral LLM tool definitions in deterministic order."""
+        """Return provider-neutral LLM tool definitions in registration order."""
 
         definitions: list[LLMToolDefinition] = []
-        for tool in self.list():
+        for tool in self._tools.values():
             parameters = self._parameters_for(tool)
             strict = getattr(tool, "strict", None)
             definitions.append(

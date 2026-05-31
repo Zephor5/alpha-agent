@@ -72,6 +72,16 @@ def _validate_pending_confirmation(kind: CognitiveEventKind, payload: dict[str, 
     _require_list(kind, payload, "contradict_ids")
 
 
+def _validate_memory_proposed(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
+    _require_present(kind, payload, "tick_id")
+    _require_non_empty_str(kind, payload, "session_id")
+    _require_non_empty_str(kind, payload, "proposal_id")
+    _require_dict(kind, payload, "proposal")
+    _require_list(kind, payload, "source_refs")
+    _require_list(kind, payload, "audit_refs")
+    _require_dict(kind, payload, "gate")
+
+
 def _validate_context_compressed(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
     _require_dict(kind, payload, "thread_id")
     _require_list(kind, payload, "absorbed_perception_ids")
@@ -146,6 +156,7 @@ _VALIDATORS: dict[CognitiveEventKind, Callable[[CognitiveEventKind, dict[str, An
     CognitiveEventKind.ACTED: _validate_acted,
     CognitiveEventKind.RECEIVED_FEEDBACK: _validate_feedback,
     CognitiveEventKind.REVISED: _validate_revised,
+    CognitiveEventKind.MEMORY_PROPOSED: _validate_memory_proposed,
     CognitiveEventKind.BELIEF_FORM_PENDING_CONFIRMATION: _validate_pending_confirmation,
     CognitiveEventKind.CONTEXT_COMPRESSED: _validate_context_compressed,
     CognitiveEventKind.PROCEDURE_LEARNED: _validate_procedure_learned,

@@ -15,7 +15,7 @@ from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.default import build_tool_registry
 from tests.cognition.helpers import clock_factory, id_factory
 
 
@@ -141,7 +141,7 @@ def _drive_runtime(
         log,
         projections,
         llm=MockLLMProvider(),
-        tools=ToolRegistry(),
+        tools=build_tool_registry(),
         emitter=emitter,
     )
     clock = _sequence_clock(now_values or ["2026-01-01T00:00:10+00:00"])

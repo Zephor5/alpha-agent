@@ -60,6 +60,12 @@ daemon-owned turns, provider-returned tool calls are persisted as assistant
 when a limit is reached. The old `runtime/prompt_builder.py` path has been
 removed.
 
+The `memory_propose` tool is always present in runtime tool definitions. It can
+propose explicit long-term preferences, constraints, procedures, and corrections
+during a Reactive turn. Accepted low-risk proposals emit `memory_proposed`, then
+`belief_formed`, and apply immediately to `belief_view`; pending or rejected
+proposals remain audit-only.
+
 Beliefs are materialized in SQLite and recallable across sessions through a
 deterministic projection over cognition events. Foreground context is stored in
 `context_window_view` as thread-local perception IDs, anchors, and rebuildable
@@ -481,9 +487,10 @@ are now in place. Subject ValueLens persistence, deterministic conflict
 resolution, queued conflict consumption, and temporary strategy overrides are
 also in place. GoalProjection and manual DriveLoop self-signals are in place.
 SubjectProjection now persists the L3 SelfModel from `self_model_updated`.
-The explicit tool execution subsystem is also in place, with `web_search`
-registered when Tavily credentials are configured and `bash` registered only
-when `tools.bash.enabled=true`. Semantic strategy/lens diff remains pending.
+The explicit tool execution subsystem is also in place, with `memory_propose`
+always registered, `web_search` registered when Tavily credentials are
+configured, and `bash` registered only when `tools.bash.enabled=true`.
+Semantic strategy/lens diff remains pending.
 
 ## Current Limitations
 

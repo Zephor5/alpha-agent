@@ -67,6 +67,10 @@ class Effector:
         causal_parent: EventId,
     ) -> Emitted[Outcome]:
         rendered = self.renderer.render(view, self.render_budget)
+        view.metadata["_reactive_completion_context"] = {
+            "tick_id": tick_id,
+            "decision_event_id": str(causal_parent),
+        }
         outcome = self.completion_runner(decision, view, rendered)
         event = emitter.emit(
             CognitiveEventKind.ACTED,
@@ -92,6 +96,9 @@ class Effector:
                 ),
                 "llm_call_ids": _string_list(outcome.debug.get("llm_call_ids")),
                 "llm_trace_ids": _string_list(outcome.debug.get("llm_trace_ids")),
+                "tool_cognitive_event_ids": _string_list(
+                    outcome.debug.get("tool_cognitive_event_ids")
+                ),
             },
         )
         return Emitted(outcome, event)
