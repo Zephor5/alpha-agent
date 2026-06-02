@@ -192,6 +192,23 @@ CREATE TABLE IF NOT EXISTS belief_about_index (
 CREATE INDEX IF NOT EXISTS idx_belief_about_lookup
     ON belief_about_index(about_kind, about_id, belief_id);
 
+CREATE VIRTUAL TABLE IF NOT EXISTS belief_search_terms_fts
+USING fts5(
+    belief_id UNINDEXED,
+    search_terms,
+    object,
+    tokenize = "unicode61 remove_diacritics 1 tokenchars '_-#./:+'"
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS belief_search_trigram_fts
+USING fts5(
+    belief_id UNINDEXED,
+    content,
+    object,
+    normalized_content,
+    tokenize = "trigram"
+);
+
 CREATE TABLE IF NOT EXISTS context_window_view (
     thread_id TEXT PRIMARY KEY,
     thread_kind TEXT NOT NULL,

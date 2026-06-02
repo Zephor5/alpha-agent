@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Any, Literal, cast
 
 from alpha_agent.cognition.counterpart_profile import COUNTERPART_DIGEST_OBJECT_PREFIX
-from alpha_agent.cognition.models import CognitiveType, NLStatement, Reference, entity_ref
-from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefRecallParams
-from alpha_agent.cognition.stages.types import AttentionFocus
+from alpha_agent.cognition.models import Belief, CognitiveType, Reference
+from alpha_agent.cognition.projections.belief import (
+    BeliefProjection,
+    BeliefSearchCandidate,
+    BeliefSearchParams,
+)
 from alpha_agent.tools.base import JSONValue, ToolExecutionContext, ToolResult
 
 MEMORY_RECALL_TOOL_NAME = "memory_recall"
@@ -18,12 +23,37 @@ MEMORY_RECALL_CONTEXT_KEY = "memory_recall"
 _DEFAULT_SCOPE = "both"
 _DEFAULT_MAX_RESULTS = 4
 _MAX_QUERY_LENGTH = 300
+_MAX_KEYWORDS = 12
+_MAX_KEYWORD_LENGTH = 80
+_MAX_ENTITIES = 8
+_MAX_ENTITY_LENGTH = 120
+_MAX_INTENT_LENGTH = 120
 _MAX_TYPES = 8
 _MAX_RESULTS = 8
 _RECALL_SCAN_LIMIT = 32
-_ALLOWED_ARGUMENTS = frozenset({"query", "scope", "types", "max_results"})
+_ALLOWED_ARGUMENTS = frozenset(
+    {"query", "keywords", "entities", "intent", "scope", "types", "max_results"}
+)
+_EXCLUDED_MEMORY_OBJECT_PREFIXES = (
+    COUNTERPART_DIGEST_OBJECT_PREFIX,
+    "counterpart_profile:",
+)
+_SCOPE_SCORE_COUNTERPART = 4.0
+_SCOPE_SCORE_GLOBAL_IN_BOTH = 1.0
+_SCOPE_SCORE_GLOBAL_ONLY = 3.0
+_TYPE_SCORE = 2.0
+_ENTITY_EXACT_SCORE = 4.0
+_OBJECT_EXACT_SCORE = 3.0
+_OBJECT_PARTIAL_SCORE = 1.0
+_TERM_FTS_MAX_SCORE = 4.0
+_TRIGRAM_FTS_MAX_SCORE = 2.0
+_SUBSTRING_SCORE = 1.0
+_RECENCY_TIEBREAK_MAX = 0.25
+_EXACT_PRIORITY_EXACT = 0
+_EXACT_PRIORITY_NONE = 1
 
 type MemoryRecallScope = Literal["counterpart", "global", "both"]
+type MemoryRecallResultScope = Literal["counterpart", "global"]
 
 
 @dataclass(frozen=True)
@@ -38,9 +68,23 @@ class MemoryRecallContext:
 @dataclass(frozen=True)
 class _RecallArguments:
     query: str
+    keywords: tuple[str, ...]
+    entities: tuple[str, ...]
+    intent: str | None
     scope: MemoryRecallScope
     types: frozenset[CognitiveType] | None
     max_results: int
+
+
+@dataclass(frozen=True)
+class ScoredBeliefCandidate:
+    """Internal scored recall candidate, exposed for deterministic tests/debugging."""
+
+    belief: Belief
+    scope: MemoryRecallResultScope
+    exact_priority: int
+    score: float
+    reasons: tuple[str, ...]
 
 
 class MemoryRecallTool:
@@ -60,6 +104,26 @@ class MemoryRecallTool:
             "query": {
                 "type": "string",
                 "maxLength": 300,
+            },
+            "keywords": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                    "type": "string",
+                    "maxLength": 80,
+                },
+            },
+            "entities": {
+                "type": "array",
+                "maxItems": 8,
+                "items": {
+                    "type": "string",
+                    "maxLength": 120,
+                },
+            },
+            "intent": {
+                "type": "string",
+                "maxLength": 120,
             },
             "scope": {
                 "type": "string",
@@ -103,32 +167,102 @@ class MemoryRecallTool:
             recall_context.counterpart if parsed.scope in {"counterpart", "both"} else None
         )
         include_global = parsed.scope in {"global", "both"}
-        beliefs = recall_context.belief_projection.recall(
-            BeliefRecallParams(
-                focus=AttentionFocus(
-                    entities=[entity_ref(parsed.query)],
-                    salient_claims=[NLStatement(parsed.query)],
-                    value_signals={},
-                ),
+        candidates = recall_context.belief_projection.recall_candidates(
+            BeliefSearchParams(
+                query=parsed.query,
+                keywords=parsed.keywords,
+                entities=parsed.entities,
                 counterpart=counterpart,
                 include_global=include_global,
                 types=parsed.types,
                 limit=max(_RECALL_SCAN_LIMIT, parsed.max_results),
             )
         )
+        candidates = [
+            candidate
+            for candidate in candidates
+            if not _is_excluded_memory_belief(candidate.belief)
+        ]
+        scored = score_belief_candidates(
+            candidates,
+            counterpart=recall_context.counterpart,
+            requested_types=parsed.types,
+            query_scope=parsed.scope,
+        )
         results: list[JSONValue] = []
-        for item in beliefs:
-            if str(item.object).startswith(COUNTERPART_DIGEST_OBJECT_PREFIX):
-                continue
+        for item in scored:
+            belief = item.belief
             result: dict[str, JSONValue] = {
-                "content": str(item.content),
-                "type": item.cognitive_type.value,
-                "scope": _belief_scope(item.about, recall_context.counterpart),
+                "content": str(belief.content),
+                "type": belief.cognitive_type.value,
+                "scope": item.scope,
             }
             results.append(result)
             if len(results) >= parsed.max_results:
                 break
         return ToolResult(name=self.name, output={"results": results})
+
+
+def score_belief_candidates(
+    candidates: Sequence[BeliefSearchCandidate],
+    *,
+    counterpart: Reference | None,
+    requested_types: frozenset[CognitiveType] | None,
+    query_scope: MemoryRecallScope,
+) -> list[ScoredBeliefCandidate]:
+    """Score and sort merged projection candidates deterministically."""
+
+    term_scores = _rank_score_by_belief_id(
+        candidates,
+        rank_kind="term",
+        max_score=_TERM_FTS_MAX_SCORE,
+    )
+    trigram_scores = _rank_score_by_belief_id(
+        candidates,
+        rank_kind="trigram",
+        max_score=_TRIGRAM_FTS_MAX_SCORE,
+    )
+    recency_scores = _recency_score_by_belief_id(candidates)
+
+    scored: list[ScoredBeliefCandidate] = []
+    for candidate in candidates:
+        belief = candidate.belief
+        belief_id = str(belief.id)
+        projection_reasons = tuple(candidate.reasons)
+        reason_set = set(projection_reasons)
+        scope = _belief_scope(belief.about, counterpart)
+        scorer_reasons = [f"scope:{scope}"]
+        score = _scope_score(scope, query_scope)
+
+        if requested_types and belief.cognitive_type in requested_types:
+            score += _TYPE_SCORE
+            scorer_reasons.append(f"type:{belief.cognitive_type.value}")
+        if "entity_exact" in reason_set:
+            score += _ENTITY_EXACT_SCORE
+        if "object_exact" in reason_set:
+            score += _OBJECT_EXACT_SCORE
+        if "object_partial" in reason_set:
+            score += _OBJECT_PARTIAL_SCORE
+        if "substring" in reason_set:
+            score += _SUBSTRING_SCORE
+
+        score += term_scores.get(belief_id, 0.0)
+        score += trigram_scores.get(belief_id, 0.0)
+        score += _confidence_score(belief)
+        score += recency_scores.get(belief_id, 0.0)
+
+        scored.append(
+            ScoredBeliefCandidate(
+                belief=belief,
+                scope=scope,
+                exact_priority=_exact_priority(reason_set),
+                score=score,
+                reasons=_merge_reasons(projection_reasons, scorer_reasons),
+            )
+        )
+
+    scored.sort(key=_scored_candidate_sort_key)
+    return scored
 
 
 def _parse_arguments(arguments: Mapping[str, Any]) -> _RecallArguments:
@@ -142,10 +276,28 @@ def _parse_arguments(arguments: Mapping[str, Any]) -> _RecallArguments:
     if len(query) > _MAX_QUERY_LENGTH:
         raise ValueError("memory_recall query exceeds 300 characters")
 
+    keywords = _parse_string_array(
+        arguments,
+        name="keywords",
+        max_items=_MAX_KEYWORDS,
+        max_item_length=_MAX_KEYWORD_LENGTH,
+    )
+    entities = _parse_string_array(
+        arguments,
+        name="entities",
+        max_items=_MAX_ENTITIES,
+        max_item_length=_MAX_ENTITY_LENGTH,
+    )
+    intent = _parse_optional_string(
+        arguments,
+        name="intent",
+        max_length=_MAX_INTENT_LENGTH,
+    )
+
     raw_scope = arguments.get("scope", _DEFAULT_SCOPE)
-    if raw_scope not in {"counterpart", "global", "both"}:
+    if not isinstance(raw_scope, str) or raw_scope not in {"counterpart", "global", "both"}:
         raise ValueError("memory_recall scope must be one of counterpart, global, both")
-    scope = raw_scope
+    scope = cast(MemoryRecallScope, raw_scope)
 
     raw_types = arguments.get("types")
     types: frozenset[CognitiveType] | None = None
@@ -174,10 +326,60 @@ def _parse_arguments(arguments: Mapping[str, Any]) -> _RecallArguments:
 
     return _RecallArguments(
         query=query.strip(),
+        keywords=keywords,
+        entities=entities,
+        intent=intent,
         scope=scope,
         types=types,
         max_results=raw_max_results,
     )
+
+
+def _parse_string_array(
+    arguments: Mapping[str, Any],
+    *,
+    name: str,
+    max_items: int,
+    max_item_length: int,
+) -> tuple[str, ...]:
+    raw_values = arguments.get(name)
+    if raw_values is None:
+        return ()
+    if not isinstance(raw_values, list):
+        raise ValueError(f"memory_recall {name} must be an array")
+    if len(raw_values) > max_items:
+        raise ValueError(f"memory_recall {name} must contain at most {max_items} items")
+
+    values: list[str] = []
+    for raw_value in raw_values:
+        if not isinstance(raw_value, str):
+            raise ValueError(f"memory_recall {name} must contain string values")
+        if len(raw_value) > max_item_length:
+            raise ValueError(
+                f"memory_recall {name} items must be at most {max_item_length} characters"
+            )
+        value = raw_value.strip()
+        if not value:
+            raise ValueError(f"memory_recall {name} must contain non-empty string values")
+        values.append(value)
+    return tuple(values)
+
+
+def _parse_optional_string(
+    arguments: Mapping[str, Any],
+    *,
+    name: str,
+    max_length: int,
+) -> str | None:
+    raw_value = arguments.get(name)
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        raise ValueError(f"memory_recall {name} must be a string")
+    if len(raw_value) > max_length:
+        raise ValueError(f"memory_recall {name} must be at most {max_length} characters")
+    value = raw_value.strip()
+    return value or None
 
 
 def _memory_recall_context(
@@ -199,12 +401,131 @@ def _memory_recall_context(
     )
 
 
-def _belief_scope(belief_about: list[Reference], counterpart: Reference | None) -> str:
+def _belief_scope(
+    belief_about: list[Reference],
+    counterpart: Reference | None,
+) -> MemoryRecallResultScope:
     if counterpart is None:
         return "global"
     if any(ref.kind == counterpart.kind and ref.id == counterpart.id for ref in belief_about):
         return "counterpart"
     return "global"
+
+
+def _scope_score(scope: MemoryRecallResultScope, query_scope: MemoryRecallScope) -> float:
+    if scope == "counterpart":
+        return _SCOPE_SCORE_COUNTERPART
+    if query_scope == "global":
+        return _SCOPE_SCORE_GLOBAL_ONLY
+    return _SCOPE_SCORE_GLOBAL_IN_BOTH
+
+
+def _rank_score_by_belief_id(
+    candidates: Sequence[BeliefSearchCandidate],
+    *,
+    rank_kind: Literal["term", "trigram"],
+    max_score: float,
+) -> dict[str, float]:
+    ranks: list[tuple[str, float]] = []
+    for candidate in candidates:
+        rank = candidate.term_rank if rank_kind == "term" else candidate.trigram_rank
+        if rank is None or not math.isfinite(rank):
+            continue
+        ranks.append((str(candidate.belief.id), rank))
+    if not ranks:
+        return {}
+
+    min_rank = min(rank for _, rank in ranks)
+    return {
+        belief_id: max_score / (1.0 + max(0.0, rank - min_rank))
+        for belief_id, rank in ranks
+    }
+
+
+def _recency_score_by_belief_id(
+    candidates: Sequence[BeliefSearchCandidate],
+) -> dict[str, float]:
+    timestamps = [
+        (str(candidate.belief.id), _held_since_timestamp(candidate.belief))
+        for candidate in candidates
+    ]
+    finite_timestamps = [
+        (belief_id, timestamp)
+        for belief_id, timestamp in timestamps
+        if math.isfinite(timestamp)
+    ]
+    if not finite_timestamps:
+        return {}
+
+    min_timestamp = min(timestamp for _, timestamp in finite_timestamps)
+    max_timestamp = max(timestamp for _, timestamp in finite_timestamps)
+    if math.isclose(min_timestamp, max_timestamp):
+        return {belief_id: 0.0 for belief_id, _ in finite_timestamps}
+
+    spread = max_timestamp - min_timestamp
+    return {
+        belief_id: _RECENCY_TIEBREAK_MAX * (timestamp - min_timestamp) / spread
+        for belief_id, timestamp in finite_timestamps
+    }
+
+
+def _scored_candidate_sort_key(candidate: ScoredBeliefCandidate) -> tuple[Any, ...]:
+    return (
+        candidate.exact_priority,
+        -candidate.score,
+        0 if candidate.scope == "counterpart" else 1,
+        -_confidence_score(candidate.belief),
+        -_held_since_timestamp(candidate.belief),
+        str(candidate.belief.id),
+    )
+
+
+def _exact_priority(reasons: set[str]) -> int:
+    if "entity_exact" in reasons or "object_exact" in reasons:
+        return _EXACT_PRIORITY_EXACT
+    return _EXACT_PRIORITY_NONE
+
+
+def _confidence_score(belief: Belief) -> float:
+    try:
+        confidence = float(belief.confidence)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(confidence):
+        return 0.0
+    return max(0.0, min(1.0, confidence))
+
+
+def _held_since_timestamp(belief: Belief) -> float:
+    value = str(belief.held_since).strip()
+    if not value:
+        return float("-inf")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return float("-inf")
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _merge_reasons(
+    projection_reasons: Sequence[str],
+    scorer_reasons: Sequence[str],
+) -> tuple[str, ...]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for reason in (*projection_reasons, *scorer_reasons):
+        if reason in seen:
+            continue
+        seen.add(reason)
+        merged.append(reason)
+    return tuple(merged)
+
+
+def _is_excluded_memory_belief(belief: Belief) -> bool:
+    belief_object = str(belief.object)
+    return belief_object.startswith(_EXCLUDED_MEMORY_OBJECT_PREFIXES)
 
 
 def _non_empty_str(value: object) -> str:

@@ -62,17 +62,21 @@ removed.
 
 Stable counterpart profile context is selected from counterpart digest beliefs
 once per ordinary session and rendered near the start of the prompt when
-available. It is a compact always-visible relationship profile, not a dynamic
-search result.
+available. It is a compact, always-visible, session-stable digest snapshot, not
+a dynamic search result.
 
-The `memory_recall` and `memory_propose` tools are always present in runtime
-tool definitions. `memory_recall` is the read path for explicit long-term belief
-lookup during the normal provider tool loop; it returns compact belief content
-without ids, confidence scores, sources, or evidence. `memory_propose` is the
-write-proposal path for explicit long-term preferences, constraints, procedures,
-and corrections during a Reactive turn. Accepted low-risk proposals emit
-`memory_proposed`, then `belief_formed`, and apply immediately to `belief_view`;
-pending or rejected proposals remain audit-only.
+Dynamic memory recall is available only through an explicit `memory_recall` tool
+call during the normal provider tool loop. Runtime passes the recall context to
+the tool executor, but it does not decide when recall is needed and does not
+automatically inject recalled beliefs into the prompt. Tool-visible recall
+results remain compact belief content without ids, confidence scores, sources,
+or evidence.
+
+Memory writes use the separate `memory_propose` proposal path for explicit
+long-term preferences, constraints, procedures, and corrections during a
+Reactive turn. Accepted low-risk proposals emit `memory_proposed`, then
+`belief_formed`, and apply immediately to `belief_view`; pending or rejected
+proposals remain audit-only.
 
 Beliefs are materialized in SQLite and recallable across sessions through a
 deterministic projection over cognition events. Foreground context is stored in

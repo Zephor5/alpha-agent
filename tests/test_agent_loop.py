@@ -900,8 +900,14 @@ class _MemoryRecallCallingProvider:
                     LLMToolCall(
                         id="call_recall",
                         name=MEMORY_RECALL_TOOL_NAME,
-                        arguments={"query": "Python", "scope": "counterpart"},
-                        raw_arguments='{"query":"Python","scope":"counterpart"}',
+                        arguments={
+                            "query": "what examples do I prefer?",
+                            "scope": "counterpart",
+                        },
+                        raw_arguments=(
+                            '{"query":"what examples do I prefer?",'
+                            '"scope":"counterpart"}'
+                        ),
                     )
                 ],
             )
