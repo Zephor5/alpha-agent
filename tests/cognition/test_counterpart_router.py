@@ -1,21 +1,15 @@
 from __future__ import annotations
 
-from alpha_agent.cognition.controller import CognitiveController, default_projection_registry
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.memory import InMemoryEventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
-    Instant,
-    Stimulus,
     StimulusKind,
-    ThreadId,
 )
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
-from alpha_agent.llm.base import ChatMessage, LLMResponse
 from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID, CounterpartRouter
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.default import build_tool_registry
 
 
 def test_counterpart_router_maps_local_and_first_channel_user_to_default() -> None:
@@ -112,31 +106,22 @@ def test_counterpart_router_first_observed_no_duplicate_and_perception_source() 
         event.kind for event in log.iter(kinds=[CognitiveEventKind.COUNTERPART_FIRST_OBSERVED])
     ] == [CognitiveEventKind.COUNTERPART_FIRST_OBSERVED]
 
-    thread_id = ThreadId.from_session("s1", source_metadata)
-    controller = CognitiveController(
-        event_log=log,
-        projections=default_projection_registry(log),
-        llm=_StaticProvider(),
-        tools=build_tool_registry(),
-        emitter=emitter,
-    )
-    controller.reactive_tick(
-        stimulus=Stimulus(
-            kind=StimulusKind.USER_MESSAGE,
-            source=first,
-            payload="from user",
-            thread_id=thread_id,
-            received_at=Instant("2026-01-01T00:00:00+00:00"),
-        ),
-        thread_id=thread_id,
+    emitter.emit(
+        CognitiveEventKind.PERCEIVED,
+        payload={
+            "turn_id": "turn_1",
+            "session_id": "s1",
+            "stimulus_kind": StimulusKind.USER_MESSAGE.value,
+            "source": first.to_record(),
+            "from_counterpart": first.to_record(),
+            "source_refs": [
+                {"kind": "session", "id": "s1"},
+                {"kind": "session_message", "id": "msg_1"},
+            ],
+            "content_digest": "digest-1",
+            "content_length": len("from user"),
+        },
     )
 
     perceived = [event for event in log.iter(kinds=[CognitiveEventKind.PERCEIVED])][0]
     assert perceived.payload["from_counterpart"] == first.to_record()
-
-
-class _StaticProvider:
-    name = "static"
-
-    def complete(self, messages: list[ChatMessage], **_kwargs) -> LLMResponse:
-        return LLMResponse(content="ok", model="test", provider=self.name)

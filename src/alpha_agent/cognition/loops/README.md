@@ -7,15 +7,10 @@ operation. There is no background daemon scheduler in v1.
 
 ## Workers
 
-- `promote_judgment`: promotes repeated deterministic judgment claims within
-  `judgment_repeat_window` when count reaches `judgment_repeat_threshold`.
 - `merge_beliefs`: supersedes equivalent active beliefs with the highest
   confidence/latest survivor.
 - `archive_expired`: archives active beliefs whose JSON applicability has a
   `valid_until` earlier than the current UTC time.
-- `learn_procedure`: learns a minimal deterministic procedure when the same
-  decision pattern has `procedure_success_threshold` successful feedback
-  matches.
 - `compress_context`: moves old unanchored foreground perception ids into
   `context_window_background` once foreground exceeds `context_foreground_max`.
 - `summarize_counterpart`: maintains one active digest belief per counterpart
@@ -52,7 +47,7 @@ least-recently driven first, with stable `updated_at`/id tie breaks. It acquires
 the coordinator at `LoopPriority.DRIVE` only while selecting the goal and
 creating a `self_signal`; it releases DRIVE before trying to acquire REACTIVE.
 If REACTIVE is busy, the self-signal is dropped and the goal remains eligible
-for a later pass. On a successful Reactive tick, the loop emits
+for a later pass. On a successful runtime self-signal turn, the loop emits
 `goal_progressed` with `drive_progress=true`, which updates `last_drive_at` and
 enforces per-goal cooldown.
 

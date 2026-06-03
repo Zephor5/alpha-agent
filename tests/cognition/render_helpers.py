@@ -16,7 +16,6 @@ from alpha_agent.cognition.models import (
     StimulusKind,
     StyleHint,
     Subject,
-    ThreadId,
     counterpart_ref,
     situation_ref,
     subject_ref,
@@ -42,12 +41,11 @@ def window(*, raw: str = "hello") -> ContextWindow:
     subject = Subject()
     situation = Situation(id=SituationId("situation:test"))
     return ContextWindow(
-        thread_id=ThreadId.from_session("s1"),
+        session_id="s1",
         counterpart=None,
         foreground=[perception(raw)],
         background=None,
         recalled=[],
-        recent_judgments=[],
         matched_procedures=[],
         subject_at=subject_ref(subject.id),
         situation_at=situation_ref(situation.id),

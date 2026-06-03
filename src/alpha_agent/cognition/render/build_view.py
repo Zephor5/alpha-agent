@@ -9,12 +9,10 @@ from alpha_agent.cognition.models import (
     ContextWindow,
     Counterpart,
     Instant,
-    Judgment,
     Reference,
     Reflection,
     Situation,
     SituationId,
-    ThreadId,
 )
 from alpha_agent.cognition.projections.context_window import ContextWindowProjection
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
@@ -28,20 +26,19 @@ from alpha_agent.utils.time import utc_now_iso
 
 def build_view(
     *,
-    thread_id: ThreadId,
+    session_id: str,
     situation: Situation,
     projections: ProjectionRegistry,
     clock: Callable[[], str] = utc_now_iso,
     window: ContextWindow | None = None,
     counterpart_profile: str | None = None,
-    active_judgments: Sequence[Judgment] | None = None,
     matched_procedures: Sequence[Any] | None = None,
     active_strategies: Sequence[Any] | None = None,
     recent_reflections: Sequence[Reflection] | None = None,
     current_query: str | None = None,
     chat_history: Sequence[ChatMessage] | None = None,
 ) -> CognitionView:
-    """Build the renderer-facing view for one thread.
+    """Build the renderer-facing view for one runtime session.
 
     Current phases have concrete subject, counterpart, context-window,
     procedure, and L1 reflection projections. Later strategy/lens projections
@@ -50,7 +47,7 @@ def build_view(
 
     subject = projections.get_typed(SubjectProjection).current()
     if window is None:
-        window = projections.get_typed(ContextWindowProjection).get(thread_id, subject)
+        window = projections.get_typed(ContextWindowProjection).get(session_id, subject)
     counterpart = _counterpart(window, projections)
     reflections = (
         list(recent_reflections)
@@ -63,7 +60,6 @@ def build_view(
         situation=situation,
         window=window,
         counterpart_profile=counterpart_profile,
-        active_judgments=list(active_judgments or []),
         matched_procedures=list(matched_procedures or []),
         active_strategies=list(active_strategies or []),
         recent_reflections=reflections,

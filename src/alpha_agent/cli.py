@@ -19,7 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from alpha_agent.cognition.controller import CognitiveController, default_projection_registry
+from alpha_agent.cognition.controller import default_projection_registry
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.goals import GoalRegistry
@@ -40,7 +40,6 @@ from alpha_agent.cognition.models import (
     Situation,
     SituationId,
     Subject,
-    ThreadId,
     ValueKind,
     situation_ref,
     subject_ref,
@@ -48,6 +47,7 @@ from alpha_agent.cognition.models import (
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.cognition.projections.reflection import ReflectionProjection, target_to_parts
+from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.projections.strategy import StrategyProjection
 from alpha_agent.cognition.projections.subject import SubjectProjection
 from alpha_agent.cognition.reflectors.l3 import ReflectorL3
@@ -95,6 +95,7 @@ from alpha_agent.llm.base import ChatMessage
 from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
+from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.runtime.session_context import (
     SYSTEM_REMINDER_CLOSE,
@@ -928,34 +929,56 @@ def prompt(
 
 def _render_cognitive_trace(store: StateStore, session_id: str) -> None:
     all_events = list(SQLiteEventLog(store).iter())
-    tick_ids = {
-        str(event.payload["tick_id"])
+    turn_ids = {
+        str(event.payload["turn_id"])
         for event in all_events
-        if _event_belongs_to_session(event, session_id) and "tick_id" in event.payload
+        if _event_belongs_to_session(event, session_id) and "turn_id" in event.payload
     }
+    linked_event_ids = _linked_cognitive_event_ids(all_events, turn_ids)
     events = [
         event
         for event in all_events
-        if event.payload.get("tick_id") is not None
-        and str(event.payload.get("tick_id")) in tick_ids
+        if (
+            event.payload.get("turn_id") is not None
+            and str(event.payload.get("turn_id")) in turn_ids
+        )
+        or str(event.id) in linked_event_ids
     ]
     console.print("Cognitive Trace", markup=False)
     if not events:
         console.print("(none)", markup=False)
         return
     for event in events[-20:]:
-        tick_id = event.payload.get("tick_id", "-")
+        turn_id = event.payload.get("turn_id", "-")
+        event_session_id = event.payload.get("session_id", "-")
         parents = ",".join(str(parent) for parent in event.causal_parents) or "-"
         console.print(
-            f"{event.timestamp} kind={event.kind.value} tick_id={tick_id} "
-            f"id={event.id} parents={parents}",
+            f"{event.timestamp} kind={event.kind.value} turn_id={turn_id} "
+            f"session_id={event_session_id} id={event.id} parents={parents}",
             markup=False,
         )
 
 
+def _linked_cognitive_event_ids(
+    events: list[CognitiveEvent],
+    turn_ids: set[str],
+) -> set[str]:
+    linked: set[str] = set()
+    for event in events:
+        if event.kind != CognitiveEventKind.TURN_SOURCES_RECORDED:
+            continue
+        if str(event.payload.get("turn_id") or "") not in turn_ids:
+            continue
+        for field in ("cognitive_event_ids", "tool_cognitive_event_ids"):
+            values = event.payload.get(field)
+            if isinstance(values, list):
+                linked.update(str(value) for value in values)
+    return linked
+
+
 def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
-    raw_thread = event.payload.get("thread_id")
-    return isinstance(raw_thread, dict) and raw_thread.get("key") == f"session:{session_id}"
+    raw_session_id = event.payload.get("session_id")
+    return isinstance(raw_session_id, str) and raw_session_id == session_id
 
 
 def _debug_prompt_view(
@@ -965,15 +988,13 @@ def _debug_prompt_view(
     counterpart_profile: str | None = None,
 ) -> CognitionView:
     situation = Situation(id=SituationId("situation:debug-prompt"))
-    thread_id = ThreadId.from_session(session_id)
     subject_value = Subject()
     window = ContextWindow(
-        thread_id=thread_id,
+        session_id=session_id,
         counterpart=None,
         foreground=[],
         background=None,
         recalled=[],
-        recent_judgments=[],
         matched_procedures=[],
         subject_at=subject_ref(subject_value.id),
         situation_at=situation_ref(situation.id),
@@ -1009,10 +1030,8 @@ def cognition_graph(
     store = _store(config)
     log = SQLiteEventLog(store)
     projections = default_projection_registry(log)
-    subject_value = projections.get_typed(SubjectProjection).current()
-    thread_id = ThreadId.cognition(subject_value.id, "inspection")
     view = build_view(
-        thread_id=thread_id,
+        session_id="inspection",
         situation=Situation(id=SituationId("situation:cognition-graph")),
         projections=projections,
     )
@@ -1026,16 +1045,16 @@ def cognition_graph(
 
 @cognition_app.command("diff")
 def cognition_diff(
-    tick_id_a: Annotated[str, typer.Argument(help="Earlier tick id.")],
-    tick_id_b: Annotated[str, typer.Argument(help="Later tick id.")],
+    turn_id_a: Annotated[str, typer.Argument(help="Earlier turn id.")],
+    turn_id_b: Annotated[str, typer.Argument(help="Later turn id.")],
 ) -> None:
-    """Render event-kind changes between two ticks."""
+    """Render event-kind changes between two turns."""
 
     config = load_config()
     store = _store(config)
     log = SQLiteEventLog(store)
     view = _inspection_view(store)
-    rendered = DiffRenderer(log, tick_id_a=tick_id_a, tick_id_b=tick_id_b).render(
+    rendered = DiffRenderer(log, turn_id_a=turn_id_a, turn_id_b=turn_id_b).render(
         view,
         RenderBudget(max_tokens=256),
     )
@@ -1078,9 +1097,6 @@ def cognition_consolidate(
     consolidation_config = ConsolidationConfig(
         enabled=config.cognition_consolidation_enabled,
         interval_seconds=config.cognition_consolidation_interval_seconds,
-        judgment_repeat_window=config.cognition_consolidation_judgment_repeat_window,
-        judgment_repeat_threshold=config.cognition_consolidation_judgment_repeat_threshold,
-        procedure_success_threshold=config.cognition_consolidation_procedure_success_threshold,
         context_foreground_max=config.cognition_consolidation_context_foreground_max,
         context_absorb_batch=config.cognition_consolidation_context_absorb_batch,
         context_summary_chars=config.cognition_consolidation_context_summary_chars,
@@ -1147,9 +1163,8 @@ def _dry_run_store(config: AlphaConfig, tmp_dir: Path) -> StateStore:
 def _inspection_view(store: StateStore) -> CognitionView:
     log = SQLiteEventLog(store)
     projections = default_projection_registry(log)
-    subject_value = projections.get_typed(SubjectProjection).current()
     return build_view(
-        thread_id=ThreadId.cognition(subject_value.id, "inspection"),
+        session_id="inspection",
         situation=Situation(id=SituationId("situation:cognition-inspection")),
         projections=projections,
     )
@@ -1278,19 +1293,26 @@ def cognition_drive(
     config = load_config()
     store = _store(config)
     log = SQLiteEventLog(store)
-    projections = default_projection_registry(log)
+    projections = ProjectionRegistry()
+    projections.register(
+        GoalProjection(
+            store,
+            event_log=log,
+            auto_rebuild=True,
+            active_limit=config.cognition_drive_active_goal_limit,
+        )
+    )
     emitter = EventEmitter(log)
-    controller = CognitiveController(
-        log,
-        projections,
-        llm=build_provider(config),
-        tools=build_tool_registry(config),
-        emitter=emitter,
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=build_provider(config),
+        tool_registry=build_tool_registry(config),
+        event_log=log,
     )
     report = DriveLoop(
         log=log,
         projections=projections,
-        controller=controller,
+        runtime_turn_runner=agent,
         emitter=emitter,
         config=DriveConfig(
             enabled=config.cognition_drive_enabled,
@@ -1530,14 +1552,14 @@ def cognition_strategies(
     table = Table(title="Cognition Strategies")
     table.add_column("ID")
     table.add_column("Name")
-    table.add_column("Stages")
+    table.add_column("Domains")
     table.add_column("Counterpart")
     table.add_column("Valid Until")
     for strategy in rows:
         table.add_row(
             str(strategy.id),
             strategy.name,
-            ",".join(strategy.target_stages),
+            ",".join(strategy.target_domains),
             strategy.for_counterpart.id if strategy.for_counterpart else "global",
             str(strategy.valid_until),
         )
@@ -1545,7 +1567,7 @@ def cognition_strategies(
     for strategy in rows:
         typer.echo(
             f"strategy={strategy.id} name={strategy.name} "
-            f"stages={','.join(strategy.target_stages)}"
+            f"domains={','.join(strategy.target_domains)}"
         )
     if not rows:
         typer.echo("strategies=0 active=" + str(active and not all_).lower())

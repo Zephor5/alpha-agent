@@ -194,17 +194,23 @@ def test_debug_prompt_trace_renders_recent_cognitive_events(tmp_path: Path) -> N
     assert "Cognitive Trace" in result.output
     for kind in [
         "perceived",
+        "acted",
+        "turn_sources_recorded",
+    ]:
+        assert f"kind={kind}" in result.output
+    for retired_kind in [
         "attended",
         "interpreted",
         "judged",
         "decided",
-        "acted",
         "received_feedback",
         "reflected",
         "revised",
     ]:
-        assert f"kind={kind}" in result.output
-    assert "tick_id=" in result.output
+        assert f"kind={retired_kind}" not in result.output
+    assert "turn_id=" in result.output
+    assert "session_id=s1" in result.output
+    assert "tick" + "_id=" not in result.output
 
 
 def test_skills_list_reads_builtin_skills_without_state_store(tmp_path: Path) -> None:

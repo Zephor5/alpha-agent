@@ -32,9 +32,11 @@ def test_reset_and_replay_rebuilds_equivalent_reflection_view(tmp_path) -> None:
             log,
             CognitiveEventKind.REFLECTED,
             payload={
-                "tick_id": "tick:1",
+                "turn_id": "turn_1",
+                "session_id": "s1",
                 "reflection_count": 1,
                 "reflection_ids": [str(reflection.id)],
+                "targets": [{"kind": "reflection", "id": str(reflection.id)}],
                 "reflections": [reflection.to_record()],
             },
             event_ids=event_ids,
@@ -61,15 +63,20 @@ def test_reflection_projection_filters_by_severity_kind_and_target(tmp_path) -> 
     event_ids = id_factory()
     clock = clock_factory()
     warning = _reflection("reflection:1", "unsupported-tool-call", "warning")
-    info = _reflection("reflection:2", "feedback-surprise", "info", target="loop_run:tick:1")
+    info = _reflection("reflection:2", "feedback-surprise", "info", target="loop_run:turn_1")
     projection.apply(
         emit(
             log,
             CognitiveEventKind.REFLECTED,
             payload={
-                "tick_id": "tick:1",
+                "turn_id": "turn_1",
+                "session_id": "s1",
                 "reflection_count": 2,
                 "reflection_ids": [str(warning.id), str(info.id)],
+                "targets": [
+                    {"kind": "reflection", "id": str(warning.id)},
+                    {"kind": "reflection", "id": str(info.id)},
+                ],
                 "reflections": [warning.to_record(), info.to_record()],
             },
             event_ids=event_ids,
@@ -79,7 +86,7 @@ def test_reflection_projection_filters_by_severity_kind_and_target(tmp_path) -> 
 
     assert [item.id for item in projection.by_severity("warning")] == ["reflection:1"]
     assert [item.id for item in projection.by_kind("feedback-surprise")] == ["reflection:2"]
-    assert [item.id for item in projection.for_target("loop_run", "tick:1")] == [
+    assert [item.id for item in projection.for_target("loop_run", "turn_1")] == [
         "reflection:2"
     ]
     assert [item.id for item in projection.list_recent(last=1)] == ["reflection:2"]

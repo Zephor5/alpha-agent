@@ -7,7 +7,6 @@ from alpha_agent.cognition.projections.belief import (
     BeliefRecallParams,
     BeliefSearchParams,
 )
-from alpha_agent.cognition.stages.types import AttentionFocus
 from alpha_agent.state.store import StateStore
 from tests.cognition.helpers import clock_factory, emit, id_factory
 from tests.cognition.test_belief_projection_apply import (
@@ -47,11 +46,7 @@ def test_recall_with_focus_entities_requires_entity_overlap(tmp_path) -> None:
 
     recalled = projection.recall(
         BeliefRecallParams(
-            focus=AttentionFocus(
-                entities=[python_entity(), entity_ref("unrelated")],
-                salient_claims=[],
-                value_signals={},
-            ),
+            entities=(python_entity(), entity_ref("unrelated")),
             counterpart=counterpart_a(),
         )
     )

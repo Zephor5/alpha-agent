@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
 
-from alpha_agent.cognition.controller import CognitiveController, LoopResult
-from alpha_agent.cognition.coordinator import LockBusy, LoopAcquireRequest, LoopCoordinator
+from alpha_agent.cognition.coordinator import LoopAcquireRequest, LoopCoordinator
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.goals import GoalRegistry
@@ -18,9 +18,6 @@ from alpha_agent.cognition.models import (
     GoalId,
     Instant,
     LoopPriority,
-    Stimulus,
-    StimulusKind,
-    ThreadId,
 )
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.goal import ACTIVE_GOAL_LIMIT, GoalProjection
@@ -55,7 +52,7 @@ class DriveLoop:
             {
                 CognitiveEventKind.GOAL_SET,
                 CognitiveEventKind.GOAL_PROGRESSED,
-                CognitiveEventKind.RECEIVED_FEEDBACK,
+                CognitiveEventKind.ACTED,
             }
         ),
         min_new_events=1,
@@ -66,7 +63,7 @@ class DriveLoop:
         *,
         log: EventLog,
         projections: ProjectionRegistry,
-        controller: CognitiveController,
+        runtime_turn_runner: Any,
         coordinator: LoopCoordinator | None = None,
         emitter: EventEmitter | None = None,
         config: DriveConfig | None = None,
@@ -74,7 +71,7 @@ class DriveLoop:
     ):
         self.log = log
         self.projections = projections
-        self.controller = controller
+        self.runtime_turn_runner = runtime_turn_runner
         self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
         self.emitter = emitter or EventEmitter(log)
         self.config = config or DriveConfig()
@@ -86,8 +83,6 @@ class DriveLoop:
 
         now = Instant(self.clock())
         goal: Goal | None = None
-        stimulus: Stimulus | None = None
-        thread_id: ThreadId | None = None
         drive_req = LoopAcquireRequest(
             loop_name="drive",
             priority=LoopPriority.DRIVE,
@@ -97,34 +92,14 @@ class DriveLoop:
             goal = self._select_goal(now)
             if goal is None:
                 return DriveReport(None, triggered=False, skipped_reason="no_eligible_goal")
-            thread_id = ThreadId.cognition(SUBJECT_SELF, topic=str(goal.id))
-            stimulus = Stimulus(
-                kind=StimulusKind.SELF_SIGNAL,
-                source=goal.for_counterpart,
-                payload={
-                    "goal_id": str(goal.id),
-                    "drive_reason": "active goal needs progress",
-                    "goal_description": goal.description,
-                    "target_outcome": goal.target_outcome,
-                },
-                thread_id=thread_id,
-                received_at=now,
-            )
 
-        reactive_req = LoopAcquireRequest(
-            loop_name="reactive",
-            priority=LoopPriority.REACTIVE,
-            max_chunk_duration=timedelta(seconds=30),
-        )
-        try:
-            with self.coordinator.try_acquire(reactive_req):
-                result = self.controller.reactive_tick(stimulus, thread_id)
-        except LockBusy:
+        result = self._run_runtime_turn(goal)
+        if _is_busy_turn(result):
             return DriveReport(
                 goal.id,
                 triggered=False,
                 dropped=True,
-                skipped_reason="reactive_busy",
+                skipped_reason="runtime_turn_busy",
             )
 
         linked_event_ids = _linked_event_ids(result)
@@ -136,7 +111,7 @@ class DriveLoop:
         )
         progress = registry.progress(
             goal.id,
-            note="Drive Loop triggered a self_signal reactive tick.",
+            note="Drive Loop triggered a runtime self-signal turn.",
             linked_event_ids=linked_event_ids,
             drive_progress=True,
         )
@@ -159,12 +134,68 @@ class DriveLoop:
         elapsed = _parse_instant(now) - _parse_instant(goal.last_drive_at)
         return elapsed >= timedelta(seconds=self.config.goal_cooldown_seconds)
 
+    def _run_runtime_turn(self, goal: Goal) -> Any:
+        session_id = _goal_session_id(goal.id)
+        message = _self_signal_message(goal)
+        source_metadata = {
+            "source": "drive_loop",
+            "stimulus_kind": "self_signal",
+            "goal_id": str(goal.id),
+        }
+        respond = getattr(self.runtime_turn_runner, "respond", None)
+        if callable(respond):
+            return respond(
+                message,
+                session_id=session_id,
+                source_metadata=source_metadata,
+            )
+        if callable(self.runtime_turn_runner):
+            return self.runtime_turn_runner(
+                message,
+                session_id,
+                source_metadata,
+            )
+        raise TypeError("runtime_turn_runner must be AlphaAgent-like or callable")
 
-def _linked_event_ids(result: LoopResult) -> list[str]:
-    raw = result.debug.get("event_ids")
-    if not isinstance(raw, list):
+
+def _is_busy_turn(result: Any) -> bool:
+    debug = getattr(result, "debug", None)
+    return isinstance(debug, Mapping) and debug.get("busy") is True
+
+
+def _linked_event_ids(result: Any) -> list[str]:
+    debug = getattr(result, "debug", None)
+    if not isinstance(debug, Mapping):
         return []
-    return [str(item) for item in raw]
+    event_ids: list[str] = []
+    for key in ("turn_received_event_id", "acted_event_id", "turn_sources_event_id"):
+        value = debug.get(key)
+        if value is not None and str(value):
+            event_ids.append(str(value))
+    event_ids.extend(_string_list(debug.get("tool_cognitive_event_ids")))
+    return event_ids
+
+
+def _goal_session_id(goal_id: GoalId | str) -> str:
+    return f"internal:goal:{goal_id}"
+
+
+def _self_signal_message(goal: Goal) -> str:
+    lines = [
+        "[self_signal]",
+        f"goal_id: {goal.id}",
+        "drive_reason: active goal needs progress",
+        f"goal_description: {goal.description}",
+    ]
+    if goal.target_outcome:
+        lines.append(f"target_outcome: {goal.target_outcome}")
+    return "\n".join(lines)
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list | tuple):
+        return []
+    return [str(item) for item in value if item is not None and str(item)]
 
 
 def _parse_instant(value: Instant) -> datetime:

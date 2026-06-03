@@ -339,8 +339,8 @@ def gateway_source_metadata(
     }
     if source.user_name is not None:
         metadata["user_name"] = source.user_name
-    if source.thread_id is not None:
-        metadata["thread_id"] = source.thread_id
+    if source.platform_thread_id is not None:
+        metadata["platform_thread_id"] = source.platform_thread_id
     message_id = message.platform_message_id or source.message_id
     if message_id is not None:
         metadata["message_id"] = message_id

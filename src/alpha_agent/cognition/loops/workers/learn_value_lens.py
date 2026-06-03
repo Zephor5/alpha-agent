@@ -20,7 +20,7 @@ from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.projections.strategy import (
     StrategyProjection,
-    strategy_is_active_for_stage,
+    strategy_is_active_for_domain,
 )
 from alpha_agent.cognition.value.lens import load_lens, normalize_lens, save_lens
 
@@ -142,8 +142,8 @@ def _lens_learning_frozen(projections: ProjectionRegistry) -> bool:
         projection = projections.get_typed(StrategyProjection)
     except KeyError:
         return False
-    return strategy_is_active_for_stage(
-        projection.active(stage="lens_learning"),
+    return strategy_is_active_for_domain(
+        projection.active(domain="lens_learning"),
         "freeze_lens_learning_for_24h",
         "lens_learning",
     )

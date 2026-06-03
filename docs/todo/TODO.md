@@ -68,7 +68,7 @@ These are prerequisites for making Alpha Agent usable outside `alpha chat`.
   - `gateway/status.py`
 - [x] Define platform-neutral models:
   - `ConversationSource`: platform, chat_id, chat_type, user_id, user_name,
-    thread_id, message_id, metadata.
+    platform_thread_id, message_id, metadata.
   - `InboundMessage`: source, text, message_type, attachments, received_at,
     platform_message_id, raw metadata.
   - `OutboundMessage`: text, attachments, reply_to, thread metadata, visibility.

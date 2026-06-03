@@ -111,7 +111,7 @@ def _strategy_from_candidate(candidate: StrategyCandidate, now: Instant) -> Stra
     record: dict[str, object] = {
         "name": candidate["strategy_name"],
         "payload": candidate["payload"],
-        "target_stages": candidate["target_stages"],
+        "target_domains": candidate["target_domains"],
         "set_at": str(now),
         "valid_until": str(valid_until),
     }
@@ -119,7 +119,7 @@ def _strategy_from_candidate(candidate: StrategyCandidate, now: Instant) -> Stra
         id=StrategyId(_stable_strategy_id(candidate["rule"], record)),
         name=str(candidate["strategy_name"]),
         payload=candidate["payload"],
-        target_stages=list(candidate["target_stages"]),
+        target_domains=list(candidate["target_domains"]),
         set_by="reflector_l2",
         set_at=now,
         valid_until=valid_until,

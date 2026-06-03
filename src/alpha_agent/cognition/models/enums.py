@@ -30,25 +30,13 @@ class ValueKind(StrEnum):
     LEARNING = "learning"
 
 
-class ThreadKind(StrEnum):
-    """Context thread category."""
-
-    CONVERSATION = "conversation"
-    COGNITION = "cognition"
-
-
 class CognitiveEventKind(StrEnum):
-    """First event-kind vocabulary for the event log."""
+    """Cognition event vocabulary."""
 
     PERCEIVED = "perceived"
-    ATTENDED = "attended"
-    INTERPRETED = "interpreted"
-    JUDGED = "judged"
-    DECIDED = "decided"
     ACTED = "acted"
     RECEIVED_FEEDBACK = "received_feedback"
     REFLECTED = "reflected"
-    REVISED = "revised"
     MEMORY_PROPOSED = "memory_proposed"
     BELIEF_FORMED = "belief_formed"
     BELIEF_STRENGTHENED = "belief_strengthened"

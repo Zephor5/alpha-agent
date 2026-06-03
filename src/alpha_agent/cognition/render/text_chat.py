@@ -1,4 +1,4 @@
-"""Chat-completions renderer for reactive cognition."""
+"""Chat-completions renderer for turn-owned cognition views."""
 
 from __future__ import annotations
 
@@ -164,7 +164,7 @@ class TextChatRenderer:
 
 _SYSTEM_PROMPT = (
     "Identity: Alpha Agent.\n"
-    "Use the current reactive context and answer concisely. "
+    "Use the current turn and session context and answer concisely. "
     "Call tools only when they are useful.\n"
     "When counterpart profile context is present, treat it as already-visible stable "
     "relationship context near the start of the prompt. Use memory_recall for explicit "

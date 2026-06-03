@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -101,6 +101,7 @@ def compress_session_context(
     before_ordinal: int | None = None,
     instruction: str = DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
     compression_version: str = DEFAULT_HANDOVER_COMPRESSION_VERSION,
+    trace_metadata: Mapping[str, Any] | None = None,
 ) -> HandoverCompressionResult:
     """Call the LLM for handover compression and append the returned source record."""
 
@@ -116,7 +117,8 @@ def compress_session_context(
         instruction=instruction,
     )
 
-    trace_metadata = {
+    compression_trace_metadata = {
+        **dict(trace_metadata or {}),
         "compression_point_ordinal": prompt.compression_point_ordinal,
         "compression_version": compression_version,
         "before_ordinal": before_ordinal,
@@ -130,7 +132,7 @@ def compress_session_context(
         session_id=session_id,
         event_type="handover_compression.started",
         content="Handover compression started.",
-        metadata=trace_metadata,
+        metadata=compression_trace_metadata,
     )
     try:
         response = llm_provider.complete(
@@ -157,7 +159,7 @@ def compress_session_context(
             event_type="handover_compression.failed",
             content="Handover compression failed.",
             metadata={
-                **trace_metadata,
+                **compression_trace_metadata,
                 "error_type": type(exc).__name__,
                 "error": str(exc),
             },
@@ -170,7 +172,7 @@ def compress_session_context(
         event_type="handover_compression.completed",
         content="Handover compression completed.",
         metadata={
-            **trace_metadata,
+            **compression_trace_metadata,
             "response_provider": response.provider,
             "response_model": response.model,
             "finish_reason": response.finish_reason,

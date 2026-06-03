@@ -10,7 +10,6 @@ from alpha_agent.cognition.models import (
     Instant,
     Situation,
     SituationId,
-    ThreadId,
     belief_ref,
     counterpart_ref,
     situation_ref,
@@ -59,15 +58,13 @@ def test_build_view_resolves_subject_and_counterpart_without_prompt_recall(tmp_p
         )
     )
     subject = projections.get_typed(SubjectProjection).current()
-    thread_id = ThreadId.from_session("s1")
     situation = Situation(id=SituationId("situation:test"))
     window = ContextWindow(
-        thread_id=thread_id,
+        session_id="s1",
         counterpart=counterpart,
         foreground=[],
         background=None,
         recalled=[belief_ref(BeliefId("belief:1"))],
-        recent_judgments=[],
         matched_procedures=[],
         subject_at=subject_ref(subject.id),
         situation_at=situation_ref(situation.id),
@@ -75,7 +72,7 @@ def test_build_view_resolves_subject_and_counterpart_without_prompt_recall(tmp_p
     )
 
     view = build_view(
-        thread_id=thread_id,
+        session_id=window.session_id,
         situation=situation,
         projections=projections,
         window=window,
@@ -95,12 +92,11 @@ def test_build_view_uses_explicit_counterpart_profile(tmp_path) -> None:
     subject = projections.get_typed(SubjectProjection).current()
     situation = Situation(id=SituationId("situation:test"))
     window = ContextWindow(
-        thread_id=ThreadId.from_session("s1"),
+        session_id="s1",
         counterpart=None,
         foreground=[],
         background=None,
         recalled=[],
-        recent_judgments=[],
         matched_procedures=[],
         subject_at=subject_ref(subject.id),
         situation_at=situation_ref(situation.id),
@@ -108,7 +104,7 @@ def test_build_view_uses_explicit_counterpart_profile(tmp_path) -> None:
     )
 
     view = build_view(
-        thread_id=window.thread_id,
+        session_id=window.session_id,
         situation=situation,
         projections=projections,
         window=window,
@@ -136,12 +132,11 @@ def test_build_view_does_not_fallback_to_all_active_beliefs_without_recalled_ref
     subject = projections.get_typed(SubjectProjection).current()
     situation = Situation(id=SituationId("situation:test"))
     window = ContextWindow(
-        thread_id=ThreadId.from_session("s1"),
+        session_id="s1",
         counterpart=None,
         foreground=[],
         background=None,
         recalled=[],
-        recent_judgments=[],
         matched_procedures=[],
         subject_at=subject_ref(subject.id),
         situation_at=situation_ref(situation.id),
@@ -149,7 +144,7 @@ def test_build_view_does_not_fallback_to_all_active_beliefs_without_recalled_ref
     )
 
     view = build_view(
-        thread_id=window.thread_id,
+        session_id=window.session_id,
         situation=situation,
         projections=projections,
         window=window,

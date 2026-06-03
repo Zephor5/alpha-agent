@@ -32,11 +32,11 @@ def test_memory_propose_tool_description_explains_usage_contract() -> None:
     assert "reusable procedures" in definition.description
     assert "direct corrections" in definition.description
     assert "ordinary facts" in definition.description
-    assert '"success"' in definition.description
-    assert '"failed"' in definition.description
+    assert "structured memory proposal result" in definition.description
+    assert "pending_confirmation" in definition.description
 
 
-def test_memory_propose_promotes_explicit_preference_in_reactive_turn(tmp_path) -> None:
+def test_memory_propose_promotes_explicit_preference_in_runtime_turn(tmp_path) -> None:
     store = _store(tmp_path)
     provider = _MemoryProposeProvider(
         proposals=[
@@ -61,16 +61,29 @@ def test_memory_propose_promotes_explicit_preference_in_reactive_turn(tmp_path) 
         "tool_message",
         "assistant_message",
     ]
-    assert messages[1].metadata == {"tool_call_ids": ["call_memory"]}
+    turn_id = result.debug["turn_id"]
+    assert messages[1].metadata == {
+        "turn_id": turn_id,
+        "tool_call_ids": ["call_memory"],
+    }
     assert messages[2].provider_metadata["tool_name"] == MEMORY_PROPOSE_TOOL_NAME
-    assert messages[2].raw_content == "success"
+    tool_output = json.loads(messages[2].raw_content)
+    assert tool_output["status"] == "accepted"
+    assert tool_output["user_action"] == "none"
+    assert tool_output["message_hint"] == ""
+    assert len(tool_output["proposal_results"]) == 1
+    assert tool_output["proposal_results"][0]["decision"] == "accepted"
+    assert tool_output["proposal_results"][0]["reason"] == "accepted_foreground_preference"
     assert messages[2].metadata["result_metadata"]["cognitive_event_ids"]
+    assert messages[2].metadata["tool_output_kind"] == "json"
 
     events = list(SQLiteEventLog(store).iter())
     proposed = [event for event in events if event.kind == CognitiveEventKind.MEMORY_PROPOSED]
     formed = [event for event in events if event.kind == CognitiveEventKind.BELIEF_FORMED]
     assert len(proposed) == 1
     assert len(formed) == 1
+    assert tool_output["proposal_results"][0]["proposal_id"] == proposed[0].payload["proposal_id"]
+    assert proposed[0].causal_parents == [result.debug["turn_received_event_id"]]
     assert proposed[0].payload["gate"] == {
         "decision": "accepted",
         "reason": "accepted_foreground_preference",
@@ -127,22 +140,154 @@ def test_memory_propose_records_each_proposal_and_leaves_correction_pending(tmp_
     events = list(SQLiteEventLog(store).iter())
     proposed = [event for event in events if event.kind == CognitiveEventKind.MEMORY_PROPOSED]
     formed = [event for event in events if event.kind == CognitiveEventKind.BELIEF_FORMED]
+    pending = [
+        event
+        for event in events
+        if event.kind == CognitiveEventKind.BELIEF_FORM_PENDING_CONFIRMATION
+    ]
     assert [event.payload["proposal"]["kind"] for event in proposed] == [
         "constraint",
         "correction",
     ]
     assert [event.payload["gate"]["decision"] for event in proposed] == [
         "accepted",
-        "pending",
+        "pending_confirmation",
     ]
     assert len(formed) == 1
     assert formed[0].payload["belief"]["content"] == (
         "Do not write local machine-specific absolute paths into the repo."
     )
+    assert len(pending) == 1
+    assert pending[0].payload == {
+        "turn_id": proposed[1].payload["turn_id"],
+        "session_id": "s1",
+        "proposal_id": proposed[1].payload["proposal_id"],
+        "reason": "correction_requires_review",
+        "required_user_action": "confirm_memory_change",
+        "candidate_change": {
+            "kind": "correct",
+            "content": "User corrected an older belief.",
+        },
+        "conflict_belief_ids": [],
+    }
+    assert pending[0].causal_parents == [proposed[1].id]
 
     tool_message = store.list_session_messages("s1")[2]
-    assert tool_message.raw_content == "failed"
-    assert "proposal_id" not in tool_message.raw_content
+    tool_output = json.loads(tool_message.raw_content)
+    assert tool_output["status"] == "mixed"
+    assert tool_output["user_action"] == "ask_confirmation"
+    assert "confirm" in tool_output["message_hint"]
+    assert [item["decision"] for item in tool_output["proposal_results"]] == [
+        "accepted",
+        "pending_confirmation",
+    ]
+    assert tool_output["proposal_results"][1]["proposal_id"] == proposed[1].payload["proposal_id"]
+
+
+def test_memory_propose_duplicate_active_belief_is_accepted_without_new_belief(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    first_provider = _MemoryProposeProvider(
+        proposals=[
+            {
+                "kind": "preference",
+                "content": "User prefers future answers in Chinese.",
+                "evidence": "User said: 以后都用中文回答我.",
+                "scope": "counterpart",
+            }
+        ]
+    )
+    AlphaAgent(store=store, llm_provider=first_provider).respond(
+        "以后都用中文回答我",
+        session_id="s1",
+    )
+
+    duplicate_provider = _MemoryProposeProvider(
+        proposals=[
+            {
+                "kind": "preference",
+                "content": "User prefers future answers in Chinese.",
+                "evidence": "User repeated the same preference.",
+                "scope": "counterpart",
+            }
+        ]
+    )
+    AlphaAgent(store=store, llm_provider=duplicate_provider).respond(
+        "提醒一下，还是用中文",
+        session_id="s1",
+    )
+
+    events = list(SQLiteEventLog(store).iter())
+    formed = [event for event in events if event.kind == CognitiveEventKind.BELIEF_FORMED]
+    assert len(formed) == 1
+    assert len(BeliefProjection(store).list_active()) == 1
+    tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
+    assert tool_output["status"] == "accepted"
+    assert tool_output["proposal_results"][0]["reason"] == "accepted_duplicate_active_belief"
+
+
+def test_memory_propose_single_structured_conflict_supersedes_existing_belief(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    first_provider = _MemoryProposeProvider(
+        proposals=[
+            {
+                "kind": "preference",
+                "content": "User prefers Python examples.",
+                "evidence": "User said they prefer Python examples.",
+                "scope": "counterpart",
+            }
+        ]
+    )
+    AlphaAgent(store=store, llm_provider=first_provider).respond(
+        "Remember I prefer Python examples.",
+        session_id="s1",
+    )
+    original_belief = BeliefProjection(store).list_active()[0]
+
+    conflict_provider = _MemoryProposeProvider(
+        proposals=[
+            {
+                "kind": "preference",
+                "content": "User prefers Rust examples.",
+                "evidence": "User said they now prefer Rust examples.",
+                "scope": "counterpart",
+            }
+        ]
+    )
+    AlphaAgent(store=store, llm_provider=conflict_provider).respond(
+        "Actually use Rust examples.",
+        session_id="s1",
+    )
+
+    projection = BeliefProjection(store)
+    active = projection.list_active()
+    assert len(active) == 1
+    assert active[0].id != original_belief.id
+    assert active[0].content == "User prefers Rust examples."
+    assert active[0].supersedes is not None
+    assert active[0].supersedes.id == str(original_belief.id)
+
+    superseded_original = projection.get_by_id(original_belief.id)
+    assert superseded_original is not None
+    assert str(superseded_original.status) == "superseded"
+    assert superseded_original.superseded_by is not None
+    assert superseded_original.superseded_by.id == str(active[0].id)
+
+    events = list(SQLiteEventLog(store).iter())
+    superseded = [event for event in events if event.kind == CognitiveEventKind.BELIEF_SUPERSEDED]
+    assert len(superseded) == 1
+    assert superseded[0].payload["old_belief_id"] == str(original_belief.id)
+    assert superseded[0].payload["new_belief_id"] == str(active[0].id)
+    assert superseded[0].payload["reason"] == "accepted_single_structured_replacement"
+    tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
+    assert tool_output["status"] == "accepted"
+    assert tool_output["user_action"] == "none"
+    assert tool_output["proposal_results"][0]["reason"] == (
+        "accepted_single_structured_replacement"
+    )
 
 
 def test_memory_propose_noops_without_reactive_write_context(tmp_path) -> None:
@@ -178,7 +323,14 @@ def test_memory_propose_noops_without_reactive_write_context(tmp_path) -> None:
         recover_errors=False,
     )
 
-    assert executed[0].result.output == "failed"
+    # The tool cannot infer user asked-to-remember intent without runtime context.
+    # This direct tool invocation is still explicit enough to explain rejection.
+    assert executed[0].result.output == {
+        "status": "rejected",
+        "user_action": "explain_rejection",
+        "message_hint": "Memory proposal rejected: missing_runtime_turn_context.",
+        "proposal_results": [],
+    }
     assert list(SQLiteEventLog(store).iter(kinds=[CognitiveEventKind.MEMORY_PROPOSED])) == []
     assert list(SQLiteEventLog(store).iter(kinds=[CognitiveEventKind.BELIEF_FORMED])) == []
 

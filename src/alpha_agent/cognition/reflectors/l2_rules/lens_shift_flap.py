@@ -45,7 +45,7 @@ def lens_shift_flap(
     return {
         "rule": RULE_NAME,
         "strategy_name": STRATEGY_NAME,
-        "target_stages": ["lens_learning"],
+        "target_domains": ["lens_learning"],
         "payload": {"shift_count": count, "direction": direction},
         "triggered_by_reflection_ids": [],
     }

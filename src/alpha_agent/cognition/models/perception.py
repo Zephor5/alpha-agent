@@ -1,8 +1,8 @@
-"""Stimulus and perception models."""
+"""Perception models."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from alpha_agent.cognition.models._ids import (
@@ -11,32 +11,11 @@ from alpha_agent.cognition.models._ids import (
     Instant,
     IntentMarker,
     PerceptionId,
-    Reference,
     SituationRef,
     SubjectRef,
 )
 from alpha_agent.cognition.models._serialization import dataclass_from_record, dataclass_to_record
 from alpha_agent.cognition.models.enums import StimulusKind
-from alpha_agent.cognition.models.thread import ThreadId
-
-
-@dataclass(frozen=True)
-class Stimulus:
-    """Raw input routed into cognition."""
-
-    kind: StimulusKind
-    source: CounterpartRef | None
-    payload: Any
-    thread_id: ThreadId
-    received_at: Instant
-    source_refs: list[Reference] = field(default_factory=list)
-
-    def to_record(self) -> dict[str, object]:
-        return dataclass_to_record(self)
-
-    @classmethod
-    def from_record(cls, record: dict[str, object]) -> Stimulus:
-        return dataclass_from_record(cls, record)
 
 
 @dataclass(frozen=True)

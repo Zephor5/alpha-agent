@@ -9,26 +9,23 @@ from alpha_agent.cognition.models._ids import (
     CompressedSummary,
     CounterpartRef,
     Instant,
-    JudgmentRef,
     ProcedureRef,
     SituationRef,
     SubjectRef,
 )
 from alpha_agent.cognition.models._serialization import dataclass_from_record, dataclass_to_record
 from alpha_agent.cognition.models.perception import Perception
-from alpha_agent.cognition.models.thread import ThreadId
 
 
 @dataclass(frozen=True)
 class ContextWindow:
-    """Projection view assembled for a thread."""
+    """Projection view assembled for a runtime session."""
 
-    thread_id: ThreadId
+    session_id: str
     counterpart: CounterpartRef | None
     foreground: list[Perception]
     background: CompressedSummary | None
     recalled: list[BeliefRef]
-    recent_judgments: list[JudgmentRef]
     matched_procedures: list[ProcedureRef]
     subject_at: SubjectRef
     situation_at: SituationRef

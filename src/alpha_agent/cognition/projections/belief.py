@@ -21,7 +21,6 @@ from alpha_agent.cognition.models import (
 )
 from alpha_agent.cognition.projections.base import Projection
 from alpha_agent.cognition.search_tokenizer import tokenize_mixed_text
-from alpha_agent.cognition.stages.types import AttentionFocus
 from alpha_agent.cognition.value.profile_derivation import derive_value_profile
 from alpha_agent.state.store import StateStore
 
@@ -158,7 +157,7 @@ def _temporary_store() -> StateStore:
 
 @dataclass(frozen=True)
 class BeliefRecallParams:
-    focus: AttentionFocus
+    entities: tuple[Reference, ...] = ()
     counterpart: Reference | None = None
     include_global: bool = True
     types: frozenset[CognitiveType] | None = None
@@ -221,27 +220,24 @@ class BeliefProjection(Projection):
 
     def recall(
         self,
-        params: BeliefRecallParams | AttentionFocus | object,
+        params: BeliefRecallParams,
         **_: Any,
     ) -> list[Belief]:
-        recall_params = self._coerce_params(params)
-        if recall_params is None:
-            return []
         conditions = ["status = ?"]
         sql_params: list[Any] = ["active"]
 
-        if recall_params.types:
-            placeholders = ",".join("?" for _ in recall_params.types)
+        if params.types:
+            placeholders = ",".join("?" for _ in params.types)
             conditions.append(f"cognitive_type IN ({placeholders})")
-            sql_params.extend(sorted(kind.value for kind in recall_params.types))
+            sql_params.extend(sorted(kind.value for kind in params.types))
 
-        about_clause = self._about_clause(recall_params)
+        about_clause = self._about_clause(params)
         if about_clause is not None:
             clause, clause_params = about_clause
             conditions.append(clause)
             sql_params.extend(clause_params)
 
-        entity_ids = self._focus_entity_ids(recall_params.focus)
+        entity_ids = self._entity_ids(params.entities)
         if entity_ids:
             placeholders = ",".join("?" for _ in entity_ids)
             like_clause = " OR ".join("normalized_content LIKE ?" for _ in entity_ids)
@@ -261,7 +257,7 @@ class BeliefProjection(Projection):
             sql_params.extend(f"%{entity_id}%" for entity_id in entity_ids)
 
         order_by = "held_since ASC, id ASC"
-        if recall_params.counterpart is not None:
+        if params.counterpart is not None:
             order_by = """
                 CASE
                     WHEN EXISTS (
@@ -276,9 +272,9 @@ class BeliefProjection(Projection):
                 held_since ASC,
                 id ASC
             """
-            sql_params.extend([recall_params.counterpart.kind, recall_params.counterpart.id])
+            sql_params.extend([params.counterpart.kind, params.counterpart.id])
 
-        limit = max(1, recall_params.limit)
+        limit = max(1, params.limit)
         query = f"""
             SELECT *
             FROM belief_view
@@ -403,22 +399,6 @@ class BeliefProjection(Projection):
             row = conn.execute("SELECT 1 FROM belief_view LIMIT 1").fetchone()
         return row is not None
 
-    def _coerce_params(
-        self,
-        params: BeliefRecallParams | AttentionFocus | object,
-    ) -> BeliefRecallParams | None:
-        if isinstance(params, BeliefRecallParams):
-            return params
-        if isinstance(params, AttentionFocus):
-            return BeliefRecallParams(
-                focus=params,
-                counterpart=next(
-                    (ref for ref in params.entities if ref.kind == "counterpart"),
-                    None,
-                ),
-            )
-        return None
-
     def _about_clause(self, params: BeliefRecallParams) -> tuple[str, list[Any]] | None:
         if params.counterpart is None:
             if not params.include_global:
@@ -458,8 +438,8 @@ class BeliefProjection(Projection):
             [params.counterpart.kind, params.counterpart.id],
         )
 
-    def _focus_entity_ids(self, focus: AttentionFocus) -> list[str]:
-        return sorted({_normalize_text(ref.id) for ref in focus.entities if ref.kind == "entity"})
+    def _entity_ids(self, entities: Sequence[Reference]) -> list[str]:
+        return sorted({_normalize_text(ref.id) for ref in entities if ref.kind == "entity"})
 
     def _belief_from_payload(self, event: CognitiveEvent) -> Belief | None:
         raw = event.payload.get("belief")

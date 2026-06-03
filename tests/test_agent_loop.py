@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import cast
 
 import pytest
 
+from alpha_agent.cognition.coordinator import LockBusy, LoopAcquireRequest, LoopCoordinator
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
-from alpha_agent.cognition.models import CognitiveEventKind, CounterpartId, counterpart_ref
+from alpha_agent.cognition.models import (
+    SUBJECT_SELF,
+    CognitiveEventKind,
+    CounterpartId,
+    Instant,
+    counterpart_ref,
+)
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.config import LLMContextConfig
 from alpha_agent.llm.base import (
@@ -52,7 +60,7 @@ def test_agent_responds_and_persists_session_messages(tmp_path) -> None:
 
     assert result.session_id == "s1"
     assert result.response == "Mock response: I heard you say: hello."
-    assert result.debug["note"] == "reactive cognition tick enabled; projections are Phase 02 stubs"
+    assert result.debug["note"] == "runtime-owned foreground turn"
     messages = store.list_session_messages("s1")
     assert [message.kind for message in messages] == ["user_message", "assistant_message"]
     assert [message.llm_role for message in messages] == ["user", "assistant"]
@@ -278,14 +286,24 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
     result = agent.respond("use tool", session_id="s1")
 
     assert result.response == "final answer"
+    turn_id = result.debug["turn_id"]
+    assert isinstance(turn_id, str) and turn_id.startswith("turn_")
     assert result.debug["tool_call_count"] == 1
-    assert [message.kind for message in store.list_session_messages("s1")] == [
+    messages = store.list_session_messages("s1")
+    assert [message.kind for message in messages] == [
         "user_message",
         "assistant_message",
         "tool_message",
         "assistant_message",
     ]
-    assert [trace.event_type for trace in store.list_runtime_traces("s1")] == [
+    assert [message.metadata["turn_id"] for message in messages] == [
+        turn_id,
+        turn_id,
+        turn_id,
+        turn_id,
+    ]
+    traces = store.list_runtime_traces("s1")
+    assert [trace.event_type for trace in traces] == [
         "llm.started",
         "llm.completed",
         "tool.started",
@@ -293,10 +311,89 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
         "llm.started",
         "llm.completed",
     ]
-    started_trace = store.list_runtime_traces("s1")[2]
+    assert [trace.metadata["turn_id"] for trace in traces] == [
+        turn_id,
+        turn_id,
+        turn_id,
+        turn_id,
+        turn_id,
+        turn_id,
+    ]
+    started_trace = traces[2]
     assert json.loads(started_trace.content)["arguments"] == {"text": "<trace-safe>"}
     assert started_trace.metadata["call"]["arguments"] == {"text": "<trace-safe>"}
     assert "raw_arguments" not in started_trace.metadata["call"]["metadata"]
+
+    events = list(SQLiteEventLog(store).iter())
+    foreground_events = [
+        event
+        for event in events
+        if event.kind
+        in {
+            CognitiveEventKind.PERCEIVED,
+            CognitiveEventKind.ACTED,
+            CognitiveEventKind.TURN_SOURCES_RECORDED,
+        }
+    ]
+    assert [event.kind for event in foreground_events] == [
+        CognitiveEventKind.PERCEIVED,
+        CognitiveEventKind.ACTED,
+        CognitiveEventKind.TURN_SOURCES_RECORDED,
+    ]
+    assert [event.payload["turn_id"] for event in foreground_events] == [
+        turn_id,
+        turn_id,
+        turn_id,
+    ]
+    assert [event.payload["session_id"] for event in foreground_events] == ["s1", "s1", "s1"]
+    assert set(foreground_events[0].payload) == {
+        "turn_id",
+        "session_id",
+        "stimulus_kind",
+        "source",
+        "from_counterpart",
+        "source_refs",
+        "content_digest",
+        "content_length",
+    }
+    acted = foreground_events[1]
+    source_recorded = foreground_events[2]
+    assert acted.payload["llm_call_ids"] == result.debug["llm_call_ids"]
+    assert acted.payload["llm_trace_ids"] == result.debug["llm_trace_ids"]
+    assert acted.payload["tool_call_ids"] == ["call_1"]
+    assert acted.payload["tool_result_trace_ids"] == [traces[3].id]
+    assert source_recorded.payload["llm_call_ids"] == result.debug["llm_call_ids"]
+    assert source_recorded.payload["llm_trace_ids"] == result.debug["llm_trace_ids"]
+    assert source_recorded.payload["provider_tool_message_ids"] == [
+        messages[1].id,
+        messages[2].id,
+    ]
+    assert source_recorded.payload["provider_tool_trace_ids"] == [traces[3].id]
+
+
+def test_busy_attempt_does_not_allocate_completed_turn_audit(tmp_path) -> None:
+    store = _store(tmp_path)
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        coordinator=_BusyCoordinator(),
+    )
+
+    result = agent.respond("hello", session_id="s1")
+
+    assert result.debug["busy"] is True
+    assert "turn_id" not in result.debug
+    assert store.list_session_messages("s1") == []
+    assert store.list_runtime_traces("s1") == []
+    assert list(
+        SQLiteEventLog(store).iter(
+            kinds=[
+                CognitiveEventKind.PERCEIVED,
+                CognitiveEventKind.ACTED,
+                CognitiveEventKind.TURN_SOURCES_RECORDED,
+            ]
+        )
+    ) == []
 
 
 def test_agent_sends_only_structured_tool_output_to_llm_context(tmp_path) -> None:
@@ -379,7 +476,9 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
         "tool_message",
         "assistant_message",
     ]
-    assert messages[1].metadata == {"tool_call_ids": ["call_recall"]}
+    turn_id = result.debug["turn_id"]
+    assert messages[0].metadata == {"turn_id": turn_id}
+    assert messages[1].metadata == {"turn_id": turn_id, "tool_call_ids": ["call_recall"]}
     assert messages[2].provider_metadata == {"tool_name": MEMORY_RECALL_TOOL_NAME}
     assert json.loads(messages[2].raw_content) == {
         "results": [
@@ -391,6 +490,8 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
         ]
     }
     assert messages[2].metadata["tool_output_kind"] == "json"
+    assert messages[2].metadata["turn_id"] == turn_id
+    assert messages[3].metadata == {"turn_id": turn_id}
     assert [trace.event_type for trace in store.list_runtime_traces("s1")] == [
         "llm.started",
         "llm.completed",
@@ -743,6 +844,16 @@ class _FailingOnceProvider:
         del tools, tool_choice
         self.calls.append(messages)
         raise RuntimeError("provider failed")
+
+
+class _BusyCoordinator(LoopCoordinator):
+    def __init__(self) -> None:
+        super().__init__(SUBJECT_SELF)
+
+    @contextmanager
+    def try_acquire(self, _req: LoopAcquireRequest) -> Iterator[None]:
+        raise LockBusy("background", Instant("2026-01-01T00:00:00+00:00"))
+        yield
 
 
 class _RawMetadataProvider:

@@ -4,9 +4,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 
-from typer.testing import CliRunner
-
-from alpha_agent.cli import app
 from alpha_agent.cognition.coordinator import LoopAcquireRequest
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
@@ -22,25 +19,27 @@ from alpha_agent.cognition.loops import (
 from alpha_agent.cognition.loops.workers import (
     ArchiveExpiredWorker,
     CompressContextWorker,
-    LearnProcedureWorker,
     MergeBeliefsWorker,
-    PromoteJudgmentWorker,
     SummarizeCounterpartWorker,
+    default_workers,
 )
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
     CounterpartId,
     Instant,
     NLStatement,
+    Perception,
+    PerceptionId,
     Procedure,
     ProcedureId,
+    SituationId,
     Step,
-    Stimulus,
     StimulusKind,
     Subject,
-    ThreadId,
     TriggerPattern,
     counterpart_ref,
+    situation_ref,
+    subject_ref,
 )
 from alpha_agent.cognition.projection_runner import ProjectionRunner
 from alpha_agent.cognition.projections.belief import BeliefProjection
@@ -48,7 +47,6 @@ from alpha_agent.cognition.projections.context_window import ContextWindowProjec
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.projections.procedure import ProcedureProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
-from alpha_agent.cognition.stages.perceive import Perceiver
 from alpha_agent.state.store import StateStore
 from tests.cognition.helpers import clock_factory, counterpart_payload, id_factory
 from tests.cognition.test_belief_projection_apply import belief
@@ -84,71 +82,29 @@ def test_merge_beliefs_archives_expired_and_is_idempotent(tmp_path) -> None:
     assert sum(item.emitted for item in second_reports) == 0
 
 
-def test_promote_judgment_and_learn_procedure_are_idempotent(tmp_path) -> None:
-    store, log, projections, emitter = _runtime(tmp_path)
-    for index in range(3):
-        _emit_apply(
-            emitter,
-            projections,
-            CognitiveEventKind.JUDGED,
-            {"tick_id": f"tick-j-{index}", "claim": "User prefers concise plans."},
-        )
-        _emit_apply(
-            emitter,
-            projections,
-            CognitiveEventKind.DECIDED,
-            {
-                "tick_id": f"tick-d-{index}",
-                "action": "respond",
-                "message": "summarize phase status",
-            },
-        )
-        _emit_apply(
-            emitter,
-            projections,
-            CognitiveEventKind.RECEIVED_FEEDBACK,
-            {"tick_id": f"tick-d-{index}", "matched_expected": True},
-        )
+def test_default_workers_exclude_foreground_semantic_workers() -> None:
+    worker_names = {worker.name for worker in default_workers()}
+    config = ConsolidationConfig()
 
-    reports = _run(
-        log,
-        projections,
-        store,
-        [PromoteJudgmentWorker(), LearnProcedureWorker()],
-    )
-    second_reports = _run(
-        log,
-        projections,
-        store,
-        [PromoteJudgmentWorker(), LearnProcedureWorker()],
-    )
-
-    assert len(projections.get_typed(ProcedureProjection).list_active()) == 1
-    active_beliefs = projections.get_typed(BeliefProjection).list_active()
-    assert any(item.content == "User prefers concise plans." for item in active_beliefs)
-    assert sum(item.emitted for item in reports) == 2
-    assert sum(item.emitted for item in second_reports) == 0
+    assert "promote_judgment" not in worker_names
+    assert "learn_procedure" not in worker_names
+    assert not hasattr(config, "judgment_repeat_window")
+    assert not hasattr(config, "judgment_repeat_threshold")
+    assert not hasattr(config, "procedure_success_threshold")
 
 
 def test_compress_context_moves_old_foreground_into_background(tmp_path) -> None:
-    store, log, projections, _emitter = _runtime(tmp_path, context_recent_limit=20)
+    store, log, projections, emitter = _runtime(tmp_path, context_recent_limit=20)
     context = projections.get_typed(ContextWindowProjection)
-    thread_id = ThreadId.from_session("s1")
+    session_id = "s1"
     perception_ids = []
     for index in range(10):
-        event = Perceiver().perceive(
-            Stimulus(
-                kind=StimulusKind.USER_MESSAGE,
-                source=None,
-                payload=f"message-{index}",
-                thread_id=thread_id,
-                received_at=Instant("2026-01-01T00:00:00+00:00"),
-            ),
-            Subject(),
-            emitter=EventEmitter(log),
-            tick_id=f"tick-{index}",
-        ).event
-        context.apply(event)
+        event = _emit_apply(
+            emitter,
+            projections,
+            CognitiveEventKind.PERCEIVED,
+            _perceived_payload(index, session_id),
+        )
         perception_ids.append(event.payload["perception"]["id"])
 
     report = _run(
@@ -158,7 +114,7 @@ def test_compress_context_moves_old_foreground_into_background(tmp_path) -> None
         [CompressContextWorker()],
         config=ConsolidationConfig(context_foreground_max=6, context_absorb_batch=4),
     )[0]
-    window = context.get(thread_id, Subject())
+    window = context.get(session_id, Subject())
 
     assert report.emitted == 1
     assert [item.raw for item in window.foreground] == [
@@ -166,6 +122,7 @@ def test_compress_context_moves_old_foreground_into_background(tmp_path) -> None
     ]
     assert window.background is not None
     event = list(log.iter(kinds=[CognitiveEventKind.CONTEXT_COMPRESSED]))[-1]
+    assert event.payload["session_id"] == session_id
     assert event.payload["absorbed_perception_ids"] == perception_ids[:4]
     with store.connect() as conn:
         row = conn.execute(
@@ -176,7 +133,7 @@ def test_compress_context_moves_old_foreground_into_background(tmp_path) -> None
 
 
 def test_counterpart_digest_supersedes_and_replays(tmp_path) -> None:
-    store, log, projections, emitter = _runtime(tmp_path)
+    store, log, projections, emitter = _runtime(tmp_path, include_context=False)
     counterpart_id = "counterpart:user-a"
     _emit_apply(
         emitter,
@@ -241,7 +198,7 @@ def test_counterpart_digest_supersedes_and_replays(tmp_path) -> None:
     assert _active_digest_ids(rebuilt, counterpart_id) == second_digest
 
 
-def test_checkpoint_persistence_and_cli_dry_run(tmp_path, monkeypatch) -> None:
+def test_checkpoint_persistence(tmp_path) -> None:
     store, _log, _projections, _emitter = _runtime(tmp_path)
     checkpoints = CheckpointStore(store)
     checkpoints.save(
@@ -255,16 +212,8 @@ def test_checkpoint_persistence_and_cli_dry_run(tmp_path, monkeypatch) -> None:
     )
     assert checkpoints.load("merge_beliefs").metadata == {"cursor": "belief:a"}
 
-    db_path = tmp_path / "cli.db"
-    monkeypatch.setenv("ALPHA_DB_PATH", str(db_path))
-    runner = CliRunner()
-    result = runner.invoke(app, ["cognition", "consolidate", "--now", "--dry-run"])
 
-    assert result.exit_code == 0
-    assert "dry_run=true" in result.output
-
-
-def test_cli_dry_run_does_not_mutate_real_db(tmp_path, monkeypatch) -> None:
+def test_worker_dry_run_reports_without_projection_mutation(tmp_path) -> None:
     store, _log, projections, emitter = _runtime(tmp_path)
     first = belief("belief:a", "User prefers Python.", confidence=0.6)
     second = belief("belief:b", "User prefers Python.", confidence=0.9)
@@ -283,19 +232,20 @@ def test_cli_dry_run_does_not_mutate_real_db(tmp_path, monkeypatch) -> None:
             "context_window_view",
             "context_window_background",
             "procedure_view",
-            "cognition_worker_checkpoint",
         ],
     )
 
-    monkeypatch.setenv("ALPHA_DB_PATH", str(store.db_path))
-    result = CliRunner().invoke(
-        app,
-        ["cognition", "consolidate", "--now", "--dry-run"],
+    reports = _run(
+        _log,
+        projections,
+        store,
+        [MergeBeliefsWorker()],
+        config=ConsolidationConfig(dry_run=True),
     )
 
-    assert result.exit_code == 0
     assert _table_counts(store, list(before)) == before
     assert projections.get_typed(BeliefProjection).get_by_id("belief:a").status == "active"
+    assert reports[0].emitted == 1
 
 
 def test_scheduler_tick_gates_workers_and_updates_backlog_cursor(tmp_path) -> None:
@@ -316,7 +266,12 @@ def test_scheduler_tick_gates_workers_and_updates_backlog_cursor(tmp_path) -> No
     assert reports == []
     assert coordinator.acquire_count == 0
 
-    first = _emit_apply(emitter, projections, CognitiveEventKind.JUDGED, {"claim": "one"})
+    first = _emit_apply(
+        emitter,
+        projections,
+        CognitiveEventKind.BELIEF_FORMED,
+        {"belief": belief("belief:scheduler-one", "Scheduler one.").to_record()},
+    )
     reports = scheduler.tick(
         Instant("2026-01-01T00:01:00+00:00"),
         coordinator=coordinator,
@@ -327,7 +282,12 @@ def test_scheduler_tick_gates_workers_and_updates_backlog_cursor(tmp_path) -> No
     assert reports == []
     assert coordinator.acquire_count == 0
 
-    second = _emit_apply(emitter, projections, CognitiveEventKind.JUDGED, {"claim": "two"})
+    second = _emit_apply(
+        emitter,
+        projections,
+        CognitiveEventKind.BELIEF_FORMED,
+        {"belief": belief("belief:scheduler-two", "Scheduler two.").to_record()},
+    )
     reports = scheduler.tick(
         Instant("2026-01-01T00:02:00+00:00"),
         coordinator=coordinator,
@@ -340,7 +300,12 @@ def test_scheduler_tick_gates_workers_and_updates_backlog_cursor(tmp_path) -> No
     checkpoint = CheckpointStore(store).load("counting")
     assert checkpoint.last_processed_event_id == second.id
 
-    _emit_apply(emitter, projections, CognitiveEventKind.JUDGED, {"claim": "three"})
+    _emit_apply(
+        emitter,
+        projections,
+        CognitiveEventKind.BELIEF_FORMED,
+        {"belief": belief("belief:scheduler-three", "Scheduler three.").to_record()},
+    )
     reports = scheduler.tick(
         Instant("2026-01-01T00:03:00+00:00"),
         coordinator=coordinator,
@@ -448,7 +413,7 @@ def test_summarize_counterpart_resumes_after_checkpoint_cursor(tmp_path) -> None
 
 
 def test_procedure_projection_rebuilds_from_event_log(tmp_path) -> None:
-    store, log, _projections, emitter = _runtime(tmp_path)
+    store, log, _projections, emitter = _runtime(tmp_path, include_context=False)
     procedure = Procedure(
         id=ProcedureId("procedure:test"),
         trigger=TriggerPattern("respond:summarize"),
@@ -471,7 +436,7 @@ def test_procedure_projection_rebuilds_from_event_log(tmp_path) -> None:
     assert rebuilt.get("procedure:test") == procedure
 
 
-def _runtime(tmp_path, *, context_recent_limit: int = 12):
+def _runtime(tmp_path, *, context_recent_limit: int = 12, include_context: bool = True):
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
     log = SQLiteEventLog(store)
@@ -479,7 +444,8 @@ def _runtime(tmp_path, *, context_recent_limit: int = 12):
     projections.register(BeliefProjection(store))
     projections.register(CounterpartProjection(store))
     projections.register(ProcedureProjection(store))
-    projections.register(ContextWindowProjection(log, recent_limit=context_recent_limit))
+    if include_context:
+        projections.register(ContextWindowProjection(log, recent_limit=context_recent_limit))
     emitter = EventEmitter(log, id_factory=id_factory(), clock=clock_factory())
     return store, log, projections, emitter
 
@@ -510,6 +476,31 @@ def _emit_apply(emitter, projections, kind, payload):
         if event.kind in projection.handles:
             projection.apply(event)
     return event
+
+
+def _perceived_payload(index: int, session_id: str) -> dict[str, object]:
+    raw = f"message-{index}"
+    perception = Perception(
+        id=PerceptionId(f"perception:{session_id}:{index}"),
+        source_kind=StimulusKind.USER_MESSAGE,
+        from_counterpart=None,
+        raw=raw,
+        surface_intent=[],
+        raised_entities=[],
+        subject=subject_ref(Subject().id),
+        situation=situation_ref(SituationId(f"situation:{session_id}:{index}")),
+        received_at=Instant("2026-01-01T00:00:00+00:00"),
+    )
+    return {
+        "turn_id": f"turn:{session_id}:{index}",
+        "session_id": session_id,
+        "stimulus_kind": StimulusKind.USER_MESSAGE.value,
+        "source": {},
+        "source_refs": [],
+        "content_digest": f"digest:{session_id}:{index}",
+        "content_length": len(raw),
+        "perception": perception.to_record(),
+    }
 
 
 def _active_digest_ids(projection: BeliefProjection, counterpart_id: str) -> list[str]:
@@ -561,10 +552,10 @@ class _CountingWorker:
     trigger = ScheduleTrigger(
         min_interval=timedelta(seconds=0),
         max_interval=None,
-        watches=frozenset({CognitiveEventKind.JUDGED}),
+        watches=frozenset({CognitiveEventKind.BELIEF_FORMED}),
         min_new_events=2,
     )
-    handles_event_kinds = frozenset({CognitiveEventKind.JUDGED})
+    handles_event_kinds = frozenset({CognitiveEventKind.BELIEF_FORMED})
 
     def run(
         self,
@@ -591,7 +582,7 @@ class _SlowIntervalWorker(_CountingWorker):
     trigger = ScheduleTrigger(
         min_interval=timedelta(hours=6),
         max_interval=None,
-        watches=frozenset({CognitiveEventKind.JUDGED}),
+        watches=frozenset({CognitiveEventKind.BELIEF_FORMED}),
         min_new_events=99,
     )
 

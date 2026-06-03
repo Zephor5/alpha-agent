@@ -28,7 +28,7 @@ def _source(
     chat_id: str = "chat-1",
     chat_type: str = "group",
     user_id: str = "user-1",
-    thread_id: str | None = None,
+    platform_thread_id: str | None = None,
     message_id: str | None = None,
 ) -> ConversationSource:
     return ConversationSource(
@@ -37,7 +37,7 @@ def _source(
         chat_type=chat_type,
         user_id=user_id,
         user_name="Ada",
-        thread_id=thread_id,
+        platform_thread_id=platform_thread_id,
         message_id=message_id,
         metadata={"tenant": "personal"},
     )
@@ -131,7 +131,7 @@ class _FakeAdapter(PlatformAdapter):
 
 
 def test_session_key_generation_modes_are_explicit_and_scoped() -> None:
-    source = _source(thread_id="thread-9")
+    source = _source(platform_thread_id="thread-9")
 
     dm = generate_session_key(source, SessionMode.DM)
     group_shared = generate_session_key(source, SessionMode.GROUP_SHARED)
@@ -146,7 +146,7 @@ def test_session_key_generation_modes_are_explicit_and_scoped() -> None:
     assert "thread_per_user" in thread_per_user
     assert len({dm, group_shared, group_per_user, thread, thread_per_user}) == 5
 
-    same_group_other_user = _source(user_id="user-2", thread_id="thread-9")
+    same_group_other_user = _source(user_id="user-2", platform_thread_id="thread-9")
     assert generate_session_key(source, SessionMode.GROUP_SHARED) == generate_session_key(
         same_group_other_user,
         SessionMode.GROUP_SHARED,
@@ -160,7 +160,7 @@ def test_session_key_generation_modes_are_explicit_and_scoped() -> None:
 def test_session_mapping_is_persisted_and_reused(tmp_path: Path) -> None:
     store = _store(tmp_path)
     gateway_sessions = GatewaySessionStore(store)
-    source = _source(thread_id="thread-9")
+    source = _source(platform_thread_id="thread-9")
 
     first = gateway_sessions.get_or_create(source, SessionMode.THREAD_PER_USER)
     second = gateway_sessions.get_or_create(source, SessionMode.THREAD_PER_USER)
@@ -171,7 +171,7 @@ def test_session_mapping_is_persisted_and_reused(tmp_path: Path) -> None:
     assert second.source_context["session_mode"] == "thread_per_user"
     assert second.source_context["chat_id"] == "chat-1"
     assert second.source_context["user_id"] == "user-1"
-    assert second.source_context["thread_id"] == "thread-9"
+    assert second.source_context["platform_thread_id"] == "thread-9"
 
 
 def test_group_shared_session_mapping_keeps_source_context(tmp_path: Path) -> None:
@@ -189,7 +189,7 @@ def test_group_shared_session_mapping_keeps_source_context(tmp_path: Path) -> No
 def test_session_mapping_concurrent_creation_reuses_one_mapping(tmp_path: Path) -> None:
     store = _store(tmp_path)
     gateway_sessions = GatewaySessionStore(store)
-    source = _source(thread_id="thread-9")
+    source = _source(platform_thread_id="thread-9")
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(
@@ -207,10 +207,10 @@ def test_session_mapping_concurrent_creation_reuses_one_mapping(tmp_path: Path) 
     assert row["count"] == 1
 
 
-def test_thread_session_mode_requires_thread_id() -> None:
-    source = _source(thread_id=None)
+def test_thread_session_mode_requires_platform_thread_id() -> None:
+    source = _source(platform_thread_id=None)
 
-    with pytest.raises(ValueError, match="thread_id is required"):
+    with pytest.raises(ValueError, match="platform_thread_id is required"):
         generate_session_key(source, SessionMode.THREAD)
 
 

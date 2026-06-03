@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS strategy_view (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
-    target_stages TEXT NOT NULL DEFAULT '[]',
+    target_domains TEXT NOT NULL DEFAULT '[]',
     for_counterpart TEXT,
     set_by TEXT NOT NULL,
     set_at TEXT NOT NULL,
@@ -56,14 +56,14 @@ def strategy_applies_to_counterpart(
     )
 
 
-def strategy_is_active_for_stage(
+def strategy_is_active_for_domain(
     strategies: list[StrategyOverride],
     name: str,
-    stage: str,
+    domain: str,
 ) -> bool:
     return any(
         strategy.name == name
-        and (not strategy.target_stages or stage in strategy.target_stages)
+        and (not strategy.target_domains or domain in strategy.target_domains)
         for strategy in strategies
     )
 
@@ -115,7 +115,7 @@ class StrategyProjection(Projection):
         *,
         now: Instant | str | None = None,
         counterpart: CounterpartRef | None = None,
-        stage: str | None = None,
+        domain: str | None = None,
     ) -> list[StrategyOverride]:
         current = str(now or utc_now_iso())
         with self.store.connect() as conn:
@@ -134,9 +134,11 @@ class StrategyProjection(Projection):
             strategies = [
                 item for item in strategies if strategy_applies_to_counterpart(item, counterpart)
             ]
-        if stage is not None:
+        if domain is not None:
             strategies = [
-                item for item in strategies if not item.target_stages or stage in item.target_stages
+                item
+                for item in strategies
+                if not item.target_domains or domain in item.target_domains
             ]
         return strategies
 
@@ -151,8 +153,8 @@ class StrategyProjection(Projection):
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
-    def is_active(self, name: str, *, stage: str | None = None) -> bool:
-        return any(item.name == name for item in self.active(stage=stage))
+    def is_active(self, name: str, *, domain: str | None = None) -> bool:
+        return any(item.name == name for item in self.active(domain=domain))
 
     def expire_due(self, now: Instant | str) -> list[StrategyOverride]:
         with self.store.connect() as conn:
@@ -193,13 +195,13 @@ class StrategyProjection(Projection):
             conn.execute(
                 """
                 INSERT INTO strategy_view
-                    (id, name, payload, target_stages, for_counterpart, set_by, set_at,
+                    (id, name, payload, target_domains, for_counterpart, set_by, set_at,
                      valid_until, status, last_event_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     payload = excluded.payload,
-                    target_stages = excluded.target_stages,
+                    target_domains = excluded.target_domains,
                     for_counterpart = excluded.for_counterpart,
                     set_by = excluded.set_by,
                     set_at = excluded.set_at,
@@ -211,7 +213,7 @@ class StrategyProjection(Projection):
                     str(strategy.id),
                     strategy.name,
                     _dumps(strategy.payload),
-                    _dumps(strategy.target_stages),
+                    _dumps(strategy.target_domains),
                     strategy.for_counterpart.id if strategy.for_counterpart else None,
                     strategy.set_by,
                     str(strategy.set_at),
@@ -267,7 +269,7 @@ class StrategyProjection(Projection):
             id=StrategyId(row["id"]),
             name=row["name"],
             payload=_loads(row["payload"], {}),
-            target_stages=_loads(row["target_stages"], []),
+            target_domains=_loads(row["target_domains"], []),
             for_counterpart=counterpart,
             set_by=row["set_by"],
             set_at=Instant(row["set_at"]),

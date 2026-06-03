@@ -3,10 +3,10 @@
 Alpha Agent is a personal agent runtime for rebuilding cognition from first
 principles. The current baseline is intentionally small and controllable: it
 runs from the CLI, stores session-level and cognition state in SQLite, drives
-successful turns through a Reactive cognition tick, and uses either a mock LLM
-or a configured provider (`openai-compatible`, `deepseek`, or `codex`). Local
-`ask` and `chat` turns are daemon-owned, and the runtime has an explicit bounded
-LLM/tool loop with an optional Tavily-backed `web_search` tool.
+successful turns through a daemon-owned LLM/tool loop, and uses either a mock
+LLM or a configured provider (`openai-compatible`, `deepseek`, or `codex`).
+Local `ask` and `chat` turns are daemon-owned, and the runtime has an explicit
+bounded LLM/tool loop with an optional Tavily-backed `web_search` tool.
 
 This is not a LangChain, LangGraph, LlamaIndex, AutoGen, CrewAI, or similar
 framework wrapper. The goal is to own the execution flow directly.
@@ -19,9 +19,9 @@ access, session routing, status reporting, and local operations. The intent is
 usability parity where it matters for daily use, not internal design parity.
 
 The core agent runtime remains Alpha's own design: explicit turn execution,
-SQLite-backed state, Reactive stage orchestration, and direct provider/tool
-wiring. Hermes' plugin/provider/gateway implementation is treated as reference
-material for integration decisions, not as code to copy wholesale.
+SQLite-backed state, turn-owned cognition audit/projection hooks, and direct
+provider/tool wiring. Hermes' plugin/provider/gateway implementation is treated
+as reference material for integration decisions, not as code to copy wholesale.
 See `docs/todo/TODO.md` for the current Hermes-informed roadmap.
 
 ## Cognition Status
@@ -37,28 +37,29 @@ counterpart directly, and the first platform user observed through a gateway
 claims the same counterpart. Later distinct platform users receive their own
 counterpart identities.
 
-The Reactive tick is wired into `AlphaAgent.respond()`. A successful user turn
-flows through Perceive, Attend, Interpret, Judge, Decide, Act, Feedback,
-Reflect, and Revise, with a shared `tick_id` in the cognitive event log. The
-Reactive loop uses non-blocking acquisition: when the single-subject coordinator
-is busy, `respond()` returns a busy result immediately, does not preempt the
-current holder, and does not write cognitive events or conversation messages for
-the rejected stimulus.
+`AlphaAgent.respond()` owns the foreground turn. A successful user turn
+allocates one runtime turn identity, persists the user message, runs the bounded
+provider/tool loop, persists assistant and tool messages, and records cognition
+audit events that projections and workers can materialize later. The foreground
+path uses non-blocking acquisition: when the single-subject coordinator is busy,
+`respond()` returns a busy result immediately, does not preempt the current
+holder, and does not write cognitive events or conversation messages for the
+rejected stimulus.
 
 Key write-side cognition events are validated before append for the payload
 fields consumed by projections and consolidation workers. Successful
 `AlphaAgent.respond()` turns also record session-source linkage: `perceived`
 events carry the user source message id, and a `turn_sources_recorded` event
-links the tick to the persisted assistant, provider tool messages, and runtime
-trace ids.
+links the runtime turn to the persisted assistant, provider tool messages, and
+runtime trace ids.
 
-The Reactive Effector now renders a `CognitionView` with `TextChatRenderer` and
-feeds the rendered prompt frame into AlphaAgent's existing LLM/tool loop. In
-daemon-owned turns, provider-returned tool calls are persisted as assistant
-`tool_calls` and matching tool messages, executed by `ToolExecutor`, bounded by
-`max_tool_iterations` and `max_llm_rounds`, and finalized with `tool_choice=none`
-when a limit is reached. The old `runtime/prompt_builder.py` path has been
-removed.
+The foreground runtime assembles prompt messages from session history, stable
+counterpart profile snapshots, and compact context maintenance, then feeds them
+into AlphaAgent's LLM/tool loop. In daemon-owned turns, provider-returned tool
+calls are persisted as assistant `tool_calls` and matching tool messages,
+executed by `ToolExecutor`, bounded by `max_tool_iterations` and
+`max_llm_rounds`, and finalized with `tool_choice=none` when a limit is reached.
+The old `runtime/prompt_builder.py` path has been removed.
 
 Stable counterpart profile context is selected from counterpart digest beliefs
 once per ordinary session and rendered near the start of the prompt when
@@ -74,18 +75,16 @@ or evidence.
 
 Memory writes use the separate `memory_propose` proposal path for explicit
 long-term preferences, constraints, procedures, and corrections during a
-Reactive turn. Accepted low-risk proposals emit `memory_proposed`, then
-`belief_formed`, and apply immediately to `belief_view`; pending or rejected
-proposals remain audit-only.
+runtime turn. Accepted low-risk proposals emit `memory_proposed`, then
+`belief_formed` or `belief_superseded`, and apply immediately to `belief_view`;
+pending or rejected proposals remain audit-only.
 
 Beliefs are materialized in SQLite and recallable across sessions through a
 deterministic projection over cognition events. Foreground context is stored in
-`context_window_view` as thread-local perception IDs, anchors, and rebuildable
-window state. Internal cognition-stage belief recall is still joined into
-`ContextWindow.recalled` during the Reactive tick for interpretation and
-judgment, while model-facing dynamic lookup goes through `memory_recall`. Every
-tick emits a `reflected` event, with rule findings materialized into
-`reflection_view`.
+`context_window_view` as session-scoped perception IDs, anchors, and rebuildable
+window state. Model-facing dynamic lookup goes through `memory_recall`, while
+stable profile context and compact session context are assembled before the
+provider call. Concrete audit findings are materialized into `reflection_view`.
 
 Deterministic consolidation is available through a synchronous `run_once`: it
 merges equivalent beliefs, archives expired beliefs, learns minimal procedures,
@@ -98,11 +97,11 @@ consolidation worker can nudge lens sensitivity from repeated resolved
 tradeoffs.
 
 Temporary strategy overrides are stored in `strategy_view`: L2 rules can emit
-`strategy_changed`, expired strategies are cleared by consolidation, and
-Reactive stages honor the implemented strategy names. The Drive Loop stores
-event-sourced goals in `goal_view` and exposes a disabled-by-default synchronous
-manual loop that turns one eligible active goal into a cognition-thread
-`self_signal`. The L3 reflector deterministically aggregates long-window
+`strategy_changed`, expired strategies are cleared by consolidation, and the
+prompt renderer surfaces implemented strategy reminders to the foreground
+runtime. The Drive Loop stores event-sourced goals in `goal_view` and exposes a
+disabled-by-default synchronous manual loop that can enqueue one eligible active
+goal as a self-signal. The L3 reflector deterministically aggregates long-window
 cognition history into `Subject.self_model` and materializes it in
 `subject_view`.
 
@@ -301,9 +300,6 @@ env_passthrough = []
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300
-judgment_repeat_window = 20
-judgment_repeat_threshold = 3
-procedure_success_threshold = 3
 context_foreground_max = 8
 context_absorb_batch = 4
 context_summary_chars = 480
@@ -486,7 +482,7 @@ The current SQLite state baseline is deliberately narrow:
   beliefs, with deterministic recall across sessions.
 - `belief_entity_index` and `belief_about_index`: lookup indexes for belief
   entity/about references.
-- `context_window_view`: materialized view for thread-local foreground
+- `context_window_view`: materialized view for session-scoped foreground
   ContextWindow state, including perception IDs and anchors.
 - `context_window_background`: deterministic background summaries for compressed
   foreground context.
@@ -499,17 +495,17 @@ The current SQLite state baseline is deliberately narrow:
 - `cognition_worker_checkpoint`: consolidation worker progress.
 - `subject_value_lens`: current subject ValueLens priority and sensitivity.
 
-Successful user turns now enter the Reactive tick before producing a response.
-BeliefProjection, ContextWindowProjection with background compression,
-ReflectionProjection, ProcedureProjection, and renderer-driven prompt assembly
-are now in place. Subject ValueLens persistence, deterministic conflict
-resolution, queued conflict consumption, and temporary strategy overrides are
-also in place. GoalProjection and manual DriveLoop self-signals are in place.
-SubjectProjection now persists the L3 SelfModel from `self_model_updated`.
-The explicit tool execution subsystem is also in place, with `memory_propose`
-and `memory_recall` always registered, `web_search` registered when Tavily
-credentials are configured, and `bash` registered only when
-`tools.bash.enabled=true`.
+Successful user turns now run through the foreground LLM/tool loop before
+cognition audit records and projections are finalized. BeliefProjection,
+ContextWindowProjection with background compression, ReflectionProjection,
+ProcedureProjection, and renderer-driven prompt assembly are now in place.
+Subject ValueLens persistence, deterministic conflict resolution, queued
+conflict consumption, and temporary strategy overrides are also in place.
+GoalProjection and manual DriveLoop self-signals are in place. SubjectProjection
+now persists the L3 SelfModel from `self_model_updated`. The explicit tool
+execution subsystem is also in place, with `memory_propose` and `memory_recall`
+always registered, `web_search` registered when Tavily credentials are
+configured, and `bash` registered only when `tools.bash.enabled=true`.
 Semantic strategy/lens diff remains pending.
 
 ## Current Limitations

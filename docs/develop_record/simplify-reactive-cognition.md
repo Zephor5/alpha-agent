@@ -1,10 +1,16 @@
 # Simplify Reactive Cognition Pipeline
 
 ## Status
-Proposed
+Completed migration record
 
 ## Date
 2026-06-02
+
+## Completion Note
+This file is retained as the completed migration specification and historical
+acceptance checklist for the simplification refactor. Old foreground pipeline
+terms below describe what was removed or migrated; they are not the active
+runtime architecture.
 
 ## Objective
 Remove the current reactive cognition pipeline as a behavior-driving path. Keep cognition useful by narrowing it to durable responsibilities: turn audit, projections, memory/tool state transitions, and background consolidation.

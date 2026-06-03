@@ -4,22 +4,22 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from alpha_agent.cognition.controller import CognitiveController, default_projection_registry
 from alpha_agent.cognition.coordinator import LockBusy, LoopAcquireRequest, LoopCoordinator
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.goals import GoalRegistry
 from alpha_agent.cognition.loops import DriveConfig, DriveLoop
-from alpha_agent.cognition.models import CognitiveEventKind, GoalId, Instant, StimulusKind
+from alpha_agent.cognition.models import CognitiveEventKind, GoalId, Instant
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.goal import GoalProjection
+from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.llm.mock import MockLLMProvider
+from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.default import build_tool_registry
 from tests.cognition.helpers import clock_factory, id_factory
 
 
-def test_drive_loop_triggers_reactive_self_signal_and_updates_goal_progress(
+def test_drive_loop_triggers_runtime_self_signal_turn_and_updates_goal_progress(
     tmp_path: Path,
 ) -> None:
     store, log, emitter, loop = _drive_runtime(tmp_path, enabled=False)
@@ -40,13 +40,24 @@ def test_drive_loop_triggers_reactive_self_signal_and_updates_goal_progress(
     perceived = [
         event for event in events if event.kind == CognitiveEventKind.PERCEIVED
     ][-1]
+    messages = store.list_session_messages("internal:goal:goal:pending")
     goal = loop.projections.get_typed(GoalProjection).get("goal:pending")
+    linked = [event for event in events if str(event.id) in report.linked_event_ids]
 
     assert report.triggered is True
     assert str(report.selected_goal_id) == "goal:pending"
-    assert perceived.payload["stimulus_kind"] == StimulusKind.SELF_SIGNAL.value
-    assert perceived.payload["thread_id"]["kind"] == "cognition"
-    assert perceived.payload["thread_id"]["key"] == "subject:agent:self:topic:goal:pending"
+    assert [message.kind for message in messages] == ["user_message", "assistant_message"]
+    assert messages[0].raw_content.startswith("[self_signal]")
+    assert "goal_id: goal:pending" in messages[0].raw_content
+    assert perceived.payload["stimulus_kind"] == "self_signal"
+    assert perceived.payload["session_id"] == "internal:goal:goal:pending"
+    assert perceived.payload["turn_id"]
+    assert [event.kind for event in linked] == [
+        CognitiveEventKind.PERCEIVED,
+        CognitiveEventKind.ACTED,
+        CognitiveEventKind.TURN_SOURCES_RECORDED,
+        CognitiveEventKind.GOAL_PROGRESSED,
+    ]
     assert goal is not None
     assert goal.last_drive_at is not None
     assert any(event.kind == CognitiveEventKind.GOAL_PROGRESSED for event in events)
@@ -93,11 +104,11 @@ def test_drive_loop_disabled_by_default_but_force_runs(tmp_path: Path) -> None:
     assert forced.triggered is True
 
 
-def test_drive_loop_drops_self_signal_when_reactive_is_busy(tmp_path: Path) -> None:
+def test_drive_loop_drops_self_signal_when_runtime_turn_is_busy(tmp_path: Path) -> None:
     store, log, emitter, loop = _drive_runtime(
         tmp_path,
         enabled=True,
-        coordinator=_ReactiveBusyCoordinator(),
+        coordinator=_RuntimeBusyCoordinator(),
     )
     registry = GoalRegistry(log, emitter=emitter, projection=GoalProjection(store))
     registry.set_goal(description="retry later", goal_id=GoalId("goal:retry"))
@@ -108,7 +119,8 @@ def test_drive_loop_drops_self_signal_when_reactive_is_busy(tmp_path: Path) -> N
 
     assert report.triggered is False
     assert report.dropped is True
-    assert report.skipped_reason == "reactive_busy"
+    assert report.skipped_reason == "runtime_turn_busy"
+    assert store.list_session_messages("internal:goal:goal:retry") == []
     assert [
         event for event in events if event.kind == CognitiveEventKind.PERCEIVED
     ] == []
@@ -135,20 +147,20 @@ def _drive_runtime(
     store.initialize()
     log = SQLiteEventLog(store)
     emitter = EventEmitter(log, id_factory=id_factory("evt"), clock=clock_factory())
-    projections = default_projection_registry(log)
+    projections = ProjectionRegistry()
+    projections.register(GoalProjection(store, event_log=log, auto_rebuild=True))
     coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
-    controller = CognitiveController(
-        log,
-        projections,
-        llm=MockLLMProvider(),
-        tools=build_tool_registry(),
-        emitter=emitter,
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=MockLLMProvider(),
+        event_log=log,
+        coordinator=coordinator,
     )
     clock = _sequence_clock(now_values or ["2026-01-01T00:00:10+00:00"])
     loop = DriveLoop(
         log=log,
         projections=projections,
-        controller=controller,
+        runtime_turn_runner=agent,
         coordinator=coordinator,
         emitter=emitter,
         config=DriveConfig(
@@ -160,14 +172,14 @@ def _drive_runtime(
     return store, log, emitter, loop
 
 
-class _ReactiveBusyCoordinator(LoopCoordinator):
+class _RuntimeBusyCoordinator(LoopCoordinator):
     def __init__(self) -> None:
         super().__init__(SUBJECT_SELF)
 
     @contextmanager
     def try_acquire(self, req: LoopAcquireRequest) -> Iterator[None]:
-        if req.loop_name == "reactive":
-            raise LockBusy("reactive", Instant("2026-01-01T00:00:00+00:00"))
+        if req.loop_name == "runtime_turn":
+            raise LockBusy("runtime_turn", Instant("2026-01-01T00:00:00+00:00"))
         with super().try_acquire(req):
             yield
 

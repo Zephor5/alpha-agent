@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS gateway_session_mappings (
     chat_id TEXT NOT NULL,
     chat_type TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    thread_id TEXT,
+    platform_thread_id TEXT,
     session_mode TEXT NOT NULL,
     session_key TEXT NOT NULL UNIQUE,
     session_id TEXT NOT NULL,
@@ -210,12 +210,10 @@ USING fts5(
 );
 
 CREATE TABLE IF NOT EXISTS context_window_view (
-    thread_id TEXT PRIMARY KEY,
-    thread_kind TEXT NOT NULL,
+    session_id TEXT PRIMARY KEY,
     counterpart_id TEXT,
     foreground_ids TEXT NOT NULL DEFAULT '[]',
     anchored_ids TEXT NOT NULL DEFAULT '[]',
-    recent_judgment_ids TEXT NOT NULL DEFAULT '[]',
     matched_procedure_ids TEXT NOT NULL DEFAULT '[]',
     background_summary_id TEXT,
     last_event_id TEXT NOT NULL,
@@ -223,13 +221,11 @@ CREATE TABLE IF NOT EXISTS context_window_view (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ctx_window_counterpart
-    ON context_window_view(counterpart_id, thread_kind);
-CREATE INDEX IF NOT EXISTS idx_ctx_window_kind
-    ON context_window_view(thread_kind);
+    ON context_window_view(counterpart_id);
 
 CREATE TABLE IF NOT EXISTS context_window_background (
     id TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     summary TEXT NOT NULL,
     derived_from_perception_ids TEXT NOT NULL DEFAULT '[]',
     preserved_anchors TEXT NOT NULL DEFAULT '[]',
@@ -237,12 +233,12 @@ CREATE TABLE IF NOT EXISTS context_window_background (
     created_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_ctx_bg_thread_time
-    ON context_window_background(thread_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ctx_bg_session_time
+    ON context_window_background(session_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS reflection_view (
     id TEXT PRIMARY KEY,
-    tick_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
     level TEXT NOT NULL DEFAULT 'L1',
     kind TEXT NOT NULL,
     severity TEXT NOT NULL,
@@ -262,7 +258,7 @@ CREATE TABLE IF NOT EXISTS strategy_view (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     payload TEXT NOT NULL DEFAULT '{}',
-    target_stages TEXT NOT NULL DEFAULT '[]',
+    target_domains TEXT NOT NULL DEFAULT '[]',
     for_counterpart TEXT,
     set_by TEXT NOT NULL,
     set_at TEXT NOT NULL,

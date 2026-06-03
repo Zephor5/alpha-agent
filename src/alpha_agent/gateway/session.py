@@ -87,7 +87,7 @@ class GatewaySessionStore:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO gateway_session_mappings
-                    (id, platform, chat_id, chat_type, user_id, thread_id, session_mode,
+                    (id, platform, chat_id, chat_type, user_id, platform_thread_id, session_mode,
                      session_key, session_id, source_context, created_at, updated_at, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
@@ -97,7 +97,7 @@ class GatewaySessionStore:
                     _norm_required(source.chat_id, "chat_id"),
                     source.chat_type.strip().lower(),
                     _norm_required(source.user_id, "user_id"),
-                    _norm_optional(source.thread_id),
+                    _norm_optional(source.platform_thread_id),
                     mode.value,
                     session_key,
                     session_id,
@@ -258,7 +258,7 @@ def _session_components(source: ConversationSource, mode: SessionMode) -> dict[s
     platform = _norm_required(source.platform, "platform").lower()
     chat_id = _norm_required(source.chat_id, "chat_id")
     user_id = _norm_required(source.user_id, "user_id")
-    thread_id = _norm_optional(source.thread_id)
+    platform_thread_id = _norm_optional(source.platform_thread_id)
 
     if mode == SessionMode.DM:
         return {"platform": platform, "user_id": user_id}
@@ -267,16 +267,20 @@ def _session_components(source: ConversationSource, mode: SessionMode) -> dict[s
     if mode == SessionMode.GROUP_PER_USER:
         return {"platform": platform, "chat_id": chat_id, "user_id": user_id}
     if mode == SessionMode.THREAD:
-        if thread_id is None:
-            raise ValueError("thread_id is required for thread session mode")
-        return {"platform": platform, "chat_id": chat_id, "thread_id": thread_id}
-    if mode == SessionMode.THREAD_PER_USER:
-        if thread_id is None:
-            raise ValueError("thread_id is required for thread_per_user session mode")
+        if platform_thread_id is None:
+            raise ValueError("platform_thread_id is required for thread session mode")
         return {
             "platform": platform,
             "chat_id": chat_id,
-            "thread_id": thread_id,
+            "platform_thread_id": platform_thread_id,
+        }
+    if mode == SessionMode.THREAD_PER_USER:
+        if platform_thread_id is None:
+            raise ValueError("platform_thread_id is required for thread_per_user session mode")
+        return {
+            "platform": platform,
+            "chat_id": chat_id,
+            "platform_thread_id": platform_thread_id,
             "user_id": user_id,
         }
     raise ValueError(f"unsupported session mode: {mode}")
@@ -290,14 +294,14 @@ def _source_context(
     platform = _norm_required(source.platform, "platform").lower()
     chat_id = _norm_required(source.chat_id, "chat_id")
     user_id = _norm_required(source.user_id, "user_id")
-    thread_id = _norm_optional(source.thread_id)
+    platform_thread_id = _norm_optional(source.platform_thread_id)
     return {
         "platform": platform,
         "chat_id": chat_id,
         "chat_type": source.chat_type.strip().lower(),
         "user_id": user_id,
         "user_name": source.user_name,
-        "thread_id": thread_id,
+        "platform_thread_id": platform_thread_id,
         "session_mode": mode.value,
         "session_key": session_key,
         "external_metadata": dict(source.metadata),
@@ -318,7 +322,7 @@ def _fallback_fingerprint(message: InboundMessage) -> str:
     payload = {
         "platform": _norm_required(source.platform, "platform").lower(),
         "chat_id": _norm_required(source.chat_id, "chat_id"),
-        "thread_id": _norm_optional(source.thread_id),
+        "platform_thread_id": _norm_optional(source.platform_thread_id),
         "user_id": _norm_required(source.user_id, "user_id"),
         "message_type": message.message_type.strip().lower(),
         "text": " ".join(message.text.split()).casefold(),

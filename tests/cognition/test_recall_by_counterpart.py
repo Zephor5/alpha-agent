@@ -3,7 +3,6 @@ from __future__ import annotations
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import CognitiveEventKind
 from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefRecallParams
-from alpha_agent.cognition.stages.types import AttentionFocus
 from alpha_agent.state.store import StateStore
 from tests.cognition.helpers import clock_factory, emit, id_factory
 from tests.cognition.test_belief_projection_apply import belief, counterpart_a, counterpart_b
@@ -33,7 +32,6 @@ def test_recall_scopes_to_current_counterpart_and_global_beliefs(tmp_path) -> No
 
     recalled = projection.recall(
         BeliefRecallParams(
-            focus=AttentionFocus(entities=[], salient_claims=[], value_signals={}),
             counterpart=counterpart_a(),
         )
     )

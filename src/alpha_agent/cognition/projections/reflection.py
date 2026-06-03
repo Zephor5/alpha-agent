@@ -15,7 +15,7 @@ from alpha_agent.state.store import StateStore
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS reflection_view (
     id TEXT PRIMARY KEY,
-    tick_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
     level TEXT NOT NULL DEFAULT 'L1',
     kind TEXT NOT NULL,
     severity TEXT NOT NULL,
@@ -65,7 +65,7 @@ class ReflectionProjection(Projection):
     def apply(self, event: CognitiveEvent) -> None:
         if event.kind not in self.handles:
             return
-        tick_id = str(event.payload.get("tick_id") or "")
+        turn_id = str(event.payload.get("turn_id") or "")
         records = event.payload.get("reflections") or []
         if not isinstance(records, list):
             return
@@ -78,11 +78,11 @@ class ReflectionProjection(Projection):
                 conn.execute(
                     """
                     INSERT INTO reflection_view
-                        (id, tick_id, level, kind, severity, target_kind, target_id,
+                        (id, turn_id, level, kind, severity, target_kind, target_id,
                          finding, suggested_remedy, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
-                        tick_id = excluded.tick_id,
+                        turn_id = excluded.turn_id,
                         level = excluded.level,
                         kind = excluded.kind,
                         severity = excluded.severity,
@@ -94,7 +94,7 @@ class ReflectionProjection(Projection):
                     """,
                     (
                         str(reflection.id),
-                        tick_id,
+                        turn_id,
                         reflection.level,
                         str(reflection.kind),
                         str(reflection.severity),

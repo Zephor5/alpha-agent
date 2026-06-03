@@ -25,65 +25,81 @@ def validate_event_payload(kind: CognitiveEventKind, payload: dict[str, Any]) ->
 
 
 def _validate_perceived(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    _require_dict(kind, payload, "thread_id")
-    _require_dict(kind, payload, "perception")
-
-
-def _validate_judged(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    if _non_empty_str(payload.get("claim")):
-        return
-    raw = payload.get("judgments")
-    if isinstance(raw, list) and any(
-        isinstance(item, dict) and _non_empty_str(item.get("claim")) for item in raw
-    ):
-        return
-    _missing(kind, "claim or judgments[].claim")
-
-
-def _validate_decided(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    _require_present(kind, payload, "tick_id")
-    _require_non_empty_str(kind, payload, "action")
-    _require_non_empty_str(kind, payload, "message")
+    _validate_foreground_identity(kind, payload)
+    _require_non_empty_str(kind, payload, "stimulus_kind")
+    _require_dict(kind, payload, "source")
+    _require_list(kind, payload, "source_refs")
+    _require_non_empty_str(kind, payload, "content_digest")
+    _require_non_negative_int(kind, payload, "content_length")
 
 
 def _validate_acted(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    _require_present(kind, payload, "tick_id")
-    _require_non_empty_str(kind, payload, "decision_id")
+    _validate_foreground_identity(kind, payload)
+    _require_non_empty_str(kind, payload, "assistant_message_id")
+    _require_non_empty_str(kind, payload, "response_text_digest")
+    _require_non_negative_int(kind, payload, "response_text_length")
+    _require_list(kind, payload, "llm_call_ids")
+    _require_list(kind, payload, "llm_trace_ids")
     _require_list(kind, payload, "tool_call_ids")
-    _require_list(kind, payload, "provider_tool_message_ids")
-    _require_list(kind, payload, "provider_tool_trace_ids")
-
-
-def _validate_feedback(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    _require_present(kind, payload, "tick_id")
-    _require_bool(kind, payload, "matched_expected")
-
-
-def _validate_revised(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    _require_present(kind, payload, "tick_id")
-    _require_list(kind, payload, "judgment_ids")
-    _require_list(kind, payload, "reflection_ids")
-    _require_non_empty_str(kind, payload, "feedback_event_id")
+    _require_list(kind, payload, "tool_names")
+    _require_list(kind, payload, "tool_result_trace_ids")
+    _require_list(kind, payload, "tool_cognitive_event_ids")
 
 
 def _validate_pending_confirmation(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    _require_present(kind, payload, "tick_id")
+    _validate_foreground_identity(kind, payload)
+    _require_non_empty_str(kind, payload, "proposal_id")
     _require_non_empty_str(kind, payload, "reason")
-    _require_list(kind, payload, "contradict_ids")
+    _require_non_empty_str(kind, payload, "required_user_action")
+    _require_dict(kind, payload, "candidate_change")
+    _require_list(kind, payload, "conflict_belief_ids")
 
 
 def _validate_memory_proposed(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    _require_present(kind, payload, "tick_id")
-    _require_non_empty_str(kind, payload, "session_id")
+    _validate_foreground_identity(kind, payload)
     _require_non_empty_str(kind, payload, "proposal_id")
+    _require_non_empty_str(kind, payload, "tool_call_id")
     _require_dict(kind, payload, "proposal")
+    _require_list(kind, payload, "derived_about")
     _require_list(kind, payload, "source_refs")
     _require_list(kind, payload, "audit_refs")
     _require_dict(kind, payload, "gate")
 
 
+def _validate_turn_sources_recorded(
+    kind: CognitiveEventKind,
+    payload: dict[str, Any],
+) -> None:
+    _validate_foreground_identity(kind, payload)
+    _require_non_empty_str(kind, payload, "user_message_id")
+    _require_non_empty_str(kind, payload, "assistant_message_id")
+    _require_list(kind, payload, "provider_tool_message_ids")
+    _require_list(kind, payload, "provider_tool_trace_ids")
+    _require_list(kind, payload, "llm_call_ids")
+    _require_list(kind, payload, "llm_trace_ids")
+    _require_list(kind, payload, "cognitive_event_ids")
+    _require_list(kind, payload, "tool_cognitive_event_ids")
+
+
+def _validate_reflected(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
+    _validate_foreground_identity(kind, payload)
+    _require_non_negative_int(kind, payload, "reflection_count")
+    _require_list(kind, payload, "reflection_ids")
+    _require_list(kind, payload, "targets")
+
+
+def _validate_received_feedback(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
+    _validate_foreground_identity(kind, payload)
+    _require_non_empty_str(kind, payload, "feedback_kind")
+    _require_bool(kind, payload, "matched_expected")
+
+
 def _validate_context_compressed(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
-    _require_dict(kind, payload, "thread_id")
+    if "thread_id" in payload:
+        raise EventPayloadValidationError(
+            f"{kind.value} payload includes retired foreground field: thread_id"
+        )
+    _require_non_empty_str(kind, payload, "session_id")
     _require_list(kind, payload, "absorbed_perception_ids")
     if not (
         _non_empty_str(payload.get("produced_summary_id"))
@@ -129,6 +145,16 @@ def _require_bool(kind: CognitiveEventKind, payload: dict[str, Any], field: str)
         _missing(kind, field)
 
 
+def _require_non_negative_int(
+    kind: CognitiveEventKind,
+    payload: dict[str, Any],
+    field: str,
+) -> None:
+    value = payload.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        _missing(kind, field)
+
+
 def _require_dict(kind: CognitiveEventKind, payload: dict[str, Any], field: str) -> None:
     if not isinstance(payload.get(field), dict):
         _missing(kind, field)
@@ -149,15 +175,32 @@ def _missing(kind: CognitiveEventKind, field: str) -> None:
     )
 
 
+_FORBIDDEN_FOREGROUND_FIELDS = frozenset(
+    {"tick_id", "thread_id", "decision_id", "judgment_ids", "schema_version"}
+)
+
+
+def _validate_foreground_identity(
+    kind: CognitiveEventKind,
+    payload: dict[str, Any],
+) -> None:
+    for field in _FORBIDDEN_FOREGROUND_FIELDS:
+        if field in payload:
+            raise EventPayloadValidationError(
+                f"{kind.value} payload includes retired foreground field: {field}"
+            )
+    _require_non_empty_str(kind, payload, "turn_id")
+    _require_non_empty_str(kind, payload, "session_id")
+
+
 _VALIDATORS: dict[CognitiveEventKind, Callable[[CognitiveEventKind, dict[str, Any]], None]] = {
     CognitiveEventKind.PERCEIVED: _validate_perceived,
-    CognitiveEventKind.JUDGED: _validate_judged,
-    CognitiveEventKind.DECIDED: _validate_decided,
     CognitiveEventKind.ACTED: _validate_acted,
-    CognitiveEventKind.RECEIVED_FEEDBACK: _validate_feedback,
-    CognitiveEventKind.REVISED: _validate_revised,
     CognitiveEventKind.MEMORY_PROPOSED: _validate_memory_proposed,
     CognitiveEventKind.BELIEF_FORM_PENDING_CONFIRMATION: _validate_pending_confirmation,
+    CognitiveEventKind.TURN_SOURCES_RECORDED: _validate_turn_sources_recorded,
+    CognitiveEventKind.REFLECTED: _validate_reflected,
+    CognitiveEventKind.RECEIVED_FEEDBACK: _validate_received_feedback,
     CognitiveEventKind.CONTEXT_COMPRESSED: _validate_context_compressed,
     CognitiveEventKind.PROCEDURE_LEARNED: _validate_procedure_learned,
     CognitiveEventKind.BELIEF_FORMED: _validate_belief_formed,

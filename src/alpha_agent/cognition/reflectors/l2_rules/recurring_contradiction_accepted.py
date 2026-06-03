@@ -38,7 +38,7 @@ def recurring_contradiction_accepted(
     return {
         "rule": RULE_NAME,
         "strategy_name": STRATEGY_NAME,
-        "target_stages": ["revise"],
+        "target_domains": ["memory_propose"],
         "payload": {"reflection_kind": kind, "count": count},
         "triggered_by_reflection_ids": triggered,
     }

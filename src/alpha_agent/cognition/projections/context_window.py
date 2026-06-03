@@ -26,15 +26,14 @@ from alpha_agent.cognition.models import (
     CounterpartId,
     CounterpartRef,
     Instant,
-    JudgmentRef,
     NLStatement,
     Perception,
     PerceptionId,
     ProcedureRef,
+    Reference,
     SituationId,
+    StimulusKind,
     Subject,
-    ThreadId,
-    ThreadKind,
     belief_ref,
     counterpart_ref,
     situation_ref,
@@ -56,12 +55,11 @@ def _loads_list(value: str) -> list[str]:
 
 
 @dataclass
-class _ThreadState:
-    thread_id: ThreadId
+class _SessionState:
+    session_id: str
     counterpart_id: str | None = None
     foreground_ids: list[str] = field(default_factory=list)
     anchored_ids: list[str] = field(default_factory=list)
-    recent_judgment_ids: list[str] = field(default_factory=list)
     matched_procedure_ids: list[str] = field(default_factory=list)
     background_summary_id: str | None = None
     last_event_id: str = ""
@@ -70,18 +68,17 @@ class _ThreadState:
 
 @dataclass(frozen=True)
 class ContextWindowProjectionView:
-    thread_count: int
+    session_count: int
     status: str = "active"
 
 
 class ContextWindowProjection(Projection):
-    """Maintain foreground perception references per conversation/cognition thread."""
+    """Maintain foreground perception references per runtime session."""
 
     name = "context_window"
     handles = frozenset(
         {
             CognitiveEventKind.PERCEIVED,
-            CognitiveEventKind.JUDGED,
             CognitiveEventKind.PROCEDURE_MATCHED,
             CognitiveEventKind.CONTEXT_COMPRESSED,
             CognitiveEventKind.CONTEXT_ANCHOR_SET,
@@ -95,13 +92,11 @@ class ContextWindowProjection(Projection):
         event_log: EventLog,
         *,
         recent_limit: int = 12,
-        recent_judgment_limit: int = 8,
     ):
         self.event_log = event_log
         self.recent_limit = max(1, recent_limit)
-        self.recent_judgment_limit = max(1, recent_judgment_limit)
         self.anchor_limit = max(1, self.recent_limit // 2)
-        self._memory_states: dict[str, _ThreadState] = {}
+        self._memory_states: dict[str, _SessionState] = {}
         self._store = event_log.store if isinstance(event_log, SQLiteEventLog) else None
         if self._store is not None:
             self._ensure_schema()
@@ -109,12 +104,16 @@ class ContextWindowProjection(Projection):
 
     def get(
         self,
-        thread_id: ThreadId,
+        session_id: str,
         subject: Subject,
         at: Instant | None = None,
     ) -> ContextWindow:
-        state = self._state_at(thread_id, at) if at is not None else self._load_state(thread_id)
-        foreground = self._foreground(thread_id, state, at)
+        state = (
+            self._state_at(session_id, at)
+            if at is not None
+            else self._load_state(session_id)
+        )
+        foreground = self._foreground(session_id, state, at)
         counterpart = self._counterpart_from_state(state)
         situation = (
             foreground[-1].situation
@@ -122,14 +121,13 @@ class ContextWindowProjection(Projection):
             else situation_ref(SituationId("situation:context-window-empty"))
         )
         return ContextWindow(
-            thread_id=thread_id,
+            session_id=session_id,
             counterpart=counterpart,
             foreground=foreground,
             background=CompressedSummary(state.background_summary_id)
             if state and state.background_summary_id
             else None,
             recalled=[],
-            recent_judgments=_judgment_refs(state.recent_judgment_ids if state else []),
             matched_procedures=_procedure_refs(state.matched_procedure_ids if state else []),
             subject_at=subject_ref(subject.id),
             situation_at=situation,
@@ -141,51 +139,50 @@ class ContextWindowProjection(Projection):
             },
         )
 
-    def list_threads_by_counterpart(self, counterpart: CounterpartRef) -> list[ThreadId]:
+    def list_sessions_by_counterpart(self, counterpart: CounterpartRef) -> list[str]:
         if self._store is None:
             states = sorted(
                 self._memory_states.values(),
-                key=lambda state: (_thread_key(state.thread_id), state.updated_at),
+                key=lambda state: (state.session_id, state.updated_at),
             )
             return [
-                state.thread_id
+                state.session_id
                 for state in states
                 if state.counterpart_id == counterpart.id
-                and state.thread_id.kind == ThreadKind.CONVERSATION
             ]
         with self._store.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT thread_id
+                SELECT session_id
                 FROM context_window_view
-                WHERE counterpart_id = ? AND thread_kind = ?
-                ORDER BY updated_at ASC, thread_id ASC
+                WHERE counterpart_id = ?
+                ORDER BY updated_at ASC, session_id ASC
                 """,
-                (counterpart.id, ThreadKind.CONVERSATION.value),
+                (counterpart.id,),
             ).fetchall()
-        return [ThreadId.from_record(json.loads(row["thread_id"])) for row in rows]
+        return [str(row["session_id"]) for row in rows]
 
-    def list_thread_ids(self) -> list[ThreadId]:
-        """Return materialized context-window thread ids in stable order."""
+    def list_session_ids(self) -> list[str]:
+        """Return materialized context-window session ids in stable order."""
 
         if self._store is None:
             states = sorted(
                 self._memory_states.values(),
-                key=lambda state: (_thread_key(state.thread_id), state.updated_at),
+                key=lambda state: (state.session_id, state.updated_at),
             )
-            return [state.thread_id for state in states]
+            return [state.session_id for state in states]
         with self._store.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT thread_id
+                SELECT session_id
                 FROM context_window_view
-                ORDER BY updated_at ASC, thread_id ASC
+                ORDER BY updated_at ASC, session_id ASC
                 """
             ).fetchall()
-        return [ThreadId.from_record(json.loads(row["thread_id"])) for row in rows]
+        return [str(row["session_id"]) for row in rows]
 
-    def foreground_ids(self, thread_id: ThreadId) -> list[str]:
-        state = self._load_state(thread_id)
+    def foreground_ids(self, session_id: str) -> list[str]:
+        state = self._load_state(session_id)
         return list(state.foreground_ids) if state is not None else []
 
     def attach_recalled(
@@ -195,27 +192,27 @@ class ContextWindowProjection(Projection):
     ) -> ContextWindow:
         return replace(window, recalled=[_belief_reference(item) for item in recalled])
 
-    def mark_anchor(self, thread_id: ThreadId, perception_id: PerceptionId | str) -> None:
-        state = self._load_state(thread_id) or _ThreadState(thread_id=thread_id)
+    def mark_anchor(self, session_id: str, perception_id: PerceptionId | str) -> None:
+        state = self._load_state(session_id) or _SessionState(session_id=session_id)
         raw_id = str(perception_id)
         if raw_id not in state.anchored_ids and len(state.anchored_ids) >= self.anchor_limit:
             raise ValueError(
-                f"context anchors for {thread_id.key!r} are limited to {self.anchor_limit}"
+                f"context anchors for session {session_id!r} are limited to {self.anchor_limit}"
             )
         event = EventEmitter(self.event_log).emit(
             CognitiveEventKind.CONTEXT_ANCHOR_SET,
             rationale=NLStatement("Marked perception as foreground context anchor."),
-            payload={"thread_id": thread_id.to_record(), "perception_id": raw_id},
+            payload={"session_id": session_id, "perception_id": raw_id},
         )
         self.apply(event)
 
     def apply(self, event: CognitiveEvent) -> None:
         if event.kind not in self.handles:
             return
-        thread_id = self._thread_from_event(event)
-        if thread_id is None:
+        session_id = self._session_id_from_event(event)
+        if session_id is None:
             return
-        state = self._load_state(thread_id) or _ThreadState(thread_id=thread_id)
+        state = self._load_state(session_id) or _SessionState(session_id=session_id)
         self._apply_to_state(state, event)
         self._save_state(state)
 
@@ -229,29 +226,23 @@ class ContextWindowProjection(Projection):
 
     def view(self) -> ContextWindowProjectionView:
         if self._store is None:
-            return ContextWindowProjectionView(thread_count=len(self._memory_states))
+            return ContextWindowProjectionView(session_count=len(self._memory_states))
         with self._store.connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM context_window_view").fetchone()
-        return ContextWindowProjectionView(thread_count=int(row["count"]))
+        return ContextWindowProjectionView(session_count=int(row["count"]))
 
     def _replay_existing_events(self) -> None:
         for event in self.event_log.iter(kinds=self.handles):
             self.apply(event)
 
-    def _apply_to_state(self, state: _ThreadState, event: CognitiveEvent) -> None:
+    def _apply_to_state(self, state: _SessionState, event: CognitiveEvent) -> None:
         if event.kind == CognitiveEventKind.PERCEIVED:
             self._apply_perceived(state, event)
-        elif event.kind == CognitiveEventKind.JUDGED:
-            state.recent_judgment_ids = _append_limited(
-                state.recent_judgment_ids,
-                _reference_ids(event, "judgment"),
-                self.recent_judgment_limit,
-            )
         elif event.kind == CognitiveEventKind.PROCEDURE_MATCHED:
             state.matched_procedure_ids = _append_limited(
                 state.matched_procedure_ids,
                 _reference_ids(event, "procedure"),
-                self.recent_judgment_limit,
+                self.recent_limit,
             )
         elif event.kind == CognitiveEventKind.CONTEXT_COMPRESSED:
             summary_id = event.payload.get("produced_summary_id") or event.payload.get(
@@ -285,16 +276,14 @@ class ContextWindowProjection(Projection):
         state.last_event_id = str(event.id)
         state.updated_at = str(event.timestamp)
 
-    def _apply_perceived(self, state: _ThreadState, event: CognitiveEvent) -> None:
+    def _apply_perceived(self, state: _SessionState, event: CognitiveEvent) -> None:
         perception = self._perception_from_event(event)
         _append_unique(state.foreground_ids, str(perception.id))
-        if state.thread_id.kind == ThreadKind.COGNITION:
-            state.counterpart_id = None
-        elif perception.from_counterpart is not None:
+        if perception.from_counterpart is not None:
             state.counterpart_id = perception.from_counterpart.id
         state.foreground_ids = self._roll_foreground(state)
 
-    def _roll_foreground(self, state: _ThreadState) -> list[str]:
+    def _roll_foreground(self, state: _SessionState) -> list[str]:
         ordered = _dedupe(state.foreground_ids)
         anchored = [item for item in ordered if item in set(state.anchored_ids)]
         unanchored = [item for item in ordered if item not in set(state.anchored_ids)]
@@ -305,82 +294,76 @@ class ContextWindowProjection(Projection):
 
     def _foreground(
         self,
-        thread_id: ThreadId,
-        state: _ThreadState | None,
+        session_id: str,
+        state: _SessionState | None,
         at: Instant | None,
     ) -> list[Perception]:
         if state is None:
             return []
-        by_id = self._perceptions_by_id(thread_id, at)
+        by_id = self._perceptions_by_id(session_id, at)
         return [by_id[item] for item in state.foreground_ids if item in by_id]
 
     def _perceptions_by_id(
         self,
-        thread_id: ThreadId,
+        session_id: str,
         at: Instant | None = None,
     ) -> dict[str, Perception]:
         result: dict[str, Perception] = {}
         for event in self.event_log.iter(kinds=[CognitiveEventKind.PERCEIVED], until=at):
-            if self._thread_from_event(event) != thread_id:
+            if self._session_id_from_event(event) != session_id:
                 continue
             perception = self._perception_from_event(event)
             result[str(perception.id)] = perception
         return result
 
-    def _state_at(self, thread_id: ThreadId, at: Instant) -> _ThreadState | None:
-        state: _ThreadState | None = None
+    def _state_at(self, session_id: str, at: Instant) -> _SessionState | None:
+        state: _SessionState | None = None
         for event in self.event_log.iter(kinds=self.handles, until=at):
-            if self._thread_from_event(event) != thread_id:
+            if self._session_id_from_event(event) != session_id:
                 continue
             if state is None:
-                state = _ThreadState(thread_id=thread_id)
+                state = _SessionState(session_id=session_id)
             self._apply_to_state(state, event)
         return state
 
-    def _load_state(self, thread_id: ThreadId) -> _ThreadState | None:
-        key = _thread_key(thread_id)
+    def _load_state(self, session_id: str) -> _SessionState | None:
         if self._store is None:
-            return self._memory_states.get(key)
+            return self._memory_states.get(session_id)
         with self._store.connect() as conn:
             row = conn.execute(
-                "SELECT * FROM context_window_view WHERE thread_id = ?",
-                (key,),
+                "SELECT * FROM context_window_view WHERE session_id = ?",
+                (session_id,),
             ).fetchone()
         if row is None:
             return None
         return _state_from_row(row)
 
-    def _save_state(self, state: _ThreadState) -> None:
-        key = _thread_key(state.thread_id)
+    def _save_state(self, state: _SessionState) -> None:
         if self._store is None:
-            self._memory_states[key] = state
+            self._memory_states[state.session_id] = state
             return
         with self._store.immediate_transaction() as conn:
             conn.execute(
                 """
                 INSERT INTO context_window_view
-                    (thread_id, thread_kind, counterpart_id, foreground_ids, anchored_ids,
-                     recent_judgment_ids, matched_procedure_ids, background_summary_id,
+                    (session_id, counterpart_id, foreground_ids, anchored_ids,
+                     matched_procedure_ids, background_summary_id,
                      last_event_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(thread_id) DO UPDATE SET
-                    thread_kind = excluded.thread_kind,
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
                     counterpart_id = excluded.counterpart_id,
                     foreground_ids = excluded.foreground_ids,
                     anchored_ids = excluded.anchored_ids,
-                    recent_judgment_ids = excluded.recent_judgment_ids,
                     matched_procedure_ids = excluded.matched_procedure_ids,
                     background_summary_id = excluded.background_summary_id,
                     last_event_id = excluded.last_event_id,
                     updated_at = excluded.updated_at
                 """,
                 (
-                    key,
-                    state.thread_id.kind.value,
+                    state.session_id,
                     state.counterpart_id,
                     _dumps(state.foreground_ids),
                     _dumps(state.anchored_ids),
-                    _dumps(state.recent_judgment_ids),
                     _dumps(state.matched_procedure_ids),
                     state.background_summary_id,
                     state.last_event_id,
@@ -394,39 +377,37 @@ class ContextWindowProjection(Projection):
         with self._store.immediate_transaction() as conn:
             conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS context_window_view (
-                    thread_id TEXT PRIMARY KEY,
-                    thread_kind TEXT NOT NULL,
+                DROP TABLE IF EXISTS context_window_view;
+                CREATE TABLE context_window_view (
+                    session_id TEXT PRIMARY KEY,
                     counterpart_id TEXT,
                     foreground_ids TEXT NOT NULL DEFAULT '[]',
                     anchored_ids TEXT NOT NULL DEFAULT '[]',
-                    recent_judgment_ids TEXT NOT NULL DEFAULT '[]',
                     matched_procedure_ids TEXT NOT NULL DEFAULT '[]',
                     background_summary_id TEXT,
                     last_event_id TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_ctx_window_counterpart
-                    ON context_window_view(counterpart_id, thread_kind);
-                CREATE INDEX IF NOT EXISTS idx_ctx_window_kind
-                    ON context_window_view(thread_kind);
-                CREATE TABLE IF NOT EXISTS context_window_background (
+                    ON context_window_view(counterpart_id);
+                DROP TABLE IF EXISTS context_window_background;
+                CREATE TABLE context_window_background (
                     id TEXT PRIMARY KEY,
-                    thread_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
                     summary TEXT NOT NULL,
                     derived_from_perception_ids TEXT NOT NULL DEFAULT '[]',
                     preserved_anchors TEXT NOT NULL DEFAULT '[]',
                     compression_policy TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_ctx_bg_thread_time
-                    ON context_window_background(thread_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_ctx_bg_session_time
+                    ON context_window_background(session_id, created_at DESC);
                 """
             )
 
     def _save_background_summary(
         self,
-        state: _ThreadState,
+        state: _SessionState,
         event: CognitiveEvent,
         summary_id: str | None,
     ) -> None:
@@ -436,11 +417,11 @@ class ContextWindowProjection(Projection):
             conn.execute(
                 """
                 INSERT INTO context_window_background
-                    (id, thread_id, summary, derived_from_perception_ids, preserved_anchors,
+                    (id, session_id, summary, derived_from_perception_ids, preserved_anchors,
                      compression_policy, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
-                    thread_id = excluded.thread_id,
+                    session_id = excluded.session_id,
                     summary = excluded.summary,
                     derived_from_perception_ids = excluded.derived_from_perception_ids,
                     preserved_anchors = excluded.preserved_anchors,
@@ -449,7 +430,7 @@ class ContextWindowProjection(Projection):
                 """,
                 (
                     summary_id,
-                    _thread_key(state.thread_id),
+                    state.session_id,
                     str(event.payload.get("summary", "")),
                     _dumps(
                         [str(item) for item in event.payload.get("absorbed_perception_ids", [])]
@@ -460,37 +441,43 @@ class ContextWindowProjection(Projection):
                 ),
             )
 
-    def _counterpart_from_state(self, state: _ThreadState | None) -> CounterpartRef | None:
-        if (
-            state is None
-            or state.thread_id.kind == ThreadKind.COGNITION
-            or state.counterpart_id is None
-        ):
+    def _counterpart_from_state(self, state: _SessionState | None) -> CounterpartRef | None:
+        if state is None or state.counterpart_id is None:
             return None
         return counterpart_ref(CounterpartId(state.counterpart_id))
 
-    def _thread_from_event(self, event: CognitiveEvent) -> ThreadId | None:
-        raw = event.payload.get("thread_id")
-        return ThreadId.from_record(raw) if isinstance(raw, dict) else None
+    def _session_id_from_event(self, event: CognitiveEvent) -> str | None:
+        raw = event.payload.get("session_id")
+        if isinstance(raw, str) and raw.strip():
+            return raw
+        return None
 
     def _perception_from_event(self, event: CognitiveEvent) -> Perception:
         raw = event.payload.get("perception")
-        if not isinstance(raw, dict):
-            raise ValueError(f"perceived event missing perception payload: {event.id}")
-        return Perception.from_record(raw)
+        if isinstance(raw, dict):
+            return Perception.from_record(raw)
+        turn_id = str(event.payload.get("turn_id") or event.id)
+        source_kind = _stimulus_kind(event.payload.get("stimulus_kind"))
+        counterpart = _reference_from_record(event.payload.get("from_counterpart"))
+        situation = event.situation or situation_ref(SituationId(f"situation:{turn_id}"))
+        return Perception(
+            id=PerceptionId(_perception_id_from_event(event, turn_id)),
+            source_kind=source_kind,
+            from_counterpart=counterpart,
+            raw="",
+            surface_intent=[],
+            raised_entities=[counterpart] if counterpart is not None else [],
+            subject=event.subject,
+            situation=situation,
+            received_at=event.timestamp,
+        )
 
-
-def _thread_key(thread_id: ThreadId) -> str:
-    return _dumps(thread_id.to_record())
-
-
-def _state_from_row(row: Any) -> _ThreadState:
-    return _ThreadState(
-        thread_id=ThreadId.from_record(json.loads(row["thread_id"])),
+def _state_from_row(row: Any) -> _SessionState:
+    return _SessionState(
+        session_id=row["session_id"],
         counterpart_id=row["counterpart_id"],
         foreground_ids=_loads_list(row["foreground_ids"]),
         anchored_ids=_loads_list(row["anchored_ids"]),
-        recent_judgment_ids=_loads_list(row["recent_judgment_ids"]),
         matched_procedure_ids=_loads_list(row["matched_procedure_ids"]),
         background_summary_id=row["background_summary_id"],
         last_event_id=row["last_event_id"],
@@ -521,10 +508,6 @@ def _reference_ids(event: CognitiveEvent, kind: str) -> list[str]:
     return [ref.id for ref in event.outputs if ref.kind == kind]
 
 
-def _judgment_refs(ids: list[str]) -> list[JudgmentRef]:
-    return [JudgmentRef("judgment", item) for item in ids]
-
-
 def _procedure_refs(ids: list[str]) -> list[ProcedureRef]:
     return [ProcedureRef("procedure", item) for item in ids]
 
@@ -533,3 +516,29 @@ def _belief_reference(value: Belief | BeliefRef) -> BeliefRef:
     if isinstance(value, Belief):
         return belief_ref(BeliefId(str(value.id)))
     return value
+
+
+def _perception_id_from_event(event: CognitiveEvent, turn_id: str) -> str:
+    for ref in event.outputs:
+        if getattr(ref, "kind", None) == "perception" and getattr(ref, "id", None):
+            return str(ref.id)
+    return f"perception:{turn_id}"
+
+
+def _reference_from_record(value: object) -> Reference | None:
+    if not isinstance(value, dict):
+        return None
+    kind = value.get("kind")
+    ref_id = value.get("id")
+    if not isinstance(kind, str) or not isinstance(ref_id, str):
+        return None
+    return Reference(kind, ref_id)
+
+
+def _stimulus_kind(value: object) -> StimulusKind:
+    if isinstance(value, str):
+        try:
+            return StimulusKind(value)
+        except ValueError:
+            return StimulusKind.USER_MESSAGE
+    return StimulusKind.USER_MESSAGE

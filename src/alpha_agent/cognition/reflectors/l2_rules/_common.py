@@ -12,7 +12,7 @@ from alpha_agent.cognition.models import CognitiveEvent, Reflection, StrategyOve
 class StrategyCandidate(TypedDict):
     rule: str
     strategy_name: str
-    target_stages: list[str]
+    target_domains: list[str]
     payload: dict[str, Any]
     triggered_by_reflection_ids: list[str]
 

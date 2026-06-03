@@ -11,8 +11,8 @@ def test_projection_runner_idempotent_rebuild_and_late_projection() -> None:
     log = InMemoryEventLog()
     emitter = EventEmitter(log, id_factory=id_factory(), clock=clock_factory())
     emitter.emit(CognitiveEventKind.PERCEIVED, payload=perceived_payload())
-    emitter.emit(CognitiveEventKind.JUDGED, payload={"claim": "one"})
-    emitter.emit(CognitiveEventKind.JUDGED, payload={"claim": "two"})
+    emitter.emit(CognitiveEventKind.PERCEIVED, payload=perceived_payload(index=2))
+    emitter.emit(CognitiveEventKind.PERCEIVED, payload=perceived_payload(index=3))
 
     registry = ProjectionRegistry()
     projection = EventCountByKind()
@@ -24,7 +24,7 @@ def test_projection_runner_idempotent_rebuild_and_late_projection() -> None:
     runner.replay_all()
 
     assert projection.view() == first_view
-    assert projection.view().counts[CognitiveEventKind.JUDGED] == 2
+    assert projection.view().counts[CognitiveEventKind.PERCEIVED] == 3
 
     class LateEventCountByKind(EventCountByKind):
         name = "late_event_count_by_kind"

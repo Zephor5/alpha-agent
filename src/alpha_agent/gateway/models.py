@@ -25,7 +25,7 @@ class ConversationSource:
     chat_type: ChatType | str
     user_id: str
     user_name: str | None = None
-    thread_id: str | None = None
+    platform_thread_id: str | None = None
     message_id: str | None = None
     metadata: Metadata = field(default_factory=dict)
 

@@ -57,9 +57,6 @@ env_passthrough = []
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300
-judgment_repeat_window = 20
-judgment_repeat_threshold = 3
-procedure_success_threshold = 3
 context_foreground_max = 8
 context_absorb_batch = 4
 context_summary_chars = 480
@@ -217,9 +214,6 @@ class AlphaConfig:
     compatible_api_key: str | None = None
     cognition_consolidation_enabled: bool = True
     cognition_consolidation_interval_seconds: int = 300
-    cognition_consolidation_judgment_repeat_window: int = 20
-    cognition_consolidation_judgment_repeat_threshold: int = 3
-    cognition_consolidation_procedure_success_threshold: int = 3
     cognition_consolidation_context_foreground_max: int = 8
     cognition_consolidation_context_absorb_batch: int = 4
     cognition_consolidation_context_summary_chars: int = 480
@@ -438,18 +432,6 @@ def load_config(
             "ALPHA_COGNITION_CONSOLIDATION_INTERVAL_SECONDS",
             _int_value(consolidation.get("interval_seconds"), 300),
         ),
-        cognition_consolidation_judgment_repeat_window=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_JUDGMENT_REPEAT_WINDOW",
-            _int_value(consolidation.get("judgment_repeat_window"), 20),
-        ),
-        cognition_consolidation_judgment_repeat_threshold=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_JUDGMENT_REPEAT_THRESHOLD",
-            _int_value(consolidation.get("judgment_repeat_threshold"), 3),
-        ),
-        cognition_consolidation_procedure_success_threshold=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_PROCEDURE_SUCCESS_THRESHOLD",
-            _int_value(consolidation.get("procedure_success_threshold"), 3),
-        ),
         cognition_consolidation_context_foreground_max=_int_env(
             "ALPHA_COGNITION_CONSOLIDATION_CONTEXT_FOREGROUND_MAX",
             _int_value(consolidation.get("context_foreground_max"), 8),
@@ -615,18 +597,6 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         (
             "cognition.consolidation.interval_seconds",
             config.cognition_consolidation_interval_seconds,
-        ),
-        (
-            "cognition.consolidation.judgment_repeat_window",
-            config.cognition_consolidation_judgment_repeat_window,
-        ),
-        (
-            "cognition.consolidation.judgment_repeat_threshold",
-            config.cognition_consolidation_judgment_repeat_threshold,
-        ),
-        (
-            "cognition.consolidation.procedure_success_threshold",
-            config.cognition_consolidation_procedure_success_threshold,
         ),
         (
             "cognition.consolidation.context_foreground_max",

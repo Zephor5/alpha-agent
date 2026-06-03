@@ -25,9 +25,6 @@ from alpha_agent.utils.time import utc_now_iso
 class ConsolidationConfig:
     enabled: bool = True
     interval_seconds: int = 300
-    judgment_repeat_window: int = 20
-    judgment_repeat_threshold: int = 3
-    procedure_success_threshold: int = 3
     context_foreground_max: int = 8
     context_absorb_batch: int = 4
     context_summary_chars: int = 480

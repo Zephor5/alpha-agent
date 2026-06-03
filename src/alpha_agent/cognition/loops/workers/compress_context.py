@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import ClassVar
 
 from alpha_agent.cognition.emitter import EventEmitter
@@ -20,7 +19,7 @@ from alpha_agent.cognition.loops.workers._common import (
     stable_id,
     trigger,
 )
-from alpha_agent.cognition.models import CognitiveEventKind, Subject, ThreadId
+from alpha_agent.cognition.models import CognitiveEventKind, Subject
 from alpha_agent.cognition.projections.context_window import ContextWindowProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 
@@ -47,17 +46,17 @@ class CompressContextWorker:
         absorb_batch = max(1, int(getattr(config, "context_absorb_batch", 4)))
         emitted = 0
         inspected = 0
-        thread_ids = sorted(projection.list_thread_ids(), key=_thread_cursor)
+        session_ids = sorted(projection.list_session_ids())
         pending = after_cursor_wrap(
-            thread_ids,
-            str(checkpoint.metadata.get("last_thread_id", "")),
-            _thread_cursor,
+            session_ids,
+            str(checkpoint.metadata.get("last_session_id", "")),
+            _session_cursor,
         )
-        for thread_id in pending:
+        for session_id in pending:
             inspected += 1
-            foreground_ids = projection.foreground_ids(thread_id)
+            foreground_ids = projection.foreground_ids(session_id)
             if len(foreground_ids) > max_foreground:
-                window = projection.get(thread_id, Subject())
+                window = projection.get(session_id, Subject())
                 anchored_ids = _string_set(window.metadata.get("anchored_ids"))
                 absorbable = [item for item in foreground_ids if item not in anchored_ids]
                 take = min(absorb_batch, max(0, len(foreground_ids) - max_foreground))
@@ -72,14 +71,14 @@ class CompressContextWorker:
                         absorbed_text,
                         int(getattr(config, "context_summary_chars", 480)),
                     )
-                    summary_id = stable_id("ctxbg", thread_id.to_record(), absorbed_ids, summary)
+                    summary_id = stable_id("ctxbg", session_id, absorbed_ids, summary)
                     event = emit_projected(
                         emitter,
                         projections,
                         CognitiveEventKind.CONTEXT_COMPRESSED,
                         config=config,
                         payload={
-                            "thread_id": thread_id.to_record(),
+                            "session_id": session_id,
                             "absorbed_perception_ids": absorbed_ids,
                             "produced_summary_id": summary_id,
                             "background_summary_id": summary_id,
@@ -101,7 +100,7 @@ class CompressContextWorker:
                     inspected=inspected,
                     emitted=emitted,
                     yielded=True,
-                    metadata={"last_thread_id": _thread_cursor(thread_id)},
+                    metadata={"last_session_id": _session_cursor(session_id)},
                 )
         return report(self.name, checkpoint, inspected=inspected, emitted=emitted, metadata={})
 
@@ -113,8 +112,8 @@ def _summary(lines: list[str], limit: int) -> str:
     return joined[: max(0, limit - 3)].rstrip() + "..."
 
 
-def _thread_cursor(thread_id: ThreadId) -> str:
-    return json.dumps(thread_id.to_record(), ensure_ascii=False, sort_keys=True)
+def _session_cursor(session_id: str) -> str:
+    return session_id
 
 
 def _string_set(value: object) -> set[str]:

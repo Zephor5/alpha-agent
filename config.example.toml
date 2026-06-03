@@ -48,9 +48,6 @@ env_passthrough = []
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300
-judgment_repeat_window = 20
-judgment_repeat_threshold = 3
-procedure_success_threshold = 3
 context_foreground_max = 8
 context_absorb_batch = 4
 context_summary_chars = 480

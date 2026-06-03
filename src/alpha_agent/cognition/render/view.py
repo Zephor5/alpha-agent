@@ -9,7 +9,6 @@ from alpha_agent.cognition.models import (
     ContextWindow,
     Counterpart,
     Instant,
-    Judgment,
     Reflection,
     Situation,
     Subject,
@@ -26,7 +25,6 @@ class CognitionView:
     situation: Situation
     window: ContextWindow
     counterpart_profile: str | None = None
-    active_judgments: list[Judgment] = field(default_factory=list)
     matched_procedures: list[Any] = field(default_factory=list)
     active_strategies: list[Any] = field(default_factory=list)
     recent_reflections: list[Reflection] = field(default_factory=list)

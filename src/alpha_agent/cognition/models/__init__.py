@@ -1,7 +1,6 @@
 """Public cognition model exports."""
 
 from alpha_agent.cognition.models._ids import (
-    Action,
     ActionHint,
     ActorRef,
     Applicability,
@@ -15,12 +14,10 @@ from alpha_agent.cognition.models._ids import (
     CounterpartId,
     CounterpartRef,
     CulturalContext,
-    DecisionId,
     DerivationTrace,
     EntityRef,
     EventId,
     EvidenceRef,
-    ExpectedFeedback,
     FailurePattern,
     FeedbackEntry,
     GoalId,
@@ -31,8 +28,6 @@ from alpha_agent.cognition.models._ids import (
     InstitutionalContext,
     IntentMarker,
     InteractionPattern,
-    JudgmentId,
-    JudgmentRef,
     Lifecycle,
     MetaEval,
     Need,
@@ -76,31 +71,26 @@ from alpha_agent.cognition.models.counterpart import (
     ServiceCommitment,
     StyleHint,
 )
-from alpha_agent.cognition.models.decision import Decision
 from alpha_agent.cognition.models.enums import (
     CognitiveEventKind,
     CognitiveType,
     CounterpartRole,
     LoopPriority,
     StimulusKind,
-    ThreadKind,
     ValueKind,
 )
 from alpha_agent.cognition.models.event import CognitiveEvent
 from alpha_agent.cognition.models.goal import Goal
-from alpha_agent.cognition.models.judgment import Judgment
-from alpha_agent.cognition.models.perception import Perception, Stimulus
+from alpha_agent.cognition.models.perception import Perception
 from alpha_agent.cognition.models.procedure import Procedure
 from alpha_agent.cognition.models.reflection import Reflection
 from alpha_agent.cognition.models.situation import AuthorityHint, Situation, SocialContext
 from alpha_agent.cognition.models.strategy import StrategyOverride
 from alpha_agent.cognition.models.subject import SUBJECT_SELF, Subject
-from alpha_agent.cognition.models.thread import ThreadId
 from alpha_agent.cognition.models.value import ValueLens, ValueProfile
 
 __all__ = [
     "SUBJECT_SELF",
-    "Action",
     "ActionHint",
     "ActorRef",
     "Applicability",
@@ -122,13 +112,10 @@ __all__ = [
     "CounterpartRef",
     "CounterpartRole",
     "CulturalContext",
-    "Decision",
-    "DecisionId",
     "DerivationTrace",
     "EntityRef",
     "EventId",
     "EvidenceRef",
-    "ExpectedFeedback",
     "FailurePattern",
     "FeedbackEntry",
     "Goal",
@@ -140,9 +127,6 @@ __all__ = [
     "Instant",
     "InteractionPattern",
     "IntentMarker",
-    "Judgment",
-    "JudgmentId",
-    "JudgmentRef",
     "Lifecycle",
     "LoopPriority",
     "MetaEval",
@@ -171,7 +155,6 @@ __all__ = [
     "SituationRef",
     "SocialContext",
     "Step",
-    "Stimulus",
     "StimulusKind",
     "StrategyRef",
     "StrategyId",
@@ -181,8 +164,6 @@ __all__ = [
     "Subject",
     "SubjectId",
     "SubjectRef",
-    "ThreadId",
-    "ThreadKind",
     "TriggerPattern",
     "UpdatePolicy",
     "ValueKind",

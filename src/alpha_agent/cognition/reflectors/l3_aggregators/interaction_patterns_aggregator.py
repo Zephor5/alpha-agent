@@ -29,10 +29,10 @@ class InteractionPatternsAggregator:
     ) -> dict[CounterpartRole, InteractionPattern]:
         del subject
         role_by_counterpart = _role_by_counterpart(projections)
-        ticks: Counter[str] = Counter()
+        turns: Counter[str] = Counter()
         feedback: Counter[str] = Counter()
         success: Counter[str] = Counter()
-        tick_role = _tick_role_by_perception(log, window, role_by_counterpart)
+        turn_role = _turn_role_by_perception(log, window, role_by_counterpart)
         for event in log.iter(
             kinds=[CognitiveEventKind.PERCEIVED],
             since=window.since,
@@ -41,13 +41,13 @@ class InteractionPatternsAggregator:
             counterpart_id = _counterpart_id(event.payload.get("from_counterpart"))
             role = role_by_counterpart.get(counterpart_id or "")
             if role is not None:
-                ticks[role] += 1
+                turns[role] += 1
         for event in log.iter(
             kinds=[CognitiveEventKind.RECEIVED_FEEDBACK],
             since=window.since,
             until=window.until,
         ):
-            role = _feedback_role(event.payload, role_by_counterpart, tick_role)
+            role = _feedback_role(event.payload, role_by_counterpart, turn_role)
             if role is None:
                 continue
             feedback[role] += 1
@@ -55,12 +55,12 @@ class InteractionPatternsAggregator:
                 success[role] += 1
         reflections_by_role = _reflection_counts(projections, window)
         result: dict[CounterpartRole, InteractionPattern] = {}
-        for role_value in sorted(set(ticks) | set(feedback) | set(reflections_by_role)):
+        for role_value in sorted(set(turns) | set(feedback) | set(reflections_by_role)):
             role = CounterpartRole(role_value)
             total_feedback = feedback[role_value]
             success_rate = (success[role_value] / total_feedback) if total_feedback else 0.0
             result[role] = InteractionPattern(
-                f"ticks={ticks[role_value]};feedback={total_feedback};"
+                f"turns={turns[role_value]};feedback={total_feedback};"
                 f"success_rate={success_rate:.3f};reflections={reflections_by_role[role_value]}"
             )
         return result
@@ -81,7 +81,7 @@ def _counterpart_id(raw: object) -> str | None:
     return None
 
 
-def _tick_role_by_perception(
+def _turn_role_by_perception(
     log: EventLog,
     window: AggregationWindow,
     role_by_counterpart: dict[str, str],
@@ -92,25 +92,25 @@ def _tick_role_by_perception(
         since=window.since,
         until=window.until,
     ):
-        tick_id = event.payload.get("tick_id")
+        turn_id = event.payload.get("turn_id")
         counterpart_id = _counterpart_id(event.payload.get("from_counterpart"))
         role = role_by_counterpart.get(counterpart_id or "")
-        if tick_id is not None and role is not None:
-            result[str(tick_id)] = role
+        if turn_id is not None and role is not None:
+            result[str(turn_id)] = role
     return result
 
 
 def _feedback_role(
     payload: dict[str, object],
     role_by_counterpart: dict[str, str],
-    tick_role: dict[str, str],
+    turn_role: dict[str, str],
 ) -> str | None:
     raw_role = payload.get("counterpart_role") or payload.get("role")
     if raw_role is not None:
         return str(raw_role)
-    tick_id = payload.get("tick_id")
-    if tick_id is not None and str(tick_id) in tick_role:
-        return tick_role[str(tick_id)]
+    turn_id = payload.get("turn_id")
+    if turn_id is not None and str(turn_id) in turn_role:
+        return turn_role[str(turn_id)]
     counterpart_id = payload.get("counterpart_id")
     if counterpart_id is not None:
         return role_by_counterpart.get(str(counterpart_id))

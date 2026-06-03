@@ -36,9 +36,10 @@ def test_cognition_graph_diff_and_evidence_commands(tmp_path: Path) -> None:
         log,
         CognitiveEventKind.BELIEF_FORMED,
         payload={
-            "tick_id": "tick:a",
-                "belief": belief("belief:old", "Old preference.").to_record(),
-            },
+            "turn_id": "turn_a",
+            "session_id": "s1",
+            "belief": belief("belief:old", "Old preference.").to_record(),
+        },
         event_ids=event_ids,
         clock=clock,
     )
@@ -46,16 +47,17 @@ def test_cognition_graph_diff_and_evidence_commands(tmp_path: Path) -> None:
         log,
         CognitiveEventKind.BELIEF_FORMED,
         payload={
-            "tick_id": "tick:b",
-                "belief": belief("belief:new", "New preference.").to_record(),
-            },
+            "turn_id": "turn_b",
+            "session_id": "s1",
+            "belief": belief("belief:new", "New preference.").to_record(),
+        },
         event_ids=event_ids,
         clock=clock,
     )
 
     runner = CliRunner()
     graph = runner.invoke(app, ["cognition", "graph", "--format", "mermaid"], env=_env(tmp_path))
-    diff = runner.invoke(app, ["cognition", "diff", "tick:a", "tick:b"], env=_env(tmp_path))
+    diff = runner.invoke(app, ["cognition", "diff", "turn_a", "turn_b"], env=_env(tmp_path))
     evidence = runner.invoke(app, ["cognition", "evidence", "belief:old"], env=_env(tmp_path))
 
     assert graph.exit_code == 0

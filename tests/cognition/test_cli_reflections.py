@@ -41,7 +41,7 @@ def test_cli_reflections_lists_recent_rows_with_severity_filter(tmp_path: Path) 
         level="L1",
         kind=ReflectionKind("feedback-surprise"),
         severity=Severity("info"),
-        target=ReflectionTarget("loop_run:tick:1"),
+        target=ReflectionTarget("loop_run:turn_1"),
         finding=NLStatement("Feedback surprised the loop."),
         suggested_remedy=RemedyHint("Review expectation."),
         created_at=Instant("2026-01-01T00:00:02+00:00"),
@@ -52,9 +52,14 @@ def test_cli_reflections_lists_recent_rows_with_severity_filter(tmp_path: Path) 
             log,
             CognitiveEventKind.REFLECTED,
             payload={
-                "tick_id": "tick:1",
+                "turn_id": "turn_1",
+                "session_id": "s1",
                 "reflection_count": 2,
                 "reflection_ids": [str(warning.id), str(info.id)],
+                "targets": [
+                    {"kind": "reflection", "id": str(warning.id)},
+                    {"kind": "reflection", "id": str(info.id)},
+                ],
                 "reflections": [warning.to_record(), info.to_record()],
             },
         )

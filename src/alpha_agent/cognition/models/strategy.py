@@ -1,4 +1,4 @@
-"""Strategy override model for L2 control."""
+"""Strategy override model for background control."""
 
 from __future__ import annotations
 
@@ -15,12 +15,12 @@ from alpha_agent.cognition.models._serialization import dataclass_from_record, d
 
 @dataclass(frozen=True)
 class StrategyOverride:
-    """A temporary rule that changes how upcoming cognition ticks run."""
+    """A temporary rule that changes a concrete runtime or worker domain."""
 
     id: StrategyId
     name: str
     payload: dict[str, Any] = field(default_factory=dict)
-    target_stages: list[str] = field(default_factory=list)
+    target_domains: list[str] = field(default_factory=list)
     for_counterpart: CounterpartRef | None = None
     set_by: str = "reflector_l2"
     set_at: Instant = Instant("")
