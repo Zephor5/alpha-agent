@@ -138,8 +138,7 @@ _DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {
         "Call tools only when they are useful. "
         "When stable counterpart profile context is present, it is already visible near "
         "the start of the prompt. Use memory_recall for explicit long-term belief "
-        "lookups, and use memory_propose only for explicit long-term memory write "
-        "proposals."
+        "lookups, and use memory_propose only for explicit long-term memory updates."
     ),
 }
 

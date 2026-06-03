@@ -45,6 +45,8 @@ def test_memory_recall_schema_is_strict_and_compact() -> None:
     )
 
     assert definition.strict is True
+    assert "belief handle" in definition.description
+    assert "content only" not in definition.description
     assert definition.parameters == {
         "type": "object",
         "additionalProperties": False,
@@ -72,6 +74,8 @@ def test_memory_recall_schema_is_strict_and_compact() -> None:
                     "type": "string",
                     "enum": [
                         "factual",
+                        "constraint",
+                        "procedure",
                         "procedural",
                         "preference",
                         "value",
@@ -129,14 +133,18 @@ def test_memory_recall_queries_counterpart_and_global_beliefs(tmp_path: Path) ->
     assert result.output == {
         "results": [
             {
+                "id": "belief:a-python",
                 "content": "User A prefers Python examples.",
                 "type": "preference",
                 "scope": "counterpart",
+                "status": "active",
             },
             {
+                "id": "belief:global-python",
                 "content": "Python uses indentation.",
                 "type": "factual",
                 "scope": "global",
+                "status": "active",
             },
         ]
     }
@@ -171,9 +179,11 @@ def test_memory_recall_accepts_structured_retrieval_intent_without_changing_outp
     assert result.output == {
         "results": [
             {
+                "id": "belief:a-python",
                 "content": "User A prefers Python examples.",
                 "type": "preference",
                 "scope": "counterpart",
+                "status": "active",
             }
         ]
     }
@@ -201,9 +211,11 @@ def test_memory_recall_query_only_answers_natural_language(tmp_path: Path) -> No
     assert result.output == {
         "results": [
             {
+                "id": "belief:examples",
                 "content": "User prefers Python examples.",
                 "type": "preference",
                 "scope": "counterpart",
+                "status": "active",
             }
         ]
     }
@@ -238,9 +250,11 @@ def test_memory_recall_uses_keywords_and_entities_when_query_is_loose(
     assert result.output == {
         "results": [
             {
+                "id": "belief:openai",
                 "content": "User A prefers OpenAI API examples.",
                 "type": "preference",
                 "scope": "counterpart",
+                "status": "active",
             }
         ]
     }
@@ -332,12 +346,58 @@ def test_memory_recall_filters_types_and_bounds_results(tmp_path: Path) -> None:
 
     assert _results(factual.output) == [
         {
+            "id": "belief:factual",
             "content": "Python uses indentation.",
             "type": "factual",
             "scope": "global",
+            "status": "active",
         }
     ]
     assert len(_results(bounded.output)) == 1
+
+
+def test_memory_recall_filters_and_outputs_protocol_constraint_type(
+    tmp_path: Path,
+) -> None:
+    projection = _projection_with_beliefs(
+        tmp_path,
+        [
+            _belief(
+                "belief:constraint",
+                "Do not write local machine-specific absolute paths into the repo.",
+                about=[],
+                object_="constraint:global",
+                cognitive_type=CognitiveType.PROCEDURAL,
+            ),
+            _belief(
+                "belief:procedure",
+                "When editing repository paths, use project-root-relative paths.",
+                about=[],
+                object_="procedure:global",
+                cognitive_type=CognitiveType.PROCEDURAL,
+            ),
+        ],
+    )
+
+    result = MemoryRecallTool().run(
+        {
+            "query": "repository paths",
+            "types": ["constraint"],
+            "scope": "global",
+            "max_results": 8,
+        },
+        _tool_context(projection=projection, counterpart=counterpart_a()),
+    )
+
+    assert _results(result.output) == [
+        {
+            "id": "belief:constraint",
+            "content": "Do not write local machine-specific absolute paths into the repo.",
+            "type": "constraint",
+            "scope": "global",
+            "status": "active",
+        }
+    ]
 
 
 def test_memory_recall_excludes_counterpart_digest_beliefs(tmp_path: Path) -> None:
@@ -368,9 +428,47 @@ def test_memory_recall_excludes_counterpart_digest_beliefs(tmp_path: Path) -> No
 
     assert _results(result.output) == [
         {
+            "id": "belief:preference",
             "content": "User A prefers Python examples.",
             "type": "preference",
             "scope": "counterpart",
+            "status": "active",
+        }
+    ]
+
+
+def test_memory_recall_returns_active_belief_handles_only(tmp_path: Path) -> None:
+    projection = _projection_with_beliefs(
+        tmp_path,
+        [
+            _belief(
+                "belief:active-python",
+                "User A prefers Python examples.",
+                about=[counterpart_a()],
+                object_="python",
+            ),
+            _belief(
+                "belief:retracted-python",
+                "User A used to prefer Python jokes.",
+                about=[counterpart_a()],
+                object_="python",
+                status="retracted",
+            ),
+        ],
+    )
+
+    result = MemoryRecallTool().run(
+        {"query": "Python", "max_results": 8},
+        _tool_context(projection=projection, counterpart=counterpart_a()),
+    )
+
+    assert _results(result.output) == [
+        {
+            "id": "belief:active-python",
+            "content": "User A prefers Python examples.",
+            "type": "preference",
+            "scope": "counterpart",
+            "status": "active",
         }
     ]
 
@@ -417,7 +515,7 @@ def test_memory_recall_output_does_not_expose_internal_scoring(tmp_path: Path) -
     )
 
     [item] = _results(result.output)
-    assert set(item) == {"content", "type", "scope"}
+    assert set(item) == {"id", "content", "type", "scope", "status"}
 
 
 def test_memory_recall_scored_candidates_are_explainable_and_ordered(
@@ -787,6 +885,7 @@ def _belief(
     cognitive_type: CognitiveType = CognitiveType.PREFERENCE,
     confidence: float = 0.6,
     held_since: str = "2026-01-01T00:00:00+00:00",
+    status: str = "active",
 ) -> Belief:
     return Belief.from_record(
         {
@@ -799,6 +898,7 @@ def _belief(
                 held_since=held_since,
             ).to_record(),
             "cognitive_type": cognitive_type.value,
+            "status": status,
         }
     )
 

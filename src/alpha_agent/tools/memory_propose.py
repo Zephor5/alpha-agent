@@ -1,4 +1,4 @@
-"""Cognition write-proposal tool."""
+"""Cognition memory update proposal tool."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from alpha_agent.cognition.models import (
     ValueProfile,
     situation_ref,
 )
-from alpha_agent.cognition.projections.belief import BeliefProjection
+from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefSearchParams
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.tools.base import ToolExecutionContext, ToolResult
 from alpha_agent.utils.ids import new_id
@@ -36,12 +36,25 @@ from alpha_agent.utils.ids import new_id
 MEMORY_PROPOSE_TOOL_NAME = "memory_propose"
 MEMORY_PROPOSE_CONTEXT_KEY = "memory_propose"
 
-_ALLOWED_KINDS = frozenset({"preference", "constraint", "correction", "procedure"})
-_AUTO_ACCEPT_KINDS = frozenset({"preference", "constraint", "procedure"})
+_ALLOWED_OPERATIONS = frozenset(
+    {"append", "reinforce", "replace", "merge", "correct", "retract"}
+)
+_ALLOWED_MEMORY_TYPES = frozenset({"preference", "constraint", "procedure", "factual"})
 _ALLOWED_SCOPES = frozenset({"counterpart", "global"})
 
-GateDecision = Literal["accepted", "pending_confirmation", "rejected"]
-MemoryStatus = Literal["accepted", "pending_confirmation", "rejected", "mixed"]
+Decision = Literal[
+    "accepted",
+    "pending_confirmation",
+    "needs_target_selection",
+    "rejected",
+]
+MemoryStatus = Literal[
+    "accepted",
+    "pending_confirmation",
+    "needs_target_selection",
+    "rejected",
+    "mixed",
+]
 UserAction = Literal["none", "ask_confirmation", "explain_rejection"]
 
 
@@ -64,52 +77,126 @@ class MemoryProposalContext:
 
 
 @dataclass(frozen=True)
-class _ParsedProposal:
-    record: dict[str, str]
-    errors: list[str]
+class _MemoryRecord:
+    type: str
+    content: str
+    evidence: str
+    scope: str
 
-
-@dataclass(frozen=True)
-class _GateResult:
-    decision: GateDecision
-    reason: str
-    conflict_belief_ids: list[str] = field(default_factory=list)
-    duplicate_belief_id: str | None = None
-    replace_belief_id: str | None = None
-    candidate_change_kind: str = "create"
-
-
-@dataclass(frozen=True)
-class _ProposalResult:
-    proposal_id: str
-    decision: GateDecision
-    reason: str
-
-    def to_output(self) -> dict[str, str]:
+    def to_payload(self) -> dict[str, str]:
         return {
-            "proposal_id": self.proposal_id,
-            "decision": self.decision,
-            "reason": self.reason,
+            "type": self.type,
+            "content": self.content,
+            "evidence": self.evidence,
+            "scope": self.scope,
         }
 
 
+@dataclass(frozen=True)
+class _ParsedUpdate:
+    index: int
+    operation: str
+    targets: list[str]
+    target_hint: str
+    memory: _MemoryRecord | None
+    reason: str
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def evidence(self) -> str:
+        return self.memory.evidence if self.memory is not None else ""
+
+    def update_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "operation": self.operation,
+            "targets": list(self.targets),
+            "target_hint": self.target_hint,
+            "reason": self.reason,
+        }
+        if self.memory is not None:
+            payload["memory"] = self.memory.to_payload()
+        return payload
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    id: str
+    content: str
+    type: str
+    scope: str
+    status: str
+    relation_hint: str = "possibly_related"
+
+    def to_output(self) -> dict[str, str]:
+        return {
+            "id": self.id,
+            "content": self.content,
+            "type": self.type,
+            "scope": self.scope,
+            "status": self.status,
+            "relation_hint": self.relation_hint,
+        }
+
+
+@dataclass(frozen=True)
+class _OperationPlan:
+    decision: Decision
+    operation: str
+    reason: str
+    target_beliefs: list[Belief] = field(default_factory=list)
+    candidates: list[_Candidate] = field(default_factory=list)
+    memory: _MemoryRecord | None = None
+    emit_memory_proposed: bool = True
+
+    @property
+    def target_belief_ids(self) -> list[str]:
+        return [str(belief.id) for belief in self.target_beliefs]
+
+
+@dataclass
+class _UpdateResult:
+    proposal_id: str
+    update_index: int
+    operation: str
+    decision: Decision
+    reason: str
+    target_belief_ids: list[str] = field(default_factory=list)
+    candidates: list[_Candidate] = field(default_factory=list)
+    new_belief_id: str | None = None
+
+    def to_output(self) -> dict[str, Any]:
+        output: dict[str, Any] = {
+            "proposal_id": self.proposal_id,
+            "update_index": self.update_index,
+            "operation": self.operation,
+            "decision": self.decision,
+            "reason": self.reason,
+            "target_belief_ids": list(self.target_belief_ids),
+        }
+        if self.new_belief_id is not None:
+            output["new_belief_id"] = self.new_belief_id
+        if self.candidates:
+            output["candidates"] = [candidate.to_output() for candidate in self.candidates]
+        return output
+
+
 class MemoryProposeTool:
-    """Accept model-proposed long-term cognition write candidates."""
+    """Accept model-proposed long-term memory updates."""
 
     name = MEMORY_PROPOSE_TOOL_NAME
     description = (
-        "Propose explicit long-term user cognition: preferences, stable constraints, "
-        "reusable procedures, or direct corrections. Do not use for ordinary facts, "
-        "transient context, guesses, or tool summaries. Returns a structured memory "
-        "proposal result with status accepted, pending_confirmation, rejected, or mixed "
-        "and tells the model whether user confirmation or rejection explanation is needed."
+        "Propose explicit long-term memory updates. Use updates with operation append, "
+        "reinforce, replace, merge, correct, or retract, and memory.type preference, "
+        "constraint, procedure, or factual. Do not use for ordinary facts, transient "
+        "context, guesses, or tool summaries. Returns accepted, pending_confirmation, "
+        "needs_target_selection, rejected, or mixed."
     )
     strict = True
     parameters = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "proposals": {
+            "updates": {
                 "type": "array",
                 "minItems": 1,
                 "maxItems": 5,
@@ -117,33 +204,57 @@ class MemoryProposeTool:
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "kind": {
+                        "operation": {
                             "type": "string",
-                            "enum": ["preference", "constraint", "correction", "procedure"],
+                            "enum": [
+                                "append",
+                                "reinforce",
+                                "replace",
+                                "merge",
+                                "correct",
+                                "retract",
+                            ],
                         },
-                        "content": {
-                            "type": "string",
-                            "maxLength": 500,
+                        "targets": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 5,
                         },
-                        "evidence": {
-                            "type": "string",
-                            "maxLength": 300,
+                        "target_hint": {"type": "string", "maxLength": 300},
+                        "memory": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": [
+                                        "preference",
+                                        "constraint",
+                                        "procedure",
+                                        "factual",
+                                    ],
+                                },
+                                "content": {"type": "string", "maxLength": 500},
+                                "evidence": {"type": "string", "maxLength": 500},
+                                "scope": {
+                                    "type": "string",
+                                    "enum": ["counterpart", "global"],
+                                },
+                            },
+                            "required": ["type", "content", "evidence", "scope"],
                         },
-                        "scope": {
-                            "type": "string",
-                            "enum": ["counterpart", "global"],
-                        },
+                        "reason": {"type": "string", "maxLength": 500},
                     },
-                    "required": ["kind", "content", "evidence", "scope"],
+                    "required": ["operation", "targets", "target_hint", "reason"],
                 },
             }
         },
-        "required": ["proposals"],
+        "required": ["updates"],
     }
 
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
-        raw_proposals = arguments.get("proposals")
-        proposal_items = raw_proposals if isinstance(raw_proposals, list) else []
+        raw_updates = arguments.get("updates")
+        update_items = raw_updates if isinstance(raw_updates, list) else []
         memory_context = _memory_proposal_context(context.extensions)
 
         if memory_context is None:
@@ -152,130 +263,231 @@ class MemoryProposeTool:
                 output=_memory_output(
                     status="rejected",
                     user_action="explain_rejection",
-                    message_hint="Memory proposal rejected: missing_runtime_turn_context.",
-                    proposal_results=[],
+                    message_hint="Memory update rejected: missing_runtime_turn_context.",
+                    results=[],
                 ),
                 metadata=_tool_metadata(cognitive_event_ids=[]),
             )
 
-        cognitive_event_ids: list[str] = []
-        proposal_results: list[_ProposalResult] = []
-        if not isinstance(raw_proposals, list) or not proposal_items:
+        if not isinstance(raw_updates, list) or not update_items:
             return ToolResult(
                 name=self.name,
                 output=_memory_output(
                     status="rejected",
                     user_action="explain_rejection",
-                    message_hint="Memory proposal rejected: missing_proposals.",
-                    proposal_results=[],
+                    message_hint="Memory update rejected: missing_updates.",
+                    results=[],
                 ),
                 metadata=_tool_metadata(cognitive_event_ids=[]),
             )
 
-        too_many_proposals = len(proposal_items) > 5
-        for raw in proposal_items:
+        cognitive_event_ids: list[str] = []
+        results: list[_UpdateResult] = []
+        too_many_updates = len(update_items) > 5
+        for index, raw in enumerate(update_items):
             proposal_id = new_id("proposal")
-            parsed = _parse_proposal(raw)
-            if too_many_proposals:
-                parsed = _ParsedProposal(
-                    record=parsed.record,
-                    errors=[*parsed.errors, "too_many_proposals"],
+            parsed = _parse_update(raw, index)
+            if too_many_updates:
+                parsed = _ParsedUpdate(
+                    index=parsed.index,
+                    operation=parsed.operation,
+                    targets=parsed.targets,
+                    target_hint=parsed.target_hint,
+                    memory=parsed.memory,
+                    reason=parsed.reason,
+                    errors=[*parsed.errors, "too_many_updates"],
                 )
-            gate = _gate(parsed, memory_context)
-            proposed = _emit_memory_proposed(
-                context=memory_context,
+            plan = _plan_update(parsed, memory_context)
+            result = _UpdateResult(
                 proposal_id=proposal_id,
-                proposal=parsed.record,
-                gate_decision=gate.decision,
-                gate_reason=gate.reason,
-                tool_call_id=context.tool_call_id,
+                update_index=index,
+                operation=plan.operation,
+                decision=plan.decision,
+                reason=plan.reason,
+                target_belief_ids=plan.target_belief_ids,
+                candidates=plan.candidates,
             )
-            cognitive_event_ids.append(str(proposed.id))
-            proposal_results.append(
-                _ProposalResult(
+            proposed_event: CognitiveEvent | None = None
+            if plan.emit_memory_proposed:
+                proposed_event = _emit_memory_proposed(
+                    context=memory_context,
                     proposal_id=proposal_id,
-                    decision=gate.decision,
-                    reason=gate.reason,
+                    parsed=parsed,
+                    plan=plan,
+                    tool_call_id=context.tool_call_id,
                 )
-            )
-            if gate.decision == "pending_confirmation":
+                cognitive_event_ids.append(str(proposed_event.id))
+
+            if plan.decision == "accepted":
+                emitted = _apply_accepted_update(
+                    context=memory_context,
+                    proposal_id=proposal_id,
+                    parsed=parsed,
+                    plan=plan,
+                    proposed_event=proposed_event,
+                    tool_call_id=context.tool_call_id,
+                )
+                result.new_belief_id = emitted.new_belief_id
+                cognitive_event_ids.extend(emitted.event_ids)
+            elif plan.decision == "pending_confirmation" and proposed_event is not None:
                 pending = _emit_pending_confirmation(
                     context=memory_context,
                     proposal_id=proposal_id,
-                    proposal=parsed.record,
-                    gate=gate,
-                    proposed_event=proposed,
+                    parsed=parsed,
+                    plan=plan,
+                    proposed_event=proposed_event,
+                    tool_call_id=context.tool_call_id,
                 )
                 cognitive_event_ids.append(str(pending.id))
-            elif gate.decision == "accepted" and gate.duplicate_belief_id is None:
-                belief = build_belief_from_memory_proposal(
-                    proposal=parsed.record,
-                    proposal_id=proposal_id,
-                    proposed_event_id=str(proposed.id),
-                    gate_reason=gate.reason,
-                    context=memory_context,
-                )
-                if gate.replace_belief_id is not None:
-                    superseded = _emit_belief_superseded(
-                        context=memory_context,
-                        proposal_id=proposal_id,
-                        old_belief_id=gate.replace_belief_id,
-                        belief=belief,
-                        gate_reason=gate.reason,
-                        proposed_event=proposed,
-                    )
-                    cognitive_event_ids.append(str(superseded.id))
-                else:
-                    formed = _emit_belief_formed(
-                        context=memory_context,
-                        proposal_id=proposal_id,
-                        belief=belief,
-                        gate_reason=gate.reason,
-                        proposed_event=proposed,
-                    )
-                    cognitive_event_ids.append(str(formed.id))
-        status = _aggregate_status(proposal_results)
-        user_action = _aggregate_user_action(proposal_results)
+            results.append(result)
+
+        status = _aggregate_status(results)
+        user_action = _aggregate_user_action(results)
         return ToolResult(
             name=self.name,
             output=_memory_output(
                 status=status,
                 user_action=user_action,
-                message_hint=_message_hint(user_action, proposal_results),
-                proposal_results=proposal_results,
+                message_hint=_message_hint(user_action, results),
+                results=results,
             ),
             metadata=_tool_metadata(cognitive_event_ids=cognitive_event_ids),
         )
 
 
-def build_belief_from_memory_proposal(
+@dataclass(frozen=True)
+class _AcceptedEmission:
+    event_ids: list[str]
+    new_belief_id: str | None = None
+
+
+def _apply_accepted_update(
     *,
-    proposal: Mapping[str, str],
+    context: MemoryProposalContext,
+    proposal_id: str,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
+    proposed_event: CognitiveEvent | None,
+    tool_call_id: str | None,
+) -> _AcceptedEmission:
+    parent_ids = [proposed_event.id] if proposed_event is not None else []
+    if plan.operation == "reinforce":
+        strengthened = _emit_belief_strengthened(
+            context=context,
+            proposal_id=proposal_id,
+            parsed=parsed,
+            plan=plan,
+            causal_parents=parent_ids,
+            tool_call_id=tool_call_id,
+        )
+        return _AcceptedEmission(event_ids=[str(strengthened.id)])
+    if plan.operation == "retract":
+        retracted = _emit_belief_retracted(
+            context=context,
+            proposal_id=proposal_id,
+            parsed=parsed,
+            plan=plan,
+            causal_parents=parent_ids,
+            tool_call_id=tool_call_id,
+        )
+        return _AcceptedEmission(event_ids=[str(retracted.id)])
+    if plan.memory is None:
+        return _AcceptedEmission(event_ids=[])
+
+    extra_sources: list[Reference] = []
+    if plan.operation == "merge":
+        extra_sources = [Reference("belief", str(belief.id)) for belief in plan.target_beliefs]
+    belief = build_belief_from_memory_update(
+        memory=plan.memory,
+        proposal_id=proposal_id,
+        proposed_event_id=str(proposed_event.id) if proposed_event is not None else "",
+        operation=plan.operation,
+        reason=parsed.reason,
+        context=context,
+        extra_sources=extra_sources,
+    )
+    if plan.operation == "append":
+        formed = _emit_belief_formed(
+            context=context,
+            proposal_id=proposal_id,
+            parsed=parsed,
+            plan=plan,
+            belief=belief,
+            causal_parents=parent_ids,
+            tool_call_id=tool_call_id,
+        )
+        return _AcceptedEmission(event_ids=[str(formed.id)], new_belief_id=str(belief.id))
+    if plan.operation == "replace":
+        superseded = _emit_belief_superseded(
+            context=context,
+            proposal_id=proposal_id,
+            parsed=parsed,
+            plan=plan,
+            old_belief=plan.target_beliefs[0],
+            new_belief=belief,
+            causal_parents=parent_ids,
+            tool_call_id=tool_call_id,
+        )
+        return _AcceptedEmission(
+            event_ids=[str(superseded.id)],
+            new_belief_id=str(belief.id),
+        )
+    if plan.operation == "merge":
+        formed = _emit_belief_formed(
+            context=context,
+            proposal_id=proposal_id,
+            parsed=parsed,
+            plan=plan,
+            belief=belief,
+            causal_parents=parent_ids,
+            tool_call_id=tool_call_id,
+        )
+        event_ids = [str(formed.id)]
+        for target in plan.target_beliefs:
+            superseded = _emit_belief_superseded(
+                context=context,
+                proposal_id=proposal_id,
+                parsed=parsed,
+                plan=plan,
+                old_belief=target,
+                new_belief=belief,
+                causal_parents=[formed.id],
+                tool_call_id=tool_call_id,
+            )
+            event_ids.append(str(superseded.id))
+        return _AcceptedEmission(event_ids=event_ids, new_belief_id=str(belief.id))
+    return _AcceptedEmission(event_ids=[])
+
+
+def build_belief_from_memory_update(
+    *,
+    memory: _MemoryRecord,
     proposal_id: str,
     proposed_event_id: str,
-    gate_reason: str,
+    operation: str,
+    reason: str,
     context: MemoryProposalContext,
+    extra_sources: list[Reference] | None = None,
 ) -> Belief:
-    """Map an accepted foreground memory proposal onto the existing Belief model."""
+    """Map an accepted memory update onto the existing Belief model."""
 
-    kind = proposal["kind"]
-    scope = proposal["scope"]
-    about = _derived_about(scope, context)
+    about = _derived_about(memory.scope, context)
+    sources = [*(extra_sources or []), Reference("session_message", context.user_message_id)]
     return Belief(
         id=BeliefId(new_id("belief")),
         subject=Reference("subject", str(context.subject.id)),
         about=about,
-        object=_belief_object(kind=kind, scope=scope, about=about),
-        content=NLStatement(proposal["content"]),
-        cognitive_type=_belief_type(kind),
+        object=_belief_object(memory_type=memory.type, scope=memory.scope, about=about),
+        content=NLStatement(memory.content),
+        cognitive_type=_belief_type(memory.type),
         structure=None,
-        sources=[Reference("session_message", context.user_message_id)],
+        sources=sources,
         confidence=0.72,
         applicability=Applicability(
             deterministic_json(
                 {
                     "source": MEMORY_PROPOSE_TOOL_NAME,
-                    "scope": scope,
+                    "scope": memory.scope,
                     "about": [item.to_record() for item in about],
                 }
             )
@@ -288,8 +500,8 @@ def build_belief_from_memory_proposal(
         update_policy=UpdatePolicy(
             deterministic_json(
                 {
-                    "conflict": "pending_review",
-                    "updates": "do_not_auto_overwrite",
+                    "conflict": "model_target_required",
+                    "updates": "operation_driven",
                 }
             )
         ),
@@ -301,7 +513,8 @@ def build_belief_from_memory_proposal(
                     "source": MEMORY_PROPOSE_TOOL_NAME,
                     "proposal_id": proposal_id,
                     "memory_proposed_event_id": proposed_event_id,
-                    "gate_reason": gate_reason,
+                    "operation": operation,
+                    "reason": reason,
                 }
             )
         ),
@@ -348,96 +561,440 @@ def _memory_proposal_context(extensions: Mapping[str, Any]) -> MemoryProposalCon
     )
 
 
-def _parse_proposal(raw: object) -> _ParsedProposal:
+def _parse_update(raw: object, index: int) -> _ParsedUpdate:
     if not isinstance(raw, Mapping):
-        return _ParsedProposal(
-            record={"kind": "", "content": "", "evidence": "", "scope": ""},
-            errors=["proposal_not_object"],
+        return _ParsedUpdate(
+            index=index,
+            operation="",
+            targets=[],
+            target_hint="",
+            memory=None,
+            reason="",
+            errors=["update_not_object"],
         )
-    kind = _string_field(raw.get("kind"), max_length=64)
-    content = _string_field(raw.get("content"), max_length=500)
-    evidence = _string_field(raw.get("evidence"), max_length=300)
-    scope = _string_field(raw.get("scope"), max_length=64)
-    errors: list[str] = []
-    if kind not in _ALLOWED_KINDS:
-        errors.append("invalid_kind")
-    if not content:
-        errors.append("missing_content")
-    elif len(str(raw.get("content") or "")) > 500:
-        errors.append("content_too_long")
-    if not evidence:
-        errors.append("missing_evidence")
-    elif len(str(raw.get("evidence") or "")) > 300:
-        errors.append("evidence_too_long")
-    if scope not in _ALLOWED_SCOPES:
-        errors.append("invalid_scope")
-    return _ParsedProposal(
-        record={"kind": kind, "content": content, "evidence": evidence, "scope": scope},
+    operation = _string_field(raw.get("operation"), max_length=64)
+    targets = _target_list(raw.get("targets"))
+    target_hint = _string_field(raw.get("target_hint"), max_length=300)
+    reason = _string_field(raw.get("reason"), max_length=500)
+    memory, memory_errors = _parse_memory(raw.get("memory"))
+    errors = list(memory_errors)
+    if operation not in _ALLOWED_OPERATIONS:
+        errors.append("invalid_operation")
+    if not reason:
+        errors.append("missing_reason")
+    if raw.get("targets") is not None and not isinstance(raw.get("targets"), list):
+        errors.append("invalid_targets")
+    if operation != "retract" and memory is None:
+        errors.append("missing_memory")
+    return _ParsedUpdate(
+        index=index,
+        operation=operation,
+        targets=targets,
+        target_hint=target_hint,
+        memory=memory,
+        reason=reason,
         errors=errors,
     )
 
 
-def _gate(
-    parsed: _ParsedProposal,
-    context: MemoryProposalContext,
-) -> _GateResult:
+def _parse_memory(raw: object) -> tuple[_MemoryRecord | None, list[str]]:
+    if raw is None:
+        return None, []
+    if not isinstance(raw, Mapping):
+        return None, ["invalid_memory"]
+    memory_type = _string_field(raw.get("type"), max_length=64)
+    content = _string_field(raw.get("content"), max_length=500)
+    evidence = _string_field(raw.get("evidence"), max_length=500)
+    scope = _string_field(raw.get("scope"), max_length=64)
+    errors: list[str] = []
+    if memory_type not in _ALLOWED_MEMORY_TYPES:
+        errors.append("invalid_memory_type")
+    if not content:
+        errors.append("missing_memory_content")
+    if not evidence:
+        errors.append("missing_memory_evidence")
+    if scope not in _ALLOWED_SCOPES:
+        errors.append("invalid_scope")
+    if errors:
+        return None, errors
+    return _MemoryRecord(type=memory_type, content=content, evidence=evidence, scope=scope), []
+
+
+def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _OperationPlan:
     if parsed.errors:
-        return _GateResult("rejected", "invalid_schema:" + ",".join(parsed.errors))
-    kind = parsed.record["kind"]
-    scope = parsed.record["scope"]
-    if scope == "counterpart" and context.counterpart is None:
-        return _GateResult("pending_confirmation", "missing_counterpart_scope")
-    targeted_beliefs = _targeted_active_beliefs(parsed.record, context)
-    same_content = [
+        return _OperationPlan(
+            decision="rejected",
+            operation=parsed.operation or "invalid",
+            reason="invalid_schema:" + ",".join(parsed.errors),
+            memory=parsed.memory,
+            emit_memory_proposed=False,
+        )
+    if (
+        parsed.memory is not None
+        and parsed.memory.scope == "counterpart"
+        and context.counterpart is None
+    ):
+        return _OperationPlan(
+            decision="pending_confirmation",
+            operation=parsed.operation,
+            reason="missing_counterpart_scope",
+            memory=parsed.memory,
+        )
+
+    target_check = _validate_targets(parsed, context)
+    if target_check.decision != "accepted":
+        return target_check
+
+    if parsed.operation == "append":
+        return _plan_append(parsed, context, target_check.target_beliefs)
+    if parsed.operation == "reinforce":
+        if not target_check.target_beliefs:
+            return _needs_targets(parsed, context, "reinforce_requires_target")
+        return _OperationPlan(
+            decision="accepted",
+            operation="reinforce",
+            reason="accepted_reinforce",
+            target_beliefs=target_check.target_beliefs,
+            memory=parsed.memory,
+        )
+    if parsed.operation == "replace":
+        if len(target_check.target_beliefs) != 1:
+            return _OperationPlan(
+                decision="rejected",
+                operation="replace",
+                reason="replace_requires_exactly_one_target",
+                memory=parsed.memory,
+            )
+        return _OperationPlan(
+            decision="accepted",
+            operation="replace",
+            reason="accepted_replace",
+            target_beliefs=target_check.target_beliefs,
+            memory=parsed.memory,
+        )
+    if parsed.operation == "merge":
+        if len(target_check.target_beliefs) < 2:
+            return _OperationPlan(
+                decision="rejected",
+                operation="merge",
+                reason="merge_requires_at_least_two_targets",
+                target_beliefs=target_check.target_beliefs,
+                memory=parsed.memory,
+            )
+        return _OperationPlan(
+            decision="accepted",
+            operation="merge",
+            reason="accepted_merge",
+            target_beliefs=target_check.target_beliefs,
+            memory=parsed.memory,
+        )
+    if parsed.operation == "correct":
+        if target_check.target_beliefs:
+            return _OperationPlan(
+                decision="pending_confirmation",
+                operation="correct",
+                reason="correct_requires_confirmation",
+                target_beliefs=target_check.target_beliefs,
+                memory=parsed.memory,
+            )
+        candidates = _candidate_outputs(parsed, context)
+        if candidates:
+            return _OperationPlan(
+                decision="needs_target_selection",
+                operation="correct",
+                reason="correct_requires_target_selection",
+                candidates=candidates,
+                memory=parsed.memory,
+            )
+        return _OperationPlan(
+            decision="pending_confirmation",
+            operation="correct",
+            reason="correct_requires_confirmed_target",
+            memory=parsed.memory,
+        )
+    if parsed.operation == "retract":
+        if not target_check.target_beliefs:
+            return _needs_targets(
+                parsed,
+                context,
+                "retract_requires_target",
+                empty_decision="needs_target_selection",
+            )
+        if not parsed.evidence:
+            return _OperationPlan(
+                decision="pending_confirmation",
+                operation="retract",
+                reason="retract_requires_evidence",
+                target_beliefs=target_check.target_beliefs,
+                memory=parsed.memory,
+            )
+        return _OperationPlan(
+            decision="accepted",
+            operation="retract",
+            reason="accepted_retract",
+            target_beliefs=target_check.target_beliefs,
+            memory=parsed.memory,
+        )
+    return _OperationPlan(
+        decision="rejected",
+        operation=parsed.operation,
+        reason="invalid_operation",
+        memory=parsed.memory,
+    )
+
+
+def _plan_append(
+    parsed: _ParsedUpdate,
+    context: MemoryProposalContext,
+    target_beliefs: list[Belief],
+) -> _OperationPlan:
+    if target_beliefs:
+        return _OperationPlan(
+            decision="accepted",
+            operation="append",
+            reason="accepted_append",
+            target_beliefs=target_beliefs,
+            memory=parsed.memory,
+        )
+    exact_duplicates = _exact_duplicate_beliefs(parsed, context)
+    if exact_duplicates:
+        return _OperationPlan(
+            decision="accepted",
+            operation="reinforce",
+            reason="accepted_duplicate_reinforced",
+            target_beliefs=[exact_duplicates[0]],
+            memory=parsed.memory,
+        )
+    candidates = _candidate_outputs(parsed, context)
+    if candidates:
+        return _OperationPlan(
+            decision="needs_target_selection",
+            operation="append",
+            reason="related_active_beliefs_require_target_selection",
+            candidates=candidates,
+            memory=parsed.memory,
+        )
+    return _OperationPlan(
+        decision="accepted",
+        operation="append",
+        reason="accepted_append",
+        memory=parsed.memory,
+    )
+
+
+def _needs_targets(
+    parsed: _ParsedUpdate,
+    context: MemoryProposalContext,
+    fallback_reason: str,
+    *,
+    empty_decision: Decision = "rejected",
+) -> _OperationPlan:
+    candidates = _candidate_outputs(parsed, context, include_exact=True)
+    if candidates:
+        return _OperationPlan(
+            decision="needs_target_selection",
+            operation=parsed.operation,
+            reason=fallback_reason,
+            candidates=candidates,
+            memory=parsed.memory,
+        )
+    return _OperationPlan(
+        decision=empty_decision,
+        operation=parsed.operation,
+        reason=fallback_reason,
+        memory=parsed.memory,
+    )
+
+
+def _validate_targets(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _OperationPlan:
+    if not parsed.targets:
+        return _OperationPlan(
+            decision="accepted",
+            operation=parsed.operation,
+            reason="targets_valid",
+            memory=parsed.memory,
+        )
+    if len(set(parsed.targets)) != len(parsed.targets):
+        return _OperationPlan(
+            decision="rejected",
+            operation=parsed.operation,
+            reason="duplicate_targets",
+            memory=parsed.memory,
+        )
+    projection = context.belief_projection
+    if projection is None:
+        return _OperationPlan(
+            decision="rejected",
+            operation=parsed.operation,
+            reason="missing_belief_projection",
+            memory=parsed.memory,
+        )
+    target_beliefs: list[Belief] = []
+    for target_id in parsed.targets:
+        belief = projection.get_by_id(target_id)
+        if belief is None:
+            return _OperationPlan(
+                decision="rejected",
+                operation=parsed.operation,
+                reason="target_not_found",
+                memory=parsed.memory,
+            )
+        if str(belief.status) != "active":
+            return _OperationPlan(
+                decision="rejected",
+                operation=parsed.operation,
+                reason="target_not_active",
+                memory=parsed.memory,
+            )
+        if not _target_scope_matches(belief, parsed.memory, context):
+            return _OperationPlan(
+                decision="rejected",
+                operation=parsed.operation,
+                reason="target_scope_mismatch",
+                memory=parsed.memory,
+            )
+        if parsed.memory is not None and _memory_type_for_belief(belief) != parsed.memory.type:
+            return _OperationPlan(
+                decision="rejected",
+                operation=parsed.operation,
+                reason="target_type_mismatch",
+                memory=parsed.memory,
+            )
+        target_beliefs.append(belief)
+    return _OperationPlan(
+        decision="accepted",
+        operation=parsed.operation,
+        reason="targets_valid",
+        target_beliefs=target_beliefs,
+        memory=parsed.memory,
+    )
+
+
+def _target_scope_matches(
+    belief: Belief,
+    memory: _MemoryRecord | None,
+    context: MemoryProposalContext,
+) -> bool:
+    scope = _scope_for_belief(belief)
+    if memory is not None and scope != memory.scope:
+        return False
+    if scope == "counterpart":
+        if context.counterpart is None:
+            return False
+        return any(
+            ref.kind == context.counterpart.kind and ref.id == context.counterpart.id
+            for ref in belief.about
+        )
+    return True
+
+
+def _exact_duplicate_beliefs(parsed: _ParsedUpdate, context: MemoryProposalContext) -> list[Belief]:
+    if parsed.memory is None or context.belief_projection is None:
+        return []
+    normalized = _normalized_content(parsed.memory.content)
+    return [
         belief
-        for belief in targeted_beliefs
-        if _normalized_content(belief.content) == _normalized_content(parsed.record["content"])
+        for belief in _same_scope_type_active_beliefs(parsed, context)
+        if _normalized_content(belief.content) == normalized
     ]
-    if same_content:
-        return _GateResult(
-            "accepted",
-            "accepted_duplicate_active_belief",
-            duplicate_belief_id=str(same_content[0].id),
+
+
+def _candidate_outputs(
+    parsed: _ParsedUpdate,
+    context: MemoryProposalContext,
+    *,
+    include_exact: bool = False,
+) -> list[_Candidate]:
+    if context.belief_projection is None:
+        return []
+    query = _candidate_query(parsed)
+    if not query:
+        return []
+    counterpart = (
+        context.counterpart
+        if parsed.memory is None or parsed.memory.scope == "counterpart"
+        else None
+    )
+    types = (
+        frozenset({_belief_type(parsed.memory.type)}) if parsed.memory is not None else None
+    )
+    candidates = context.belief_projection.recall_candidates(
+        BeliefSearchParams(
+            query=query,
+            counterpart=counterpart,
+            include_global=parsed.memory is None or parsed.memory.scope == "global",
+            types=types,
+            limit=8,
         )
-    conflict_belief_ids = [
-        str(belief.id)
-        for belief in targeted_beliefs
-        if _normalized_content(belief.content) != _normalized_content(parsed.record["content"])
+    )
+    outputs: list[_Candidate] = []
+    for candidate in candidates:
+        belief = candidate.belief
+        if str(belief.status) != "active":
+            continue
+        if parsed.memory is not None:
+            if (
+                not include_exact
+                and _normalized_content(belief.content)
+                == _normalized_content(parsed.memory.content)
+            ):
+                continue
+            if _scope_for_belief(belief) != parsed.memory.scope:
+                continue
+            if _memory_type_for_belief(belief) != parsed.memory.type:
+                continue
+        outputs.append(_candidate_from_belief(belief))
+        if len(outputs) == 3:
+            break
+    return outputs
+
+
+def _candidate_query(parsed: _ParsedUpdate) -> str:
+    if parsed.memory is None:
+        return " ".join(item for item in [parsed.target_hint, parsed.reason] if item)
+    return " ".join(
+        item for item in [parsed.memory.content, parsed.target_hint, parsed.memory.evidence] if item
+    )
+
+
+def _same_scope_type_active_beliefs(
+    parsed: _ParsedUpdate,
+    context: MemoryProposalContext,
+) -> list[Belief]:
+    if parsed.memory is None or context.belief_projection is None:
+        return []
+    if parsed.memory.scope == "counterpart" and context.counterpart is not None:
+        candidates = context.belief_projection.recall_about(context.counterpart)
+    else:
+        candidates = context.belief_projection.list_active()
+    return [
+        belief
+        for belief in candidates
+        if str(belief.status) == "active"
+        and _scope_for_belief(belief) == parsed.memory.scope
+        and _memory_type_for_belief(belief) == parsed.memory.type
     ]
-    if kind == "correction":
-        return _GateResult(
-            "pending_confirmation",
-            "correction_requires_review",
-            conflict_belief_ids=conflict_belief_ids,
-            candidate_change_kind="correct",
-        )
-    if len(conflict_belief_ids) == 1:
-        return _GateResult(
-            "accepted",
-            "accepted_single_structured_replacement",
-            conflict_belief_ids=conflict_belief_ids,
-            replace_belief_id=conflict_belief_ids[0],
-            candidate_change_kind="replace",
-        )
-    if conflict_belief_ids:
-        return _GateResult(
-            "pending_confirmation",
-            "ambiguous_conflict",
-            conflict_belief_ids=conflict_belief_ids,
-            candidate_change_kind="replace",
-        )
-    if kind not in _AUTO_ACCEPT_KINDS:
-        return _GateResult("rejected", "unsupported_auto_accept_kind")
-    return _GateResult("accepted", f"accepted_foreground_{kind}")
+
+
+def _candidate_from_belief(belief: Belief) -> _Candidate:
+    return _Candidate(
+        id=str(belief.id),
+        content=str(belief.content),
+        type=_memory_type_for_belief(belief),
+        scope=_scope_for_belief(belief),
+        status=str(belief.status),
+    )
 
 
 def _emit_belief_formed(
     *,
     context: MemoryProposalContext,
     proposal_id: str,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
     belief: Belief,
-    gate_reason: str,
-    proposed_event: CognitiveEvent,
+    causal_parents: list[EventId],
+    tool_call_id: str | None,
 ) -> CognitiveEvent:
     formed = context.emitter.emit(
         CognitiveEventKind.BELIEF_FORMED,
@@ -447,14 +1004,18 @@ def _emit_belief_formed(
             Reference("session_message", context.user_message_id),
         ],
         outputs=[Reference("belief", str(belief.id))],
-        rationale="Promoted accepted foreground memory proposal.",
-        causal_parents=[proposed_event.id],
+        rationale="Promoted accepted memory update.",
+        causal_parents=causal_parents,
         payload={
-            "turn_id": context.turn_id,
-            "session_id": context.session_id,
+            **_change_payload(
+                context=context,
+                parsed=parsed,
+                plan=plan,
+                tool_call_id=tool_call_id,
+            ),
             "proposal_id": proposal_id,
             "origin": MEMORY_PROPOSE_TOOL_NAME,
-            "gate_reason": gate_reason,
+            "new_belief_id": str(belief.id),
             "belief": belief.to_record(),
         },
     )
@@ -462,49 +1023,128 @@ def _emit_belief_formed(
     return formed
 
 
+def _emit_belief_strengthened(
+    *,
+    context: MemoryProposalContext,
+    proposal_id: str,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
+    causal_parents: list[EventId],
+    tool_call_id: str | None,
+) -> CognitiveEvent:
+    target = plan.target_beliefs[0]
+    strengthened = context.emitter.emit(
+        CognitiveEventKind.BELIEF_STRENGTHENED,
+        situation=context.situation,
+        inputs=[
+            Reference("memory_proposal", proposal_id),
+            Reference("belief", str(target.id)),
+            Reference("session_message", context.user_message_id),
+        ],
+        outputs=[Reference("belief", str(target.id))],
+        rationale="Reinforced an active belief through a memory update.",
+        causal_parents=causal_parents,
+        payload={
+            **_change_payload(
+                context=context,
+                parsed=parsed,
+                plan=plan,
+                tool_call_id=tool_call_id,
+            ),
+            "proposal_id": proposal_id,
+            "belief_id": str(target.id),
+            "delta": 0.05,
+        },
+    )
+    context.apply_cognitive_event(strengthened)
+    return strengthened
+
+
 def _emit_belief_superseded(
     *,
     context: MemoryProposalContext,
     proposal_id: str,
-    old_belief_id: str,
-    belief: Belief,
-    gate_reason: str,
-    proposed_event: CognitiveEvent,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
+    old_belief: Belief,
+    new_belief: Belief,
+    causal_parents: list[EventId],
+    tool_call_id: str | None,
+    include_belief: bool = True,
 ) -> CognitiveEvent:
+    payload: dict[str, Any] = {
+        **_change_payload(
+            context=context,
+            parsed=parsed,
+            plan=plan,
+            tool_call_id=tool_call_id,
+        ),
+        "proposal_id": proposal_id,
+        "origin": MEMORY_PROPOSE_TOOL_NAME,
+        "old_belief_id": str(old_belief.id),
+        "new_belief_id": str(new_belief.id),
+    }
+    if include_belief:
+        payload["belief"] = new_belief.to_record()
     superseded = context.emitter.emit(
         CognitiveEventKind.BELIEF_SUPERSEDED,
         situation=context.situation,
         inputs=[
             Reference("memory_proposal", proposal_id),
-            Reference("belief", old_belief_id),
+            Reference("belief", str(old_belief.id)),
             Reference("session_message", context.user_message_id),
         ],
-        outputs=[Reference("belief", str(belief.id))],
-        rationale="Replaced one active belief through an accepted foreground memory proposal.",
-        causal_parents=[proposed_event.id],
-        payload={
-            "turn_id": context.turn_id,
-            "session_id": context.session_id,
-            "proposal_id": proposal_id,
-            "origin": MEMORY_PROPOSE_TOOL_NAME,
-            "gate_reason": gate_reason,
-            "old_belief_id": old_belief_id,
-            "new_belief_id": str(belief.id),
-            "reason": gate_reason,
-            "belief": belief.to_record(),
-        },
+        outputs=[Reference("belief", str(new_belief.id))],
+        rationale="Superseded an active belief through an accepted memory update.",
+        causal_parents=causal_parents,
+        payload=payload,
     )
     context.apply_cognitive_event(superseded)
     return superseded
+
+
+def _emit_belief_retracted(
+    *,
+    context: MemoryProposalContext,
+    proposal_id: str,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
+    causal_parents: list[EventId],
+    tool_call_id: str | None,
+) -> CognitiveEvent:
+    target = plan.target_beliefs[0]
+    retracted = context.emitter.emit(
+        CognitiveEventKind.BELIEF_RETRACTED,
+        situation=context.situation,
+        inputs=[
+            Reference("memory_proposal", proposal_id),
+            Reference("belief", str(target.id)),
+            Reference("session_message", context.user_message_id),
+        ],
+        outputs=[Reference("belief", str(target.id))],
+        rationale="Retracted an active belief through a memory update.",
+        causal_parents=causal_parents,
+        payload={
+            **_change_payload(
+                context=context,
+                parsed=parsed,
+                plan=plan,
+                tool_call_id=tool_call_id,
+            ),
+            "proposal_id": proposal_id,
+            "belief_id": str(target.id),
+        },
+    )
+    context.apply_cognitive_event(retracted)
+    return retracted
 
 
 def _emit_memory_proposed(
     *,
     context: MemoryProposalContext,
     proposal_id: str,
-    proposal: dict[str, str],
-    gate_decision: GateDecision,
-    gate_reason: str,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
     tool_call_id: str | None,
 ) -> CognitiveEvent:
     source_refs = [
@@ -516,25 +1156,29 @@ def _emit_memory_proposed(
         llm_call_id=context.llm_call_id,
         llm_trace_ids=context.llm_trace_ids,
     )
+    scope = parsed.memory.scope if parsed.memory is not None else "global"
     return context.emitter.emit(
         CognitiveEventKind.MEMORY_PROPOSED,
         situation=context.situation,
         inputs=[Reference("session_message", context.user_message_id)],
         outputs=[Reference("memory_proposal", proposal_id)],
-        rationale="Recorded foreground memory write proposal.",
+        rationale="Recorded foreground memory update proposal.",
         causal_parents=_event_ids([context.turn_received_event_id]),
         payload={
-            "turn_id": context.turn_id,
-            "session_id": context.session_id,
-            "tool_call_id": tool_call_id or "",
+            **_change_payload(
+                context=context,
+                parsed=parsed,
+                plan=plan,
+                tool_call_id=tool_call_id,
+            ),
             "proposal_id": proposal_id,
-            "proposal": dict(proposal),
+            "proposal": parsed.update_payload(),
             "derived_about": [
-                item.to_record() for item in _derived_about(proposal["scope"], context)
+                item.to_record() for item in _derived_about(scope, context)
             ],
             "source_refs": [item.to_record() for item in source_refs],
             "audit_refs": [item.to_record() for item in audit_refs],
-            "gate": {"decision": gate_decision, "reason": gate_reason},
+            "gate": {"decision": plan.decision, "reason": plan.reason},
         },
     )
 
@@ -543,30 +1187,52 @@ def _emit_pending_confirmation(
     *,
     context: MemoryProposalContext,
     proposal_id: str,
-    proposal: dict[str, str],
-    gate: _GateResult,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
     proposed_event: CognitiveEvent,
+    tool_call_id: str | None,
 ) -> CognitiveEvent:
     return context.emitter.emit(
         CognitiveEventKind.BELIEF_FORM_PENDING_CONFIRMATION,
         situation=context.situation,
         inputs=[Reference("memory_proposal", proposal_id)],
         outputs=[],
-        rationale="Memory proposal requires user confirmation before mutation.",
+        rationale="Memory update requires user confirmation before mutation.",
         causal_parents=[proposed_event.id],
         payload={
-            "turn_id": context.turn_id,
-            "session_id": context.session_id,
+            **_change_payload(
+                context=context,
+                parsed=parsed,
+                plan=plan,
+                tool_call_id=tool_call_id,
+            ),
             "proposal_id": proposal_id,
-            "reason": gate.reason,
             "required_user_action": "confirm_memory_change",
             "candidate_change": {
-                "kind": gate.candidate_change_kind,
-                "content": proposal["content"],
+                "operation": plan.operation,
+                "memory": parsed.memory.to_payload() if parsed.memory is not None else None,
             },
-            "conflict_belief_ids": list(gate.conflict_belief_ids),
+            "conflict_belief_ids": plan.target_belief_ids,
         },
     )
+
+
+def _change_payload(
+    *,
+    context: MemoryProposalContext,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
+    tool_call_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "turn_id": context.turn_id,
+        "session_id": context.session_id,
+        "tool_call_id": tool_call_id or "",
+        "operation": plan.operation,
+        "target_belief_ids": plan.target_belief_ids,
+        "reason": parsed.reason or plan.reason,
+        "evidence": parsed.evidence or parsed.reason,
+    }
 
 
 def _audit_refs(
@@ -594,53 +1260,57 @@ def _derived_about(scope: str, context: MemoryProposalContext) -> list[Reference
     return []
 
 
-def _belief_object(*, kind: str, scope: str, about: list[Reference]) -> str:
+def _belief_object(*, memory_type: str, scope: str, about: list[Reference]) -> str:
     if scope == "counterpart" and about:
-        return f"{kind}:{about[0].id}"
-    return f"{kind}:{scope}"
+        return f"{memory_type}:{about[0].id}"
+    return f"{memory_type}:{scope}"
 
 
-def _belief_type(kind: str) -> CognitiveType:
-    if kind == "preference":
+def _belief_type(memory_type: str) -> CognitiveType:
+    if memory_type == "preference":
         return CognitiveType.PREFERENCE
+    if memory_type == "factual":
+        return CognitiveType.FACTUAL
     return CognitiveType.PROCEDURAL
 
 
-def _targeted_active_beliefs(
-    proposal: Mapping[str, str],
-    context: MemoryProposalContext,
-) -> list[Belief]:
-    projection = context.belief_projection
-    if projection is None:
+def _memory_type_for_belief(belief: Belief) -> str:
+    prefix = str(belief.object).split(":", 1)[0]
+    if prefix in _ALLOWED_MEMORY_TYPES:
+        return prefix
+    if belief.cognitive_type == CognitiveType.PREFERENCE:
+        return "preference"
+    if belief.cognitive_type == CognitiveType.FACTUAL:
+        return "factual"
+    return "procedure"
+
+
+def _scope_for_belief(belief: Belief) -> str:
+    return "counterpart" if belief.about else "global"
+
+
+def _target_list(value: object) -> list[str]:
+    if not isinstance(value, list):
         return []
-    about = _derived_about(proposal["scope"], context)
-    if about:
-        candidates = projection.recall_about(about[0])
-    else:
-        candidates = projection.list_active()
-    belief_object = _belief_object(
-        kind=proposal["kind"],
-        scope=proposal["scope"],
-        about=about,
-    )
-    return [
-        belief
-        for belief in candidates
-        if str(belief.status) == "active" and str(belief.object) == belief_object
-    ]
+    targets: list[str] = []
+    for item in value[:5]:
+        target = _non_empty_str(item)
+        if target:
+            targets.append(target)
+    return targets
 
 
-def _aggregate_status(proposal_results: list[_ProposalResult]) -> MemoryStatus:
-    decisions = {result.decision for result in proposal_results}
+def _aggregate_status(results: list[_UpdateResult]) -> MemoryStatus:
+    decisions = {result.decision for result in results}
     if not decisions:
         return "rejected"
     if len(decisions) == 1:
-        return proposal_results[0].decision
+        return results[0].decision
     return "mixed"
 
 
-def _aggregate_user_action(proposal_results: list[_ProposalResult]) -> UserAction:
-    actions = [_user_action_for(result) for result in proposal_results]
+def _aggregate_user_action(results: list[_UpdateResult]) -> UserAction:
+    actions = [_user_action_for(result) for result in results]
     if "ask_confirmation" in actions:
         return "ask_confirmation"
     if "explain_rejection" in actions:
@@ -648,33 +1318,32 @@ def _aggregate_user_action(proposal_results: list[_ProposalResult]) -> UserActio
     return "none"
 
 
-def _user_action_for(result: _ProposalResult) -> UserAction:
+def _user_action_for(result: _UpdateResult) -> UserAction:
     if result.decision == "pending_confirmation":
         return "ask_confirmation"
-    if result.decision == "rejected" and (
-        result.reason.startswith("invalid_schema:")
-        or result.reason == "unsupported_auto_accept_kind"
-    ):
+    if result.decision == "rejected":
         return "explain_rejection"
     return "none"
 
 
-def _message_hint(
-    user_action: UserAction,
-    proposal_results: list[_ProposalResult],
-) -> str:
+def _message_hint(user_action: UserAction, results: list[_UpdateResult]) -> str:
     if user_action == "ask_confirmation":
         return "Ask the user to confirm the pending memory change before applying it."
     if user_action == "explain_rejection":
         reason = next(
             (
                 result.reason
-                for result in proposal_results
+                for result in results
                 if _user_action_for(result) == "explain_rejection"
             ),
             "unknown",
         )
-        return f"Memory proposal rejected: {reason}."
+        return f"Memory update rejected: {reason}."
+    if any(result.decision == "needs_target_selection" for result in results):
+        return (
+            "Related memories were found. Choose append, replace, merge, correct, "
+            "retract, or ask the user."
+        )
     return ""
 
 
@@ -683,13 +1352,13 @@ def _memory_output(
     status: MemoryStatus,
     user_action: UserAction,
     message_hint: str,
-    proposal_results: list[_ProposalResult],
+    results: list[_UpdateResult],
 ) -> dict[str, Any]:
     return {
         "status": status,
         "user_action": user_action,
         "message_hint": message_hint,
-        "proposal_results": [result.to_output() for result in proposal_results],
+        "results": [result.to_output() for result in results],
     }
 
 

@@ -16,6 +16,9 @@ class EventPayloadValidationError(ValueError):
     """Raised when an emitted cognition event is missing consumed payload data."""
 
 
+_MEMORY_PROPOSE_ORIGIN = "memory_propose"
+
+
 def validate_event_payload(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
     """Validate locally consumed payload fields for key cognition events."""
 
@@ -53,6 +56,10 @@ def _validate_pending_confirmation(kind: CognitiveEventKind, payload: dict[str, 
     _require_non_empty_str(kind, payload, "required_user_action")
     _require_dict(kind, payload, "candidate_change")
     _require_list(kind, payload, "conflict_belief_ids")
+    _require_non_empty_str(kind, payload, "operation")
+    _require_list(kind, payload, "target_belief_ids")
+    _require_non_empty_str(kind, payload, "evidence")
+    _require_non_empty_str(kind, payload, "tool_call_id")
 
 
 def _validate_memory_proposed(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
@@ -64,6 +71,10 @@ def _validate_memory_proposed(kind: CognitiveEventKind, payload: dict[str, Any])
     _require_list(kind, payload, "source_refs")
     _require_list(kind, payload, "audit_refs")
     _require_dict(kind, payload, "gate")
+    _require_non_empty_str(kind, payload, "operation")
+    _require_list(kind, payload, "target_belief_ids")
+    _require_non_empty_str(kind, payload, "reason")
+    _require_non_empty_str(kind, payload, "evidence")
 
 
 def _validate_turn_sources_recorded(
@@ -115,11 +126,55 @@ def _validate_procedure_learned(kind: CognitiveEventKind, payload: dict[str, Any
 
 
 def _validate_belief_formed(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
+    if _requires_memory_change_contract(payload):
+        _validate_memory_change_common(kind, payload)
+        _require_non_empty_str(kind, payload, "new_belief_id")
+        _require_dict(kind, payload, "belief")
+        return
     if isinstance(payload.get("belief"), dict):
         return
     if _non_empty_str(payload.get("origin")) or payload.get("auto_formed_novel") is True:
         return
     _missing(kind, "belief")
+
+
+def _validate_belief_strengthened(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
+    if not _requires_memory_change_contract(payload):
+        return
+    _validate_memory_change_common(kind, payload)
+    _require_non_empty_str(kind, payload, "belief_id")
+
+
+def _validate_belief_superseded(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
+    if not _requires_memory_change_contract(payload):
+        return
+    _validate_memory_change_common(kind, payload)
+    _require_non_empty_str(kind, payload, "old_belief_id")
+    _require_non_empty_str(kind, payload, "new_belief_id")
+    _require_dict(kind, payload, "belief")
+
+
+def _validate_belief_retracted(kind: CognitiveEventKind, payload: dict[str, Any]) -> None:
+    if not _requires_memory_change_contract(payload):
+        return
+    _validate_memory_change_common(kind, payload)
+    _require_non_empty_str(kind, payload, "belief_id")
+
+
+def _requires_memory_change_contract(payload: dict[str, Any]) -> bool:
+    return payload.get("origin") == _MEMORY_PROPOSE_ORIGIN or "operation" in payload
+
+
+def _validate_memory_change_common(
+    kind: CognitiveEventKind,
+    payload: dict[str, Any],
+) -> None:
+    _validate_foreground_identity(kind, payload)
+    _require_non_empty_str(kind, payload, "operation")
+    _require_list(kind, payload, "target_belief_ids")
+    _require_non_empty_str(kind, payload, "reason")
+    _require_non_empty_str(kind, payload, "evidence")
+    _require_non_empty_str(kind, payload, "tool_call_id")
 
 
 def _require_present(
@@ -204,4 +259,7 @@ _VALIDATORS: dict[CognitiveEventKind, Callable[[CognitiveEventKind, dict[str, An
     CognitiveEventKind.CONTEXT_COMPRESSED: _validate_context_compressed,
     CognitiveEventKind.PROCEDURE_LEARNED: _validate_procedure_learned,
     CognitiveEventKind.BELIEF_FORMED: _validate_belief_formed,
+    CognitiveEventKind.BELIEF_STRENGTHENED: _validate_belief_strengthened,
+    CognitiveEventKind.BELIEF_SUPERSEDED: _validate_belief_superseded,
+    CognitiveEventKind.BELIEF_RETRACTED: _validate_belief_retracted,
 }

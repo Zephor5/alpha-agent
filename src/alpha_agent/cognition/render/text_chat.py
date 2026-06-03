@@ -169,10 +169,11 @@ _SYSTEM_PROMPT = (
     "When counterpart profile context is present, treat it as already-visible stable "
     "relationship context near the start of the prompt. Use memory_recall for explicit "
     "long-term belief lookup when details are needed beyond the visible context.\n"
-    "Use memory_propose only for explicit long-term user preferences, stable "
-    "constraints, reusable procedures, or direct corrections to remembered cognition. "
-    "Do not call memory_propose for ordinary facts, transient session context, or guesses. "
-    "Corrections are proposals only; do not claim memory was changed unless asked."
+    "Use memory_propose only for explicit long-term memory updates: append, reinforce, "
+    "replace, merge, correct, or retract a preference, constraint, procedure, or factual "
+    "memory. Do not call memory_propose for ordinary facts, transient session context, "
+    "or guesses. Corrections require a target or confirmation; do not claim memory was "
+    "changed unless the tool accepted the update."
 )
 
 

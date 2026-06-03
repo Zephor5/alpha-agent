@@ -103,7 +103,7 @@ from alpha_agent.runtime.session_context import (
     SessionContextAssembler,
 )
 from alpha_agent.skills.manager import SkillManager
-from alpha_agent.state.models import SessionMessage
+from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.default import build_tool_registry
 
@@ -947,16 +947,132 @@ def _render_cognitive_trace(store: StateStore, session_id: str) -> None:
     console.print("Cognitive Trace", markup=False)
     if not events:
         console.print("(none)", markup=False)
-        return
-    for event in events[-20:]:
-        turn_id = event.payload.get("turn_id", "-")
-        event_session_id = event.payload.get("session_id", "-")
-        parents = ",".join(str(parent) for parent in event.causal_parents) or "-"
-        console.print(
-            f"{event.timestamp} kind={event.kind.value} turn_id={turn_id} "
-            f"session_id={event_session_id} id={event.id} parents={parents}",
-            markup=False,
-        )
+    else:
+        for event in events[-20:]:
+            turn_id = event.payload.get("turn_id", "-")
+            event_session_id = event.payload.get("session_id", "-")
+            parents = ",".join(str(parent) for parent in event.causal_parents) or "-"
+            console.print(
+                f"{event.timestamp} kind={event.kind.value} turn_id={turn_id} "
+                f"session_id={event_session_id} id={event.id} parents={parents}",
+                markup=False,
+            )
+    memory_traces = _memory_tool_traces(store, session_id)
+    if memory_traces:
+        console.print("Memory Tool Trace", markup=False)
+        for trace in memory_traces[-20:]:
+            console.print(_format_memory_tool_trace(trace), markup=False)
+
+
+def _memory_tool_traces(store: StateStore, session_id: str) -> list[RuntimeTrace]:
+    return [
+        trace
+        for trace in store.list_runtime_traces(session_id)
+        if trace.event_type in {"tool.completed", "tool.failed"}
+        and _trace_tool_name(trace) in {"memory_recall", "memory_propose"}
+    ]
+
+
+def _format_memory_tool_trace(trace: RuntimeTrace) -> str:
+    tool_name = _trace_tool_name(trace)
+    output = _trace_output(trace)
+    parts = [
+        f"{trace.timestamp} tool={tool_name}",
+        f"trace={trace.id}",
+        f"event={trace.event_type}",
+    ]
+    status = output.get("status")
+    if isinstance(status, str) and status:
+        parts.append(f"status={status}")
+    if tool_name == "memory_recall":
+        result_ids = _ids_from_items(output.get("results"))
+        if result_ids:
+            parts.append(f"results={','.join(result_ids)}")
+    elif tool_name == "memory_propose":
+        updates, targets, candidates, new_beliefs = _memory_update_trace_fields(output)
+        if updates:
+            parts.append(f"updates={';'.join(updates)}")
+        if targets:
+            parts.append(f"targets={','.join(targets)}")
+        if candidates:
+            parts.append(f"candidates={','.join(candidates)}")
+        if new_beliefs:
+            parts.append(f"new_beliefs={','.join(new_beliefs)}")
+    return " ".join(parts)
+
+
+def _trace_tool_name(trace: RuntimeTrace) -> str:
+    name = trace.metadata.get("tool_name")
+    if isinstance(name, str) and name:
+        return name
+    result = _trace_result(trace)
+    result_name = result.get("name")
+    return str(result_name) if result_name is not None else ""
+
+
+def _trace_result(trace: RuntimeTrace) -> dict[str, Any]:
+    result = trace.metadata.get("result")
+    return result if isinstance(result, dict) else {}
+
+
+def _trace_output(trace: RuntimeTrace) -> dict[str, Any]:
+    output = _trace_result(trace).get("output")
+    return output if isinstance(output, dict) else {}
+
+
+def _memory_update_trace_fields(
+    output: dict[str, Any],
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    updates: list[str] = []
+    targets: list[str] = []
+    candidates: list[str] = []
+    new_beliefs: list[str] = []
+    for result in _dict_items(output.get("results")):
+        operation = str(result.get("operation") or "-")
+        decision = str(result.get("decision") or "-")
+        updates.append(f"{operation}:{decision}")
+        targets.extend(_strings_from_items(result.get("target_belief_ids")))
+        candidates.extend(_ids_from_items(result.get("candidates")))
+        new_belief = result.get("new_belief_id")
+        if new_belief is not None:
+            new_beliefs.append(str(new_belief))
+    return (
+        _unique_preserving_order(updates),
+        _unique_preserving_order(targets),
+        _unique_preserving_order(candidates),
+        _unique_preserving_order(new_beliefs),
+    )
+
+
+def _dict_items(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _ids_from_items(value: object) -> list[str]:
+    return [
+        str(item["id"])
+        for item in _dict_items(value)
+        if item.get("id") is not None
+    ]
+
+
+def _strings_from_items(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None]
+
+
+def _unique_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
 
 
 def _linked_cognitive_event_ids(

@@ -326,14 +326,10 @@ interface AtomicMemory {
   scope: "user" | "project" | "agent" | "global";
 
   type:
-    | "fact"
+    | "factual"
     | "preference"
-    | "instruction"
-    | "goal"
-    | "project"
-    | "skill"
-    | "correction"
-    | "relationship";
+    | "constraint"
+    | "procedure";
 
   content: string;
 
@@ -360,6 +356,10 @@ interface AtomicMemory {
   updatedAt: string;
 }
 ```
+
+协议层面的 M2 类型应保持窄而稳定：`factual`、`preference`、`constraint`
+和 `procedure`。`correction` 可以作为 M1 事件类型或 memory update 操作存在，
+但不应作为 AtomicMemory / semantic memory type 存储。
 
 注意这里我同时保留了：
 
@@ -950,14 +950,10 @@ For each memory, output:
 - source_event_ids
 
 Memory types:
-- fact
+- factual
 - preference
-- instruction
-- goal
-- project
-- correction
-- skill
-- relationship
+- constraint
+- procedure
 ```
 
 ---

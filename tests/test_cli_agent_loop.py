@@ -1,13 +1,28 @@
 from __future__ import annotations
 
+import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from alpha_agent.cli import app
+from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
+from alpha_agent.cognition.models import CognitiveEventKind
+from alpha_agent.llm.base import (
+    ChatMessage,
+    LLMResponse,
+    LLMToolCall,
+    LLMToolChoice,
+    LLMToolDefinitionInput,
+)
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
+from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_TOOL_NAME
+from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
+from tests.cognition.helpers import clock_factory, emit, id_factory
+from tests.cognition.test_belief_projection_apply import belief
 
 
 def _env(tmp_path: Path) -> dict[str, str]:
@@ -213,6 +228,46 @@ def test_debug_prompt_trace_renders_recent_cognitive_events(tmp_path: Path) -> N
     assert "tick" + "_id=" not in result.output
 
 
+def test_debug_prompt_trace_summarizes_memory_tool_results(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    emit(
+        SQLiteEventLog(store),
+        CognitiveEventKind.BELIEF_FORMED,
+        payload={
+            "turn_id": "turn-seed",
+            "session_id": "s1",
+            "belief": belief(
+                "belief:python",
+                "User prefers Python examples.",
+                object_="preference:global",
+            ).to_record(),
+        },
+        event_ids=id_factory(),
+        clock=clock_factory(),
+    )
+    AlphaAgent(store=store, llm_provider=_MemoryTraceProvider()).respond(
+        "Actually use Rust examples.",
+        session_id="s1",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["debug", "prompt", "continue", "--session", "s1", "--trace"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "Memory Tool Trace" in result.output
+    assert "tool=memory_recall" in result.output
+    assert "results=belief:python" in result.output
+    assert "tool=memory_propose" in result.output
+    assert "status=needs_target_selection" in result.output
+    assert "updates=append:needs_target_selection" in result.output
+    assert "candidates=belief:python" in result.output
+
+
 def test_skills_list_reads_builtin_skills_without_state_store(tmp_path: Path) -> None:
     runner = CliRunner()
 
@@ -220,3 +275,79 @@ def test_skills_list_reads_builtin_skills_without_state_store(tmp_path: Path) ->
 
     assert result.exit_code == 0
     assert "Skill:" in result.output
+
+
+class _MemoryTraceProvider:
+    name = "memory-trace-provider"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        del messages, tools, tool_choice
+        self.calls += 1
+        if self.calls == 1:
+            arguments = {
+                "query": "Python examples",
+                "scope": "global",
+                "max_results": 4,
+            }
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_recall",
+                        name=MEMORY_RECALL_TOOL_NAME,
+                        arguments=arguments,
+                        raw_arguments=json.dumps(arguments, sort_keys=True),
+                    )
+                ],
+            )
+        if self.calls == 2:
+            arguments = {
+                "updates": [
+                    {
+                        "operation": "append",
+                        "targets": [],
+                        "target_hint": "Python examples preference",
+                        "memory": {
+                            "type": "preference",
+                            "content": "User prefers Rust examples.",
+                            "evidence": "User said: actually use Rust examples now.",
+                            "scope": "global",
+                        },
+                        "reason": (
+                            "The user expressed a related but non-identical "
+                            "example-language preference."
+                        ),
+                    }
+                ]
+            }
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_memory",
+                        name=MEMORY_PROPOSE_TOOL_NAME,
+                        arguments=arguments,
+                        raw_arguments=json.dumps(arguments, sort_keys=True),
+                    )
+                ],
+            )
+        return LLMResponse(
+            content="Recorded the memory tool result.",
+            model="test",
+            provider=self.name,
+        )

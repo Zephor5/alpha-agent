@@ -34,6 +34,7 @@ _RECALL_SCAN_LIMIT = 32
 _ALLOWED_ARGUMENTS = frozenset(
     {"query", "keywords", "entities", "intent", "scope", "types", "max_results"}
 )
+_PROTOCOL_MEMORY_TYPES = frozenset({"preference", "constraint", "procedure", "factual"})
 _EXCLUDED_MEMORY_OBJECT_PREFIXES = (
     COUNTERPART_DIGEST_OBJECT_PREFIX,
     "counterpart_profile:",
@@ -73,6 +74,8 @@ class _RecallArguments:
     intent: str | None
     scope: MemoryRecallScope
     types: frozenset[CognitiveType] | None
+    protocol_types: frozenset[str]
+    procedural_broader_requested: bool
     max_results: int
 
 
@@ -93,8 +96,9 @@ class MemoryRecallTool:
     name = MEMORY_RECALL_TOOL_NAME
     description = (
         "Search stable long-term beliefs when explicit memory lookup would help answer "
-        "the current turn. Returns compact belief content only. Does not write memory; "
-        "use memory_propose for explicit long-term memory write proposals."
+        "the current turn. Returns compact belief handles with id, content, type, scope, "
+        "and status. Does not write memory; use memory_propose for explicit long-term "
+        "memory write proposals."
     )
     strict = True
     parameters = {
@@ -136,6 +140,8 @@ class MemoryRecallTool:
                     "type": "string",
                     "enum": [
                         "factual",
+                        "constraint",
+                        "procedure",
                         "procedural",
                         "preference",
                         "value",
@@ -181,7 +187,9 @@ class MemoryRecallTool:
         candidates = [
             candidate
             for candidate in candidates
-            if not _is_excluded_memory_belief(candidate.belief)
+            if _is_active_belief(candidate.belief)
+            and not _is_excluded_memory_belief(candidate.belief)
+            and _matches_protocol_types(candidate.belief, parsed)
         ]
         scored = score_belief_candidates(
             candidates,
@@ -193,9 +201,11 @@ class MemoryRecallTool:
         for item in scored:
             belief = item.belief
             result: dict[str, JSONValue] = {
+                "id": str(belief.id),
                 "content": str(belief.content),
-                "type": belief.cognitive_type.value,
+                "type": _memory_type_for_belief(belief),
                 "scope": item.scope,
+                "status": str(belief.status),
             }
             results.append(result)
             if len(results) >= parsed.max_results:
@@ -301,6 +311,8 @@ def _parse_arguments(arguments: Mapping[str, Any]) -> _RecallArguments:
 
     raw_types = arguments.get("types")
     types: frozenset[CognitiveType] | None = None
+    protocol_types: set[str] = set()
+    procedural_broader_requested = False
     if raw_types is not None:
         if not isinstance(raw_types, list):
             raise ValueError("memory_recall types must be an array")
@@ -310,6 +322,12 @@ def _parse_arguments(arguments: Mapping[str, Any]) -> _RecallArguments:
         for raw_type in raw_types:
             if not isinstance(raw_type, str):
                 raise ValueError("memory_recall types must contain string values")
+            if raw_type in _PROTOCOL_MEMORY_TYPES:
+                protocol_types.add(raw_type)
+                parsed_types.add(_cognitive_type_for_memory_type(raw_type))
+                continue
+            if raw_type == CognitiveType.PROCEDURAL.value:
+                procedural_broader_requested = True
             try:
                 parsed_types.add(CognitiveType(raw_type))
             except ValueError as exc:
@@ -331,6 +349,8 @@ def _parse_arguments(arguments: Mapping[str, Any]) -> _RecallArguments:
         intent=intent,
         scope=scope,
         types=types,
+        protocol_types=frozenset(protocol_types),
+        procedural_broader_requested=procedural_broader_requested,
         max_results=raw_max_results,
     )
 
@@ -418,6 +438,37 @@ def _scope_score(scope: MemoryRecallResultScope, query_scope: MemoryRecallScope)
     if query_scope == "global":
         return _SCOPE_SCORE_GLOBAL_ONLY
     return _SCOPE_SCORE_GLOBAL_IN_BOTH
+
+
+def _matches_protocol_types(belief: Belief, parsed: _RecallArguments) -> bool:
+    if not parsed.protocol_types:
+        return True
+    if belief.cognitive_type != CognitiveType.PROCEDURAL:
+        return True
+    if parsed.procedural_broader_requested:
+        return True
+    return _memory_type_for_belief(belief) in parsed.protocol_types
+
+
+def _memory_type_for_belief(belief: Belief) -> str:
+    prefix = str(belief.object).split(":", 1)[0]
+    if prefix in _PROTOCOL_MEMORY_TYPES:
+        return prefix
+    if belief.cognitive_type == CognitiveType.PREFERENCE:
+        return "preference"
+    if belief.cognitive_type == CognitiveType.FACTUAL:
+        return "factual"
+    if belief.cognitive_type == CognitiveType.PROCEDURAL:
+        return "procedure"
+    return belief.cognitive_type.value
+
+
+def _cognitive_type_for_memory_type(memory_type: str) -> CognitiveType:
+    if memory_type == "preference":
+        return CognitiveType.PREFERENCE
+    if memory_type == "factual":
+        return CognitiveType.FACTUAL
+    return CognitiveType.PROCEDURAL
 
 
 def _rank_score_by_belief_id(
@@ -526,6 +577,10 @@ def _merge_reasons(
 def _is_excluded_memory_belief(belief: Belief) -> bool:
     belief_object = str(belief.object)
     return belief_object.startswith(_EXCLUDED_MEMORY_OBJECT_PREFIXES)
+
+
+def _is_active_belief(belief: Belief) -> bool:
+    return str(belief.status) == "active"
 
 
 def _non_empty_str(value: object) -> str:

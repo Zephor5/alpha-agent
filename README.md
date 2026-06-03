@@ -70,14 +70,16 @@ Dynamic memory recall is available only through an explicit `memory_recall` tool
 call during the normal provider tool loop. Runtime passes the recall context to
 the tool executor, but it does not decide when recall is needed and does not
 automatically inject recalled beliefs into the prompt. Tool-visible recall
-results remain compact belief content without ids, confidence scores, sources,
-or evidence.
+results remain compact belief handles with id, content, type, scope, and status,
+without confidence scores, sources, or evidence.
 
-Memory writes use the separate `memory_propose` proposal path for explicit
-long-term preferences, constraints, procedures, and corrections during a
-runtime turn. Accepted low-risk proposals emit `memory_proposed`, then
-`belief_formed` or `belief_superseded`, and apply immediately to `belief_view`;
-pending or rejected proposals remain audit-only.
+Memory writes use the separate `memory_propose` update path during a runtime
+turn. The model submits `updates` with an explicit operation (`append`,
+`reinforce`, `replace`, `merge`, `correct`, or `retract`) and a memory type
+(`preference`, `constraint`, `procedure`, or `factual`). Accepted updates emit
+`memory_proposed`, then the relevant belief lifecycle event, and apply
+immediately to `belief_view`; uncertain updates return target candidates or
+pending confirmation instead of silently overwriting active beliefs.
 
 Beliefs are materialized in SQLite and recallable across sessions through a
 deterministic projection over cognition events. Foreground context is stored in

@@ -462,9 +462,11 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
     assert json.loads(follow_up_tool_message["content"]) == {
         "results": [
             {
+                "id": "belief:python",
                 "content": "User prefers Python examples.",
                 "type": "preference",
                 "scope": "counterpart",
+                "status": "active",
             }
         ]
     }
@@ -483,9 +485,11 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
     assert json.loads(messages[2].raw_content) == {
         "results": [
             {
+                "id": "belief:python",
                 "content": "User prefers Python examples.",
                 "type": "preference",
                 "scope": "counterpart",
+                "status": "active",
             }
         ]
     }
@@ -594,7 +598,7 @@ def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path)
         store=store,
         llm_provider=provider,
         llm_context_config=_compression_context(),
-        max_context_tokens=300,
+        max_context_tokens=340,
     )
 
     result = agent.respond("pending user must stay out of compression", session_id="s1")
@@ -639,7 +643,7 @@ def test_failed_pre_user_compression_does_not_persist_pending_user(tmp_path) -> 
         store=store,
         llm_provider=provider,
         llm_context_config=_compression_context(),
-        max_context_tokens=300,
+        max_context_tokens=340,
     )
 
     with pytest.raises(RuntimeError, match="provider failed"):
@@ -667,7 +671,7 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
         llm_provider=provider,
         tool_registry=registry,
         llm_context_config=_compression_context(),
-        max_context_tokens=300,
+        max_context_tokens=340,
     )
 
     result = agent.respond("use tool", session_id="s1")
