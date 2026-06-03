@@ -37,6 +37,7 @@ def test_memory_propose_tool_description_explains_update_contract() -> None:
     assert "ordinary facts" in definition.description
     assert "pending_confirmation" in definition.description
     assert "needs_target_selection" in definition.description
+    assert "next_action" in definition.description
 
 
 def test_memory_propose_append_promotes_explicit_preference_in_runtime_turn(tmp_path) -> None:
@@ -76,8 +77,7 @@ def test_memory_propose_append_promotes_explicit_preference_in_runtime_turn(tmp_
     assert messages[2].provider_metadata["tool_name"] == MEMORY_PROPOSE_TOOL_NAME
     tool_output = json.loads(messages[2].raw_content)
     assert tool_output["status"] == "accepted"
-    assert tool_output["user_action"] == "none"
-    assert tool_output["message_hint"] == ""
+    assert tool_output["next_action"] == "none"
     assert len(tool_output["results"]) == 1
     assert tool_output["results"][0]["update_index"] == 0
     assert tool_output["results"][0]["operation"] == "append"
@@ -207,8 +207,7 @@ def test_memory_propose_records_each_update_and_leaves_correct_pending(tmp_path)
 
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "mixed"
-    assert tool_output["user_action"] == "ask_confirmation"
-    assert "confirm" in tool_output["message_hint"]
+    assert tool_output["next_action"] == "ask_user_confirmation"
     assert [(item["operation"], item["decision"]) for item in tool_output["results"]] == [
         ("append", "accepted"),
         ("correct", "pending_confirmation"),
@@ -295,7 +294,7 @@ def test_memory_propose_append_related_candidate_needs_target_selection(tmp_path
     assert active[0].id == original.id
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "needs_target_selection"
-    assert tool_output["user_action"] == "none"
+    assert tool_output["next_action"] == "retry_with_target"
     assert tool_output["results"][0]["decision"] == "needs_target_selection"
     assert tool_output["results"][0]["candidates"] == [
         {
@@ -459,7 +458,7 @@ def test_memory_propose_replace_trusts_model_target_and_evidence(tmp_path) -> No
     assert [item.content for item in projection.list_active()] == ["User prefers Rust examples."]
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "accepted"
-    assert tool_output["user_action"] == "none"
+    assert tool_output["next_action"] == "none"
     assert tool_output["results"][0]["reason"] == "accepted_replace"
 
 
@@ -789,7 +788,7 @@ def test_memory_propose_target_must_be_active_and_scope_matched(tmp_path) -> Non
 
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "rejected"
-    assert tool_output["user_action"] == "explain_rejection"
+    assert tool_output["next_action"] == "explain_rejection"
     assert [item["reason"] for item in tool_output["results"]] == [
         "target_not_active",
         "target_scope_mismatch",
@@ -897,7 +896,7 @@ def test_memory_propose_no_target_retract_without_candidates_still_needs_selecti
 
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "needs_target_selection"
-    assert tool_output["user_action"] == "none"
+    assert tool_output["next_action"] == "retry_with_target"
     assert tool_output["results"][0]["operation"] == "retract"
     assert tool_output["results"][0]["decision"] == "needs_target_selection"
     assert "candidates" not in tool_output["results"][0]
@@ -942,8 +941,7 @@ def test_memory_propose_noops_without_reactive_write_context(tmp_path) -> None:
 
     assert executed[0].result.output == {
         "status": "rejected",
-        "user_action": "explain_rejection",
-        "message_hint": "Memory update rejected: missing_runtime_turn_context.",
+        "next_action": "explain_rejection",
         "results": [],
     }
     assert list(SQLiteEventLog(store).iter(kinds=[CognitiveEventKind.MEMORY_PROPOSED])) == []

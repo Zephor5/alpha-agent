@@ -264,6 +264,7 @@ def test_debug_prompt_trace_summarizes_memory_tool_results(tmp_path: Path) -> No
     assert "results=belief:python" in result.output
     assert "tool=memory_propose" in result.output
     assert "status=needs_target_selection" in result.output
+    assert "next_action=retry_with_target" in result.output
     assert "updates=append:needs_target_selection" in result.output
     assert "candidates=belief:python" in result.output
 

@@ -52,6 +52,40 @@ def test_context_window_foreground_is_keyed_by_session_id(tmp_path) -> None:
     ]
 
 
+def test_context_window_recovers_raw_from_source_session_message(tmp_path) -> None:
+    log = _sqlite_log(tmp_path)
+    projection = ContextWindowProjection(log, recent_limit=5)
+    subject = Subject()
+    message = log.store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="original user text",
+    )
+    event = EventEmitter(log).emit(
+        CognitiveEventKind.PERCEIVED,
+        outputs=[Reference("perception", "perception:turn-raw")],
+        payload={
+            "turn_id": "turn-raw",
+            "session_id": "s1",
+            "stimulus_kind": StimulusKind.USER_MESSAGE.value,
+            "source": {"kind": "session", "id": "s1"},
+            "from_counterpart": None,
+            "source_refs": [
+                {"kind": "session", "id": "s1"},
+                {"kind": "session_message", "id": message.id},
+            ],
+            "content_digest": "digest-raw",
+            "content_length": len(message.raw_content),
+        },
+    )
+
+    projection.apply(event)
+
+    [perception] = projection.get("s1", subject).foreground
+    assert perception.raw == "original user text"
+
+
 def test_context_window_counterpart_link_lists_sessions(tmp_path) -> None:
     log = _sqlite_log(tmp_path)
     projection = ContextWindowProjection(log)

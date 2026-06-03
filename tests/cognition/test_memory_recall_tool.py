@@ -62,7 +62,6 @@ def test_memory_recall_schema_is_strict_and_compact() -> None:
                 "maxItems": 8,
                 "items": {"type": "string", "maxLength": 120},
             },
-            "intent": {"type": "string", "maxLength": 120},
             "scope": {
                 "type": "string",
                 "enum": ["counterpart", "global", "both"],
@@ -138,6 +137,7 @@ def test_memory_recall_queries_counterpart_and_global_beliefs(tmp_path: Path) ->
                 "type": "preference",
                 "scope": "counterpart",
                 "status": "active",
+                "held_since": "2026-01-01T00:00:00+00:00",
             },
             {
                 "id": "belief:global-python",
@@ -145,12 +145,13 @@ def test_memory_recall_queries_counterpart_and_global_beliefs(tmp_path: Path) ->
                 "type": "factual",
                 "scope": "global",
                 "status": "active",
+                "held_since": "2026-01-01T00:00:00+00:00",
             },
         ]
     }
 
 
-def test_memory_recall_accepts_structured_retrieval_intent_without_changing_output(
+def test_memory_recall_accepts_structured_retrieval_hints(
     tmp_path: Path,
 ) -> None:
     projection = _projection_with_beliefs(
@@ -171,7 +172,6 @@ def test_memory_recall_accepts_structured_retrieval_intent_without_changing_outp
             "query": "Python",
             "keywords": ["examples", "Python"],
             "entities": ["Python", "coding examples"],
-            "intent": "preference lookup",
         },
         _tool_context(projection=projection, counterpart=counterpart_a()),
     )
@@ -184,6 +184,7 @@ def test_memory_recall_accepts_structured_retrieval_intent_without_changing_outp
                 "type": "preference",
                 "scope": "counterpart",
                 "status": "active",
+                "held_since": "2026-01-01T00:00:00+00:00",
             }
         ]
     }
@@ -216,6 +217,7 @@ def test_memory_recall_query_only_answers_natural_language(tmp_path: Path) -> No
                 "type": "preference",
                 "scope": "counterpart",
                 "status": "active",
+                "held_since": "2026-01-01T00:00:00+00:00",
             }
         ]
     }
@@ -255,6 +257,7 @@ def test_memory_recall_uses_keywords_and_entities_when_query_is_loose(
                 "type": "preference",
                 "scope": "counterpart",
                 "status": "active",
+                "held_since": "2026-01-01T00:00:00+00:00",
             }
         ]
     }
@@ -351,6 +354,7 @@ def test_memory_recall_filters_types_and_bounds_results(tmp_path: Path) -> None:
             "type": "factual",
             "scope": "global",
             "status": "active",
+            "held_since": "2026-01-01T00:00:00+00:00",
         }
     ]
     assert len(_results(bounded.output)) == 1
@@ -396,6 +400,7 @@ def test_memory_recall_filters_and_outputs_protocol_constraint_type(
             "type": "constraint",
             "scope": "global",
             "status": "active",
+            "held_since": "2026-01-01T00:00:00+00:00",
         }
     ]
 
@@ -433,6 +438,7 @@ def test_memory_recall_excludes_counterpart_digest_beliefs(tmp_path: Path) -> No
             "type": "preference",
             "scope": "counterpart",
             "status": "active",
+            "held_since": "2026-01-01T00:00:01+00:00",
         }
     ]
 
@@ -469,6 +475,7 @@ def test_memory_recall_returns_active_belief_handles_only(tmp_path: Path) -> Non
             "type": "preference",
             "scope": "counterpart",
             "status": "active",
+            "held_since": "2026-01-01T00:00:00+00:00",
         }
     ]
 
@@ -515,7 +522,7 @@ def test_memory_recall_output_does_not_expose_internal_scoring(tmp_path: Path) -
     )
 
     [item] = _results(result.output)
-    assert set(item) == {"id", "content", "type", "scope", "status"}
+    assert set(item) == {"id", "content", "type", "scope", "status", "held_since"}
 
 
 def test_memory_recall_scored_candidates_are_explainable_and_ordered(
@@ -788,9 +795,6 @@ def test_memory_recall_empty_results_succeed(tmp_path: Path) -> None:
         ({"query": "Python", "entities": ["x" * 121]}, "entities"),
         ({"query": "Python", "entities": [("x" * 120) + " "]}, "entities"),
         ({"query": "Python", "entities": [42]}, "entities"),
-        ({"query": "Python", "intent": 42}, "intent"),
-        ({"query": "Python", "intent": "x" * 121}, "intent"),
-        ({"query": "Python", "intent": ("x" * 120) + " "}, "intent"),
         ({"query": "Python", "max_results": 0}, "max_results"),
         ({"query": "Python", "max_results": 9}, "max_results"),
         ({"query": "Python", "unexpected": True}, "unexpected"),

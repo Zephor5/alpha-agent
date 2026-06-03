@@ -130,6 +130,8 @@ class ContextWindowExceededError(RuntimeError):
 
 _SESSION_TURN_LOCKS: dict[str, RLock] = {}
 _SESSION_TURN_LOCKS_GUARD = Lock()
+# Memory remains LLM-directed: the runtime exposes memory tools and context,
+# but it does not perform hidden recall or hidden writes before the model acts.
 _DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {
     "role": "system",
     "content": (
@@ -156,6 +158,12 @@ def _serialized_session_turn(session_id: str) -> Iterator[None]:
 
 def _copy_chat_message(message: ChatMessage) -> ChatMessage:
     return cast(ChatMessage, dict(message))
+
+
+def default_runtime_system_message() -> ChatMessage:
+    """Return the system message used by the real runtime prompt path."""
+
+    return _copy_chat_message(_DEFAULT_RUNTIME_SYSTEM_MESSAGE)
 
 
 @dataclass(frozen=True)
@@ -685,7 +693,7 @@ class AlphaAgent:
         )
 
     def _default_system_message(self) -> ChatMessage:
-        return _copy_chat_message(_DEFAULT_RUNTIME_SYSTEM_MESSAGE)
+        return default_runtime_system_message()
 
     def _session_counterpart_ref(
         self,
@@ -694,6 +702,19 @@ class AlphaAgent:
     ) -> Reference | None:
         binding = self.store.get_session_counterpart(session_id)
         if binding is not None:
+            return counterpart_ref(CounterpartId(binding.counterpart_id))
+        if _stimulus_kind_from_metadata(source_metadata) == StimulusKind.SELF_SIGNAL:
+            # Internal self-signals are not external user turns. They may carry the
+            # counterpart that originated the goal, but must not fall back to the
+            # default main-user counterpart when no source counterpart exists.
+            source_counterpart = _self_signal_counterpart_ref(source_metadata)
+            if source_counterpart is None:
+                return None
+            binding = self.store.create_session_counterpart(
+                session_id=session_id,
+                counterpart_id=source_counterpart.id,
+                source_metadata=dict(source_metadata or {}),
+            )
             return counterpart_ref(CounterpartId(binding.counterpart_id))
         routed = self.counterpart_router.upsert_from_source_metadata(
             source_metadata,
@@ -714,6 +735,9 @@ class AlphaAgent:
         counterpart: Reference | None,
     ) -> SessionProfileSnapshot | None:
         snapshot = self.store.get_session_profile_snapshot(session_id)
+        # Counterpart profile context is intentionally session-stable: once a
+        # session has a snapshot, later digest refreshes do not rewrite this
+        # prompt prefix mid-conversation.
         if snapshot is not None or counterpart is None:
             return snapshot
         projection = BeliefProjection(
@@ -1211,6 +1235,8 @@ class AlphaAgent:
                 "from_counterpart": turn_context.counterpart.to_record()
                 if turn_context.counterpart is not None
                 else None,
+                # Raw text remains in session_messages; cognition events keep refs
+                # and digests so projections can recover content without duplicating it.
                 "source_refs": [ref.to_record() for ref in source_refs],
                 "content_digest": _content_digest(user_message),
                 "content_length": len(user_message),
@@ -1489,6 +1515,13 @@ def _stimulus_kind_from_metadata(source_metadata: Mapping[str, Any] | None) -> S
         except ValueError:
             return StimulusKind.USER_MESSAGE
     return StimulusKind.USER_MESSAGE
+
+
+def _self_signal_counterpart_ref(source_metadata: Mapping[str, Any] | None) -> Reference | None:
+    raw = source_metadata.get("counterpart_id") if source_metadata is not None else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return counterpart_ref(CounterpartId(raw.strip()))
 
 
 def _string_list(value: object) -> list[str]:

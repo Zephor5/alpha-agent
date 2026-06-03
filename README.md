@@ -70,8 +70,8 @@ Dynamic memory recall is available only through an explicit `memory_recall` tool
 call during the normal provider tool loop. Runtime passes the recall context to
 the tool executor, but it does not decide when recall is needed and does not
 automatically inject recalled beliefs into the prompt. Tool-visible recall
-results remain compact belief handles with id, content, type, scope, and status,
-without confidence scores, sources, or evidence.
+results remain compact belief handles with id, content, type, scope, status,
+and held_since, without confidence scores, sources, or evidence.
 
 Memory writes use the separate `memory_propose` update path during a runtime
 turn. The model submits `updates` with an explicit operation (`append`,
@@ -79,7 +79,10 @@ turn. The model submits `updates` with an explicit operation (`append`,
 (`preference`, `constraint`, `procedure`, or `factual`). Accepted updates emit
 `memory_proposed`, then the relevant belief lifecycle event, and apply
 immediately to `belief_view`; uncertain updates return target candidates or
-pending confirmation instead of silently overwriting active beliefs.
+pending confirmation instead of silently overwriting active beliefs. Tool
+results include `next_action`: `retry_with_target` asks the LLM to retry with
+explicit targets, while `ask_user_confirmation` asks it to request user approval
+before a later LLM-directed write.
 
 Beliefs are materialized in SQLite and recallable across sessions through a
 deterministic projection over cognition events. Foreground context is stored in
@@ -170,10 +173,10 @@ Inspect procedural skills:
 uv run alpha skills list
 ```
 
-Print a renderer prompt preview without calling the LLM:
+Print the runtime prompt preview without calling the LLM:
 
 ```bash
-uv run alpha debug prompt "summarize the current session" --renderer text_chat
+uv run alpha debug prompt "summarize the current session"
 uv run alpha debug prompt "summarize this channel" --session <session-id>
 uv run alpha debug prompt "summarize this channel" --session <session-id> --trace
 ```

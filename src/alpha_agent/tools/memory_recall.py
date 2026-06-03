@@ -27,12 +27,11 @@ _MAX_KEYWORDS = 12
 _MAX_KEYWORD_LENGTH = 80
 _MAX_ENTITIES = 8
 _MAX_ENTITY_LENGTH = 120
-_MAX_INTENT_LENGTH = 120
 _MAX_TYPES = 8
 _MAX_RESULTS = 8
 _RECALL_SCAN_LIMIT = 32
 _ALLOWED_ARGUMENTS = frozenset(
-    {"query", "keywords", "entities", "intent", "scope", "types", "max_results"}
+    {"query", "keywords", "entities", "scope", "types", "max_results"}
 )
 _PROTOCOL_MEMORY_TYPES = frozenset({"preference", "constraint", "procedure", "factual"})
 _EXCLUDED_MEMORY_OBJECT_PREFIXES = (
@@ -71,7 +70,6 @@ class _RecallArguments:
     query: str
     keywords: tuple[str, ...]
     entities: tuple[str, ...]
-    intent: str | None
     scope: MemoryRecallScope
     types: frozenset[CognitiveType] | None
     protocol_types: frozenset[str]
@@ -97,8 +95,8 @@ class MemoryRecallTool:
     description = (
         "Search stable long-term beliefs when explicit memory lookup would help answer "
         "the current turn. Returns compact belief handles with id, content, type, scope, "
-        "and status. Does not write memory; use memory_propose for explicit long-term "
-        "memory write proposals."
+        "status, and held_since. Does not write memory; use memory_propose for explicit "
+        "long-term memory write proposals."
     )
     strict = True
     parameters = {
@@ -124,10 +122,6 @@ class MemoryRecallTool:
                     "type": "string",
                     "maxLength": 120,
                 },
-            },
-            "intent": {
-                "type": "string",
-                "maxLength": 120,
             },
             "scope": {
                 "type": "string",
@@ -206,6 +200,7 @@ class MemoryRecallTool:
                 "type": _memory_type_for_belief(belief),
                 "scope": item.scope,
                 "status": str(belief.status),
+                "held_since": str(belief.held_since),
             }
             results.append(result)
             if len(results) >= parsed.max_results:
@@ -298,12 +293,6 @@ def _parse_arguments(arguments: Mapping[str, Any]) -> _RecallArguments:
         max_items=_MAX_ENTITIES,
         max_item_length=_MAX_ENTITY_LENGTH,
     )
-    intent = _parse_optional_string(
-        arguments,
-        name="intent",
-        max_length=_MAX_INTENT_LENGTH,
-    )
-
     raw_scope = arguments.get("scope", _DEFAULT_SCOPE)
     if not isinstance(raw_scope, str) or raw_scope not in {"counterpart", "global", "both"}:
         raise ValueError("memory_recall scope must be one of counterpart, global, both")
@@ -346,7 +335,6 @@ def _parse_arguments(arguments: Mapping[str, Any]) -> _RecallArguments:
         query=query.strip(),
         keywords=keywords,
         entities=entities,
-        intent=intent,
         scope=scope,
         types=types,
         protocol_types=frozenset(protocol_types),
@@ -383,23 +371,6 @@ def _parse_string_array(
             raise ValueError(f"memory_recall {name} must contain non-empty string values")
         values.append(value)
     return tuple(values)
-
-
-def _parse_optional_string(
-    arguments: Mapping[str, Any],
-    *,
-    name: str,
-    max_length: int,
-) -> str | None:
-    raw_value = arguments.get(name)
-    if raw_value is None:
-        return None
-    if not isinstance(raw_value, str):
-        raise ValueError(f"memory_recall {name} must be a string")
-    if len(raw_value) > max_length:
-        raise ValueError(f"memory_recall {name} must be at most {max_length} characters")
-    value = raw_value.strip()
-    return value or None
 
 
 def _memory_recall_context(

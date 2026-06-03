@@ -6,7 +6,6 @@ from alpha_agent.cognition.render.evidence import EvidenceRenderer
 from alpha_agent.cognition.render.graph_snapshot import GraphSnapshotRenderer
 from alpha_agent.cognition.render.text_chat import (
     COUNTERPART_PROFILE_LABEL,
-    TextChatRenderer,
     estimate_chat_tokens,
     render_counterpart_profile,
     source_message_to_chat,
@@ -23,7 +22,6 @@ __all__ = [
     "RenderBudget",
     "RenderResult",
     "Renderer",
-    "TextChatRenderer",
     "estimate_chat_tokens",
     "render_counterpart_profile",
     "source_message_to_chat",

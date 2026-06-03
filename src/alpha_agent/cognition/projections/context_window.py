@@ -464,13 +464,28 @@ class ContextWindowProjection(Projection):
             id=PerceptionId(_perception_id_from_event(event, turn_id)),
             source_kind=source_kind,
             from_counterpart=counterpart,
-            raw="",
+            raw=self._raw_from_source_message(event),
             surface_intent=[],
             raised_entities=[counterpart] if counterpart is not None else [],
             subject=event.subject,
             situation=situation,
             received_at=event.timestamp,
         )
+
+    def _raw_from_source_message(self, event: CognitiveEvent) -> str:
+        if self._store is None:
+            return ""
+        message_ids = [
+            str(item.get("id"))
+            for item in event.payload.get("source_refs", [])
+            if isinstance(item, dict) and item.get("kind") == "session_message" and item.get("id")
+        ]
+        if not message_ids:
+            return ""
+        messages = self._store.list_session_messages_by_ids(message_ids[:1])
+        if not messages:
+            return ""
+        return messages[0].raw_content
 
 def _state_from_row(row: Any) -> _SessionState:
     return _SessionState(

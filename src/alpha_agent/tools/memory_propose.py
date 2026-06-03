@@ -55,7 +55,12 @@ MemoryStatus = Literal[
     "rejected",
     "mixed",
 ]
-UserAction = Literal["none", "ask_confirmation", "explain_rejection"]
+NextAction = Literal[
+    "none",
+    "retry_with_target",
+    "ask_user_confirmation",
+    "explain_rejection",
+]
 
 
 @dataclass(frozen=True)
@@ -189,7 +194,7 @@ class MemoryProposeTool:
         "reinforce, replace, merge, correct, or retract, and memory.type preference, "
         "constraint, procedure, or factual. Do not use for ordinary facts, transient "
         "context, guesses, or tool summaries. Returns accepted, pending_confirmation, "
-        "needs_target_selection, rejected, or mixed."
+        "needs_target_selection, rejected, or mixed with a next_action for the model."
     )
     strict = True
     parameters = {
@@ -262,8 +267,7 @@ class MemoryProposeTool:
                 name=self.name,
                 output=_memory_output(
                     status="rejected",
-                    user_action="explain_rejection",
-                    message_hint="Memory update rejected: missing_runtime_turn_context.",
+                    next_action="explain_rejection",
                     results=[],
                 ),
                 metadata=_tool_metadata(cognitive_event_ids=[]),
@@ -274,8 +278,7 @@ class MemoryProposeTool:
                 name=self.name,
                 output=_memory_output(
                     status="rejected",
-                    user_action="explain_rejection",
-                    message_hint="Memory update rejected: missing_updates.",
+                    next_action="explain_rejection",
                     results=[],
                 ),
                 metadata=_tool_metadata(cognitive_event_ids=[]),
@@ -342,13 +345,11 @@ class MemoryProposeTool:
             results.append(result)
 
         status = _aggregate_status(results)
-        user_action = _aggregate_user_action(results)
         return ToolResult(
             name=self.name,
             output=_memory_output(
                 status=status,
-                user_action=user_action,
-                message_hint=_message_hint(user_action, results),
+                next_action=_aggregate_next_action(results),
                 results=results,
             ),
             metadata=_tool_metadata(cognitive_event_ids=cognitive_event_ids),
@@ -1309,55 +1310,26 @@ def _aggregate_status(results: list[_UpdateResult]) -> MemoryStatus:
     return "mixed"
 
 
-def _aggregate_user_action(results: list[_UpdateResult]) -> UserAction:
-    actions = [_user_action_for(result) for result in results]
-    if "ask_confirmation" in actions:
-        return "ask_confirmation"
-    if "explain_rejection" in actions:
+def _aggregate_next_action(results: list[_UpdateResult]) -> NextAction:
+    decisions = {result.decision for result in results}
+    if "pending_confirmation" in decisions:
+        return "ask_user_confirmation"
+    if "needs_target_selection" in decisions:
+        return "retry_with_target"
+    if "rejected" in decisions:
         return "explain_rejection"
     return "none"
-
-
-def _user_action_for(result: _UpdateResult) -> UserAction:
-    if result.decision == "pending_confirmation":
-        return "ask_confirmation"
-    if result.decision == "rejected":
-        return "explain_rejection"
-    return "none"
-
-
-def _message_hint(user_action: UserAction, results: list[_UpdateResult]) -> str:
-    if user_action == "ask_confirmation":
-        return "Ask the user to confirm the pending memory change before applying it."
-    if user_action == "explain_rejection":
-        reason = next(
-            (
-                result.reason
-                for result in results
-                if _user_action_for(result) == "explain_rejection"
-            ),
-            "unknown",
-        )
-        return f"Memory update rejected: {reason}."
-    if any(result.decision == "needs_target_selection" for result in results):
-        return (
-            "Related memories were found. Choose append, replace, merge, correct, "
-            "retract, or ask the user."
-        )
-    return ""
 
 
 def _memory_output(
     *,
     status: MemoryStatus,
-    user_action: UserAction,
-    message_hint: str,
+    next_action: NextAction,
     results: list[_UpdateResult],
 ) -> dict[str, Any]:
     return {
         "status": status,
-        "user_action": user_action,
-        "message_hint": message_hint,
+        "next_action": next_action,
         "results": [result.to_output() for result in results],
     }
 

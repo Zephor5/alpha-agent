@@ -12,10 +12,10 @@ from tests.cognition.helpers import clock_factory, emit, id_factory
 from tests.cognition.test_belief_projection_apply import belief
 
 
-def test_debug_prompt_uses_text_chat_renderer(tmp_path: Path) -> None:
+def test_debug_prompt_previews_runtime_session_history_prompt(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
-        ["debug", "prompt", "hello", "--renderer", "text_chat"],
+        ["debug", "prompt", "hello"],
         env=_env(tmp_path),
     )
 

@@ -35,14 +35,9 @@ from alpha_agent.cognition.loops import (
 from alpha_agent.cognition.models import (
     CognitiveEvent,
     CognitiveEventKind,
-    ContextWindow,
-    Instant,
     Situation,
     SituationId,
-    Subject,
     ValueKind,
-    situation_ref,
-    subject_ref,
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.goal import GoalProjection
@@ -57,7 +52,8 @@ from alpha_agent.cognition.render import (
     EvidenceRenderer,
     GraphSnapshotRenderer,
     RenderBudget,
-    TextChatRenderer,
+    render_counterpart_profile,
+    wrap_system_reminder,
 )
 from alpha_agent.cognition.render.build_view import build_view
 from alpha_agent.cognition.value.lens import default_value_lens, load_lens, save_lens
@@ -95,7 +91,7 @@ from alpha_agent.llm.base import ChatMessage
 from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
-from alpha_agent.runtime.agent import AlphaAgent
+from alpha_agent.runtime.agent import AlphaAgent, default_runtime_system_message
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.runtime.session_context import (
     SYSTEM_REMINDER_CLOSE,
@@ -894,31 +890,19 @@ def prompt(
         bool,
         typer.Option("--trace", help="Include recent cognitive event trace for the session."),
     ] = False,
-    renderer: Annotated[
-        str,
-        typer.Option("--renderer", help="Renderer name. Currently supports text_chat."),
-    ] = "text_chat",
 ) -> None:
-    """Print a renderer prompt preview and optional cognitive event trace."""
+    """Print the runtime prompt preview and optional cognitive event trace."""
 
     config = load_config()
     store = _store(config)
     session_id = session or new_session_id()
     context = SessionContextAssembler(store).load(session_id)
-    if renderer != TextChatRenderer.name:
-        raise typer.BadParameter("supported renderer: text_chat")
-    view = _debug_prompt_view(
-        session_id=session_id,
-        message=message,
-        chat_history=context.chat_messages,
-        counterpart_profile=(
-            snapshot.content
-            if (snapshot := store.get_session_profile_snapshot(session_id)) is not None
-            else None
-        ),
-    )
-    rendered = TextChatRenderer().render(view, RenderBudget())
-    messages = rendered.payload
+    messages = [
+        default_runtime_system_message(),
+        *_debug_profile_context_messages(store, session_id),
+        *context.chat_messages,
+        {"role": "user", "content": message},
+    ]
     for index, prompt_message in enumerate(messages, start=1):
         role = prompt_message["role"]
         content = prompt_message.get("content") or ""
@@ -984,6 +968,9 @@ def _format_memory_tool_trace(trace: RuntimeTrace) -> str:
     status = output.get("status")
     if isinstance(status, str) and status:
         parts.append(f"status={status}")
+    next_action = output.get("next_action")
+    if isinstance(next_action, str) and next_action:
+        parts.append(f"next_action={next_action}")
     if tool_name == "memory_recall":
         result_ids = _ids_from_items(output.get("results"))
         if result_ids:
@@ -1097,35 +1084,16 @@ def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
     return isinstance(raw_session_id, str) and raw_session_id == session_id
 
 
-def _debug_prompt_view(
-    session_id: str,
-    message: str,
-    chat_history: list[ChatMessage],
-    counterpart_profile: str | None = None,
-) -> CognitionView:
-    situation = Situation(id=SituationId("situation:debug-prompt"))
-    subject_value = Subject()
-    window = ContextWindow(
-        session_id=session_id,
-        counterpart=None,
-        foreground=[],
-        background=None,
-        recalled=[],
-        matched_procedures=[],
-        subject_at=subject_ref(subject_value.id),
-        situation_at=situation_ref(situation.id),
-        assembled_at=Instant(""),
-    )
-    return CognitionView(
-        subject=subject_value,
-        counterpart=None,
-        situation=situation,
-        window=window,
-        assembled_at=Instant(""),
-        current_query=message,
-        chat_history=chat_history,
-        counterpart_profile=counterpart_profile,
-    )
+def _debug_profile_context_messages(store: StateStore, session_id: str) -> list[ChatMessage]:
+    snapshot = store.get_session_profile_snapshot(session_id)
+    if snapshot is None:
+        return []
+    return [
+        {
+            "role": "user",
+            "content": wrap_system_reminder(render_counterpart_profile(snapshot.content)),
+        }
+    ]
 
 
 @cognition_app.command("graph")

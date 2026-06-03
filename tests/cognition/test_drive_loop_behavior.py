@@ -9,7 +9,13 @@ from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.goals import GoalRegistry
 from alpha_agent.cognition.loops import DriveConfig, DriveLoop
-from alpha_agent.cognition.models import CognitiveEventKind, GoalId, Instant
+from alpha_agent.cognition.models import (
+    CognitiveEventKind,
+    CounterpartId,
+    GoalId,
+    Instant,
+    counterpart_ref,
+)
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
@@ -51,6 +57,8 @@ def test_drive_loop_triggers_runtime_self_signal_turn_and_updates_goal_progress(
     assert "goal_id: goal:pending" in messages[0].raw_content
     assert perceived.payload["stimulus_kind"] == "self_signal"
     assert perceived.payload["session_id"] == "internal:goal:goal:pending"
+    assert perceived.payload["from_counterpart"] is None
+    assert store.get_session_counterpart("internal:goal:goal:pending") is None
     assert perceived.payload["turn_id"]
     assert [event.kind for event in linked] == [
         CognitiveEventKind.PERCEIVED,
@@ -89,6 +97,38 @@ def test_drive_loop_cooldown_prevents_repeated_trigger(tmp_path: Path) -> None:
             if event.payload.get("drive_progress") is True
         ]
     ) == 1
+
+
+def test_drive_loop_carries_goal_counterpart_into_self_signal_turn(
+    tmp_path: Path,
+) -> None:
+    store, log, emitter, loop = _drive_runtime(tmp_path, enabled=False)
+    registry = GoalRegistry(log, emitter=emitter, projection=GoalProjection(store))
+    counterpart = counterpart_ref(CounterpartId("counterpart:user-a"))
+    registry.set_goal(
+        description="answer user A",
+        goal_id=GoalId("goal:user-a"),
+        for_counterpart=counterpart,
+    )
+
+    report = loop.run_once(force=True)
+    perceived = [
+        event
+        for event in log.iter(kinds=[CognitiveEventKind.PERCEIVED])
+        if event.payload.get("session_id") == "internal:goal:goal:user-a"
+    ][-1]
+    messages = store.list_session_messages("internal:goal:goal:user-a")
+    binding = store.get_session_counterpart("internal:goal:goal:user-a")
+
+    assert report.triggered is True
+    assert "for_counterpart: counterpart:user-a" in messages[0].raw_content
+    assert perceived.payload["stimulus_kind"] == "self_signal"
+    assert perceived.payload["from_counterpart"] == {
+        "kind": "counterpart",
+        "id": "counterpart:user-a",
+    }
+    assert binding is not None
+    assert binding.counterpart_id == "counterpart:user-a"
 
 
 def test_drive_loop_disabled_by_default_but_force_runs(tmp_path: Path) -> None:

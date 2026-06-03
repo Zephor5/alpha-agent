@@ -52,14 +52,16 @@ workers.
 The main LLM decides when to call `memory_recall` or `memory_propose`.
 
 `memory_recall` is read-only and returns compact belief handles with id,
-content, type, scope, and status. Runtime does not perform hidden dynamic recall
-from the user message.
+content, type, scope, status, and held_since. Runtime does not perform hidden
+dynamic recall from the user message.
 
 `memory_propose` owns write gating for explicit memory updates. The model sends
 an operation (`append`, `reinforce`, `replace`, `merge`, `correct`, or
 `retract`) plus typed memory content when needed. Accepted updates mutate the
 belief lifecycle; uncertain updates return target candidates or require user
-confirmation instead of silently replacing active beliefs.
+confirmation instead of silently replacing active beliefs. Tool results include
+`next_action` so the LLM can retry with explicit targets or ask the user for
+confirmation without a separate review queue.
 
 ## Projections And Workers
 

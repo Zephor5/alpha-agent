@@ -467,6 +467,7 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
                 "type": "preference",
                 "scope": "counterpart",
                 "status": "active",
+                "held_since": "2026-01-01T00:00:00+00:00",
             }
         ]
     }
@@ -490,6 +491,7 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
                 "type": "preference",
                 "scope": "counterpart",
                 "status": "active",
+                "held_since": "2026-01-01T00:00:00+00:00",
             }
         ]
     }

@@ -142,6 +142,8 @@ class DriveLoop:
             "stimulus_kind": "self_signal",
             "goal_id": str(goal.id),
         }
+        if goal.for_counterpart is not None:
+            source_metadata["counterpart_id"] = goal.for_counterpart.id
         respond = getattr(self.runtime_turn_runner, "respond", None)
         if callable(respond):
             return respond(
@@ -187,6 +189,8 @@ def _self_signal_message(goal: Goal) -> str:
         "drive_reason: active goal needs progress",
         f"goal_description: {goal.description}",
     ]
+    if goal.for_counterpart is not None:
+        lines.append(f"for_counterpart: {goal.for_counterpart.id}")
     if goal.target_outcome:
         lines.append(f"target_outcome: {goal.target_outcome}")
     return "\n".join(lines)
