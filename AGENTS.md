@@ -12,6 +12,9 @@ README.md             Project overview, install steps, CLI usage, configuration,
 pyproject.toml        Package metadata, Python version, dependencies, console script entry point, and lint/type-check settings.
 uv.lock               Locked dependency graph for uv-based installs.
 config.example.toml   Example runtime configuration.
+.env.example          Environment variable template for local runtime paths, LLM providers, and memory limits.
+.github/              GitHub Actions CI workflow definition.
+.gitignore            Ignore rules for local environments, caches, build artifacts, and runtime state.
 LICENSE               Project license.
 docs/
   cognition/          Reference docs for cognition and memory design.
@@ -27,16 +30,20 @@ src/
       adapters/       External gateway adapter interfaces.
     runtime/          Agent turn/session execution, event models, context budget/handover, session context, counterpart routing, and runtime tool wiring.
       counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
-    cognition/        Cognition foundations, Reactive tick orchestration, event emission, loop coordination, projection rebuilds, and thread helpers.
+    cognition/        Cognition foundations, Reactive tick orchestration, event emission, loop coordination, payload contracts, projections, and search/tokenization helpers.
       controller.py   CognitiveController orchestration for one Reactive tick.
       coordinator.py  LoopCoordinator lock/lease control for Reactive and background cognition loops.
+      counterpart_profile.py Counterpart digest belief helpers.
       emitter.py      Cognitive event emission helpers.
+      payload_contract.py Fail-fast validation for consumed cognition event payload fields.
       projection_runner.py Projection registry execution and rebuild helpers.
-      threads.py      Thread identity helpers for context-window projections.
+      search_tokenizer.py Deterministic tokenization for mixed CJK and technical search text.
       models/         Frozen cognition data contracts for events, perceptions, judgments, decisions, beliefs, goals, strategies, subjects, values, situations, and threads.
       event_log/      In-memory and SQLite cognitive event log implementations.
       stages/         Perceive, Attend, Interpret, Judge, Decide, Act/Effector, Feedback, Reflect, and Revise stages.
       reflectors/     L1/L2/L3 reflector orchestration, deterministic audit rules, L2 strategy rules, and L3 self-model aggregators.
+        l2_rules/     Deterministic L2 strategy override rules.
+        l3_aggregators/ Deterministic self-model aggregators for capabilities, failure modes, preferences, strategies, tradeoffs, and interaction patterns.
       loops/          In-process scheduler, checkpoint storage, ConsolidationLoop, deterministic workers, and synchronous DriveLoop.
         workers/      Background consolidation workers for beliefs, context, procedures, goals, value lens, strategies, counterpart summaries, and archive/resolve tasks.
       goals/          GoalRegistry event write path for DriveLoop goals.
@@ -46,10 +53,12 @@ src/
     state/            SQLite-backed state store/schema/models for session messages, runtime traces, gateway mappings/dedup, cognitive events, and projection tables.
     llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
     tools/            Tool abstractions and registry used by the runtime.
+      shell/          Structured local shell execution backend, output capture, policy, and command semantics.
     skills/           Procedural skill manager and built-in Markdown skills.
+      builtin/        Built-in Markdown skills such as debug-loop and summarize.
     utils/            Shared utility helpers for IDs and time.
-tests/                Test coverage for CLI, runtime, config, daemon, gateway, LLM providers, and session/context behavior.
-  cognition/          Cognition-specific tests for events, projections, renderers, reflectors, loops, drive behavior, and CLI inspection commands.
+tests/                Test coverage for CLI, runtime, config, daemon, gateway, LLM providers, tools, and session/context behavior.
+  cognition/          Cognition-specific tests for events, projections, renderers, reflectors, loops, goals, memory tools, tokenization, and CLI inspection commands.
 ```
 
 ## Validation Commands
