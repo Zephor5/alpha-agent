@@ -56,12 +56,13 @@ content, type, scope, status, and held_since. Runtime does not perform hidden
 dynamic recall from the user message.
 
 `memory_propose` owns write gating for explicit memory updates. The model sends
-an operation (`append`, `reinforce`, `replace`, `merge`, `correct`, or
-`retract`) plus typed memory content when needed. Accepted updates mutate the
-belief lifecycle; uncertain updates return target candidates or require user
-confirmation instead of silently replacing active beliefs. Tool results include
-`next_action` so the LLM can retry with explicit targets or ask the user for
-confirmation without a separate review queue.
+an operation (`append_distinct`, `reinforce`, `replace`, `merge`, `correct`, or
+`retract`) plus typed memory content when needed. `target_belief_ids` are
+mutation targets; `reviewed_candidate_ids` records candidates reviewed before a
+distinct append. Accepted updates mutate the belief lifecycle; uncertain updates
+return candidates or require user confirmation instead of silently replacing
+active beliefs. Tool results include `next_action` so the LLM can review
+candidates or ask the user for confirmation without a separate review queue.
 
 ## Projections And Workers
 

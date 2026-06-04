@@ -27,16 +27,14 @@ def test_memory_propose_tool_description_explains_update_contract() -> None:
     definition = build_tool_registry().to_llm_tool_definitions()[0]
 
     assert definition.name == MEMORY_PROPOSE_TOOL_NAME
-    assert "memory updates" in definition.description
-    assert "append" in definition.description
+    assert "long-term memories" in definition.description
+    assert "append_distinct" in definition.description
     assert "reinforce" in definition.description
     assert "replace" in definition.description
     assert "merge" in definition.description
     assert "correct" in definition.description
     assert "retract" in definition.description
-    assert "ordinary facts" in definition.description
-    assert "pending_confirmation" in definition.description
-    assert "needs_target_selection" in definition.description
+    assert "transient facts" in definition.description
     assert "next_action" in definition.description
 
 
@@ -45,7 +43,7 @@ def test_memory_propose_append_promotes_explicit_preference_in_runtime_turn(tmp_
     provider = _MemoryProposeProvider(
         updates=[
             _update(
-                "append",
+                "append_distinct",
                 memory={
                     "type": "preference",
                     "content": "User prefers future answers in Chinese.",
@@ -80,9 +78,9 @@ def test_memory_propose_append_promotes_explicit_preference_in_runtime_turn(tmp_
     assert tool_output["next_action"] == "none"
     assert len(tool_output["results"]) == 1
     assert tool_output["results"][0]["update_index"] == 0
-    assert tool_output["results"][0]["operation"] == "append"
+    assert tool_output["results"][0]["operation"] == "append_distinct"
     assert tool_output["results"][0]["decision"] == "accepted"
-    assert tool_output["results"][0]["reason"] == "accepted_append"
+    assert tool_output["results"][0]["reason"] == "accepted_append_distinct"
     assert messages[2].metadata["result_metadata"]["cognitive_event_ids"]
     assert messages[2].metadata["tool_output_kind"] == "json"
 
@@ -93,7 +91,7 @@ def test_memory_propose_append_promotes_explicit_preference_in_runtime_turn(tmp_
     assert len(formed) == 1
     assert tool_output["results"][0]["proposal_id"] == proposed[0].payload["proposal_id"]
     assert proposed[0].causal_parents == [result.debug["turn_received_event_id"]]
-    assert proposed[0].payload["operation"] == "append"
+    assert proposed[0].payload["operation"] == "append_distinct"
     assert proposed[0].payload["target_belief_ids"] == []
     assert proposed[0].payload["reason"] == (
         "User explicitly stated a stable answer-language preference."
@@ -101,7 +99,7 @@ def test_memory_propose_append_promotes_explicit_preference_in_runtime_turn(tmp_
     assert proposed[0].payload["evidence"] == "User said: 以后都用中文回答我."
     assert proposed[0].payload["gate"] == {
         "decision": "accepted",
-        "reason": "accepted_append",
+        "reason": "accepted_append_distinct",
     }
     assert proposed[0].payload["source_refs"] == [
         {"kind": "session", "id": "s1"},
@@ -109,7 +107,7 @@ def test_memory_propose_append_promotes_explicit_preference_in_runtime_turn(tmp_
     ]
     assert {"kind": "tool_call", "id": "call_memory"} in proposed[0].payload["audit_refs"]
     assert formed[0].causal_parents == [proposed[0].id]
-    assert formed[0].payload["operation"] == "append"
+    assert formed[0].payload["operation"] == "append_distinct"
     assert formed[0].payload["target_belief_ids"] == []
     assert formed[0].payload["new_belief_id"] == tool_output["results"][0]["new_belief_id"]
 
@@ -144,7 +142,7 @@ def test_memory_propose_records_each_update_and_leaves_correct_pending(tmp_path)
     provider = _MemoryProposeProvider(
         updates=[
             _update(
-                "append",
+                "append_distinct",
                 memory={
                     "type": "constraint",
                     "content": "Do not write local machine-specific absolute paths into the repo.",
@@ -155,7 +153,7 @@ def test_memory_propose_records_each_update_and_leaves_correct_pending(tmp_path)
             ),
             _update(
                 "correct",
-                targets=[str(target.id)],
+                target_belief_ids=[str(target.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers Rust examples.",
@@ -178,7 +176,7 @@ def test_memory_propose_records_each_update_and_leaves_correct_pending(tmp_path)
         for event in events
         if event.kind == CognitiveEventKind.BELIEF_FORM_PENDING_CONFIRMATION
     ]
-    assert [event.payload["operation"] for event in proposed[-2:]] == ["append", "correct"]
+    assert [event.payload["operation"] for event in proposed[-2:]] == ["append_distinct", "correct"]
     assert [event.payload["gate"]["decision"] for event in proposed[-2:]] == [
         "accepted",
         "pending_confirmation",
@@ -209,7 +207,7 @@ def test_memory_propose_records_each_update_and_leaves_correct_pending(tmp_path)
     assert tool_output["status"] == "mixed"
     assert tool_output["next_action"] == "ask_user_confirmation"
     assert [(item["operation"], item["decision"]) for item in tool_output["results"]] == [
-        ("append", "accepted"),
+        ("append_distinct", "accepted"),
         ("correct", "pending_confirmation"),
     ]
 
@@ -230,7 +228,7 @@ def test_memory_propose_duplicate_append_reinforces_without_new_belief(tmp_path)
         message="提醒一下，还是用中文",
         updates=[
             _update(
-                "append",
+                "append_distinct",
                 memory={
                     "type": "preference",
                     "content": "User prefers future answers in Chinese.",
@@ -275,7 +273,7 @@ def test_memory_propose_append_related_candidate_needs_target_selection(tmp_path
         message="Actually use Rust examples.",
         updates=[
             _update(
-                "append",
+                "append_distinct",
                 target_hint="code example language preference",
                 memory={
                     "type": "preference",
@@ -294,8 +292,16 @@ def test_memory_propose_append_related_candidate_needs_target_selection(tmp_path
     assert active[0].id == original.id
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "needs_target_selection"
-    assert tool_output["next_action"] == "retry_with_target"
+    assert tool_output["next_action"] == "review_candidates"
     assert tool_output["results"][0]["decision"] == "needs_target_selection"
+    assert tool_output["results"][0]["resolution_options"] == [
+        "append_distinct",
+        "reinforce",
+        "replace",
+        "merge",
+        "correct",
+        "retract",
+    ]
     assert tool_output["results"][0]["candidates"] == [
         {
             "id": str(original.id),
@@ -308,7 +314,7 @@ def test_memory_propose_append_related_candidate_needs_target_selection(tmp_path
     ]
 
 
-def test_memory_propose_append_with_reviewed_targets_adds_without_superseding(
+def test_memory_propose_append_with_reviewed_candidates_adds_without_superseding(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -325,8 +331,8 @@ def test_memory_propose_append_with_reviewed_targets_adds_without_superseding(
         message="Keep that, but also remember I prefer Rust examples for systems topics.",
         updates=[
             _update(
-                "append",
-                targets=[str(original.id)],
+                "append_distinct",
+                reviewed_candidate_ids=[str(original.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers Rust examples for systems topics.",
@@ -359,16 +365,19 @@ def test_memory_propose_append_with_reviewed_targets_adds_without_superseding(
     assert superseded == []
     proposed = [event for event in events if event.kind == CognitiveEventKind.MEMORY_PROPOSED]
     formed = [event for event in events if event.kind == CognitiveEventKind.BELIEF_FORMED]
-    assert proposed[-1].payload["operation"] == "append"
-    assert proposed[-1].payload["target_belief_ids"] == [str(original.id)]
-    assert formed[-1].payload["operation"] == "append"
-    assert formed[-1].payload["target_belief_ids"] == [str(original.id)]
+    assert proposed[-1].payload["operation"] == "append_distinct"
+    assert proposed[-1].payload["target_belief_ids"] == []
+    assert proposed[-1].payload["reviewed_candidate_ids"] == [str(original.id)]
+    assert formed[-1].payload["operation"] == "append_distinct"
+    assert formed[-1].payload["target_belief_ids"] == []
+    assert formed[-1].payload["reviewed_candidate_ids"] == [str(original.id)]
 
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "accepted"
-    assert tool_output["results"][0]["operation"] == "append"
+    assert tool_output["results"][0]["operation"] == "append_distinct"
     assert tool_output["results"][0]["decision"] == "accepted"
-    assert tool_output["results"][0]["target_belief_ids"] == [str(original.id)]
+    assert tool_output["results"][0]["target_belief_ids"] == []
+    assert tool_output["results"][0]["reviewed_candidate_ids"] == [str(original.id)]
 
 
 def test_memory_propose_replace_requires_one_active_target_and_supersedes(tmp_path) -> None:
@@ -387,7 +396,7 @@ def test_memory_propose_replace_requires_one_active_target_and_supersedes(tmp_pa
         updates=[
             _update(
                 "replace",
-                targets=[str(original.id)],
+                target_belief_ids=[str(original.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers Rust examples.",
@@ -442,7 +451,7 @@ def test_memory_propose_replace_trusts_model_target_and_evidence(tmp_path) -> No
         updates=[
             _update(
                 "replace",
-                targets=[str(original.id)],
+                target_belief_ids=[str(original.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers Rust examples.",
@@ -478,7 +487,7 @@ def test_memory_propose_replace_does_not_gate_on_reason_words(tmp_path) -> None:
         updates=[
             _update(
                 "replace",
-                targets=[str(original.id)],
+                target_belief_ids=[str(original.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers Rust examples.",
@@ -511,8 +520,8 @@ def test_memory_propose_merge_supersedes_multiple_targets_to_same_belief(tmp_pat
         message="Also remember that I prefer direct answers.",
         updates=[
             _update(
-                "append",
-                targets=[str(first.id)],
+                "append_distinct",
+                reviewed_candidate_ids=[str(first.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers direct answers.",
@@ -535,7 +544,7 @@ def test_memory_propose_merge_supersedes_multiple_targets_to_same_belief(tmp_pat
         updates=[
             _update(
                 "merge",
-                targets=[str(first.id), str(second.id)],
+                target_belief_ids=[str(first.id), str(second.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers concise, direct answers.",
@@ -578,7 +587,7 @@ def test_memory_propose_merge_supersedes_multiple_targets_to_same_belief(tmp_pat
     assert tool_output["results"][0]["target_belief_ids"] == [str(first.id), str(second.id)]
 
 
-def test_memory_propose_duplicate_targets_are_rejected(tmp_path) -> None:
+def test_memory_propose_duplicate_target_belief_ids_are_rejected(tmp_path) -> None:
     store = _store(tmp_path)
     original = _append_memory(
         store,
@@ -594,7 +603,7 @@ def test_memory_propose_duplicate_targets_are_rejected(tmp_path) -> None:
         updates=[
             _update(
                 "merge",
-                targets=[str(original.id), str(original.id)],
+                target_belief_ids=[str(original.id), str(original.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers concise answers.",
@@ -608,7 +617,7 @@ def test_memory_propose_duplicate_targets_are_rejected(tmp_path) -> None:
 
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "rejected"
-    assert tool_output["results"][0]["reason"] == "duplicate_targets"
+    assert tool_output["results"][0]["reason"] == "duplicate_target_belief_ids"
     assert [item.id for item in BeliefProjection(store).list_active()] == [original.id]
 
 
@@ -628,7 +637,8 @@ def test_memory_propose_retract_requires_target_and_clear_evidence(tmp_path) -> 
         updates=[
             {
                 "operation": "retract",
-                "targets": [str(original.id)],
+                "target_belief_ids": [str(original.id)],
+                "reviewed_candidate_ids": [],
                 "target_hint": "",
                 "reason": "User explicitly asked to forget the stored preference.",
                 "memory": {
@@ -672,7 +682,8 @@ def test_memory_propose_retract_trusts_model_target_and_evidence(tmp_path) -> No
         updates=[
             {
                 "operation": "retract",
-                "targets": [str(original.id)],
+                "target_belief_ids": [str(original.id)],
+                "reviewed_candidate_ids": [],
                 "target_hint": "",
                 "reason": "The model thinks the user wants to forget this preference.",
                 "memory": {
@@ -708,7 +719,8 @@ def test_memory_propose_targeted_retract_without_memory_evidence_waits(tmp_path)
         updates=[
             {
                 "operation": "retract",
-                "targets": [str(original.id)],
+                "target_belief_ids": [str(original.id)],
+                "reviewed_candidate_ids": [],
                 "target_hint": "",
                 "reason": "The model thinks the user wants to forget this preference.",
             }
@@ -737,7 +749,8 @@ def test_memory_propose_target_must_be_active_and_scope_matched(tmp_path) -> Non
         updates=[
             {
                 "operation": "retract",
-                "targets": [str(original.id)],
+                "target_belief_ids": [str(original.id)],
+                "reviewed_candidate_ids": [],
                 "target_hint": "",
                 "reason": "User explicitly asked to forget the stored preference.",
                 "memory": {
@@ -763,7 +776,7 @@ def test_memory_propose_target_must_be_active_and_scope_matched(tmp_path) -> Non
         updates=[
             _update(
                 "replace",
-                targets=[str(original.id)],
+                target_belief_ids=[str(original.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers Rust examples.",
@@ -774,7 +787,7 @@ def test_memory_propose_target_must_be_active_and_scope_matched(tmp_path) -> Non
             ),
             _update(
                 "replace",
-                targets=[str(active_target.id)],
+                target_belief_ids=[str(active_target.id)],
                 memory={
                     "type": "preference",
                     "content": "User prefers Rust examples.",
@@ -811,7 +824,8 @@ def test_memory_propose_no_target_retract_returns_candidates(tmp_path) -> None:
         updates=[
             {
                 "operation": "retract",
-                "targets": [],
+                "target_belief_ids": [],
+                "reviewed_candidate_ids": [],
                 "target_hint": "Python examples preference",
                 "reason": "User asked to forget a memory but did not provide a target id.",
                 "memory": {
@@ -847,7 +861,8 @@ def test_memory_propose_no_memory_retract_returns_candidates_from_hint(tmp_path)
         updates=[
             {
                 "operation": "retract",
-                "targets": [],
+                "target_belief_ids": [],
+                "reviewed_candidate_ids": [],
                 "target_hint": "Python examples preference",
                 "reason": "User asked to forget a memory but did not provide a target id.",
             }
@@ -881,7 +896,8 @@ def test_memory_propose_no_target_retract_without_candidates_still_needs_selecti
         updates=[
             {
                 "operation": "retract",
-                "targets": [],
+                "target_belief_ids": [],
+                "reviewed_candidate_ids": [],
                 "target_hint": "Zig examples preference",
                 "reason": "User asked to forget a memory but did not provide a target id.",
                 "memory": {
@@ -896,7 +912,7 @@ def test_memory_propose_no_target_retract_without_candidates_still_needs_selecti
 
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
     assert tool_output["status"] == "needs_target_selection"
-    assert tool_output["next_action"] == "retry_with_target"
+    assert tool_output["next_action"] == "review_candidates"
     assert tool_output["results"][0]["operation"] == "retract"
     assert tool_output["results"][0]["decision"] == "needs_target_selection"
     assert "candidates" not in tool_output["results"][0]
@@ -915,7 +931,7 @@ def test_memory_propose_noops_without_reactive_write_context(tmp_path) -> None:
                 arguments={
                     "updates": [
                         _update(
-                            "append",
+                            "append_distinct",
                             memory={
                                 "type": "preference",
                                 "content": "User prefers Chinese.",
@@ -967,7 +983,7 @@ def _append_memory(
         message=evidence,
         updates=[
             _update(
-                "append",
+                "append_distinct",
                 memory={
                     "type": "preference",
                     "content": content,
@@ -997,12 +1013,14 @@ def _update(
     *,
     memory: dict[str, str],
     reason: str,
-    targets: list[str] | None = None,
+    target_belief_ids: list[str] | None = None,
+    reviewed_candidate_ids: list[str] | None = None,
     target_hint: str = "",
 ) -> dict[str, Any]:
     return {
         "operation": operation,
-        "targets": list(targets or []),
+        "target_belief_ids": list(target_belief_ids or []),
+        "reviewed_candidate_ids": list(reviewed_candidate_ids or []),
         "target_hint": target_hint,
         "memory": memory,
         "reason": reason,

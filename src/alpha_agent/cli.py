@@ -976,11 +976,13 @@ def _format_memory_tool_trace(trace: RuntimeTrace) -> str:
         if result_ids:
             parts.append(f"results={','.join(result_ids)}")
     elif tool_name == "memory_propose":
-        updates, targets, candidates, new_beliefs = _memory_update_trace_fields(output)
+        updates, targets, reviewed, candidates, new_beliefs = _memory_update_trace_fields(output)
         if updates:
             parts.append(f"updates={';'.join(updates)}")
         if targets:
             parts.append(f"targets={','.join(targets)}")
+        if reviewed:
+            parts.append(f"reviewed={','.join(reviewed)}")
         if candidates:
             parts.append(f"candidates={','.join(candidates)}")
         if new_beliefs:
@@ -1009,9 +1011,10 @@ def _trace_output(trace: RuntimeTrace) -> dict[str, Any]:
 
 def _memory_update_trace_fields(
     output: dict[str, Any],
-) -> tuple[list[str], list[str], list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str], list[str], list[str]]:
     updates: list[str] = []
     targets: list[str] = []
+    reviewed: list[str] = []
     candidates: list[str] = []
     new_beliefs: list[str] = []
     for result in _dict_items(output.get("results")):
@@ -1019,6 +1022,7 @@ def _memory_update_trace_fields(
         decision = str(result.get("decision") or "-")
         updates.append(f"{operation}:{decision}")
         targets.extend(_strings_from_items(result.get("target_belief_ids")))
+        reviewed.extend(_strings_from_items(result.get("reviewed_candidate_ids")))
         candidates.extend(_ids_from_items(result.get("candidates")))
         new_belief = result.get("new_belief_id")
         if new_belief is not None:
@@ -1026,6 +1030,7 @@ def _memory_update_trace_fields(
     return (
         _unique_preserving_order(updates),
         _unique_preserving_order(targets),
+        _unique_preserving_order(reviewed),
         _unique_preserving_order(candidates),
         _unique_preserving_order(new_beliefs),
     )

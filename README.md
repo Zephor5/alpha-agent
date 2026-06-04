@@ -74,15 +74,18 @@ results remain compact belief handles with id, content, type, scope, status,
 and held_since, without confidence scores, sources, or evidence.
 
 Memory writes use the separate `memory_propose` update path during a runtime
-turn. The model submits `updates` with an explicit operation (`append`,
-`reinforce`, `replace`, `merge`, `correct`, or `retract`) and a memory type
-(`preference`, `constraint`, `procedure`, or `factual`). Accepted updates emit
-`memory_proposed`, then the relevant belief lifecycle event, and apply
-immediately to `belief_view`; uncertain updates return target candidates or
-pending confirmation instead of silently overwriting active beliefs. Tool
-results include `next_action`: `retry_with_target` asks the LLM to retry with
-explicit targets, while `ask_user_confirmation` asks it to request user approval
-before a later LLM-directed write.
+turn. The model submits `updates` with an explicit operation
+(`append_distinct`, `reinforce`, `replace`, `merge`, `correct`, or `retract`)
+and a memory type (`preference`, `constraint`, `procedure`, or `factual`).
+`target_belief_ids` are mutation targets for existing memories, while
+`reviewed_candidate_ids` records candidates reviewed before an
+`append_distinct` decision. Accepted updates emit `memory_proposed`, then the
+relevant belief lifecycle event, and apply immediately to `belief_view`;
+uncertain updates return candidates or pending confirmation instead of silently
+overwriting active beliefs. Tool results include `next_action`:
+`review_candidates` asks the LLM to review candidates and choose an explicit
+operation, while `ask_user_confirmation` asks it to request user approval before
+a later LLM-directed write.
 
 Beliefs are materialized in SQLite and recallable across sessions through a
 deterministic projection over cognition events. Foreground context is stored in

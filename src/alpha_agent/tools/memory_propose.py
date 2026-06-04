@@ -37,7 +37,7 @@ MEMORY_PROPOSE_TOOL_NAME = "memory_propose"
 MEMORY_PROPOSE_CONTEXT_KEY = "memory_propose"
 
 _ALLOWED_OPERATIONS = frozenset(
-    {"append", "reinforce", "replace", "merge", "correct", "retract"}
+    {"append_distinct", "reinforce", "replace", "merge", "correct", "retract"}
 )
 _ALLOWED_MEMORY_TYPES = frozenset({"preference", "constraint", "procedure", "factual"})
 _ALLOWED_SCOPES = frozenset({"counterpart", "global"})
@@ -57,10 +57,18 @@ MemoryStatus = Literal[
 ]
 NextAction = Literal[
     "none",
-    "retry_with_target",
+    "review_candidates",
     "ask_user_confirmation",
     "explain_rejection",
 ]
+_RESOLUTION_OPTIONS = (
+    "append_distinct",
+    "reinforce",
+    "replace",
+    "merge",
+    "correct",
+    "retract",
+)
 
 
 @dataclass(frozen=True)
@@ -101,7 +109,8 @@ class _MemoryRecord:
 class _ParsedUpdate:
     index: int
     operation: str
-    targets: list[str]
+    target_belief_ids: list[str]
+    reviewed_candidate_ids: list[str]
     target_hint: str
     memory: _MemoryRecord | None
     reason: str
@@ -114,7 +123,8 @@ class _ParsedUpdate:
     def update_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "operation": self.operation,
-            "targets": list(self.targets),
+            "target_belief_ids": list(self.target_belief_ids),
+            "reviewed_candidate_ids": list(self.reviewed_candidate_ids),
             "target_hint": self.target_hint,
             "reason": self.reason,
         }
@@ -149,6 +159,7 @@ class _OperationPlan:
     operation: str
     reason: str
     target_beliefs: list[Belief] = field(default_factory=list)
+    reviewed_candidate_beliefs: list[Belief] = field(default_factory=list)
     candidates: list[_Candidate] = field(default_factory=list)
     memory: _MemoryRecord | None = None
     emit_memory_proposed: bool = True
@@ -156,6 +167,10 @@ class _OperationPlan:
     @property
     def target_belief_ids(self) -> list[str]:
         return [str(belief.id) for belief in self.target_beliefs]
+
+    @property
+    def reviewed_candidate_ids(self) -> list[str]:
+        return [str(belief.id) for belief in self.reviewed_candidate_beliefs]
 
 
 @dataclass
@@ -166,6 +181,7 @@ class _UpdateResult:
     decision: Decision
     reason: str
     target_belief_ids: list[str] = field(default_factory=list)
+    reviewed_candidate_ids: list[str] = field(default_factory=list)
     candidates: list[_Candidate] = field(default_factory=list)
     new_belief_id: str | None = None
 
@@ -178,6 +194,10 @@ class _UpdateResult:
             "reason": self.reason,
             "target_belief_ids": list(self.target_belief_ids),
         }
+        if self.reviewed_candidate_ids:
+            output["reviewed_candidate_ids"] = list(self.reviewed_candidate_ids)
+        if self.decision == "needs_target_selection":
+            output["resolution_options"] = list(_RESOLUTION_OPTIONS)
         if self.new_belief_id is not None:
             output["new_belief_id"] = self.new_belief_id
         if self.candidates:
@@ -190,11 +210,10 @@ class MemoryProposeTool:
 
     name = MEMORY_PROPOSE_TOOL_NAME
     description = (
-        "Propose explicit long-term memory updates. Use updates with operation append, "
-        "reinforce, replace, merge, correct, or retract, and memory.type preference, "
-        "constraint, procedure, or factual. Do not use for ordinary facts, transient "
-        "context, guesses, or tool summaries. Returns accepted, pending_confirmation, "
-        "needs_target_selection, rejected, or mixed with a next_action for the model."
+        "Propose explicit long-term memories. append_distinct adds a new memory "
+        "after reviewed_candidate_ids; reinforce, replace, merge, and retract use "
+        "target_belief_ids; correct waits for confirmation. Not for transient facts, "
+        "guesses, or tool summaries. Returns status and next_action."
     )
     strict = True
     parameters = {
@@ -212,7 +231,7 @@ class MemoryProposeTool:
                         "operation": {
                             "type": "string",
                             "enum": [
-                                "append",
+                                "append_distinct",
                                 "reinforce",
                                 "replace",
                                 "merge",
@@ -220,7 +239,12 @@ class MemoryProposeTool:
                                 "retract",
                             ],
                         },
-                        "targets": {
+                        "target_belief_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 5,
+                        },
+                        "reviewed_candidate_ids": {
                             "type": "array",
                             "items": {"type": "string"},
                             "maxItems": 5,
@@ -250,7 +274,13 @@ class MemoryProposeTool:
                         },
                         "reason": {"type": "string", "maxLength": 500},
                     },
-                    "required": ["operation", "targets", "target_hint", "reason"],
+                    "required": [
+                        "operation",
+                        "target_belief_ids",
+                        "reviewed_candidate_ids",
+                        "target_hint",
+                        "reason",
+                    ],
                 },
             }
         },
@@ -294,7 +324,8 @@ class MemoryProposeTool:
                 parsed = _ParsedUpdate(
                     index=parsed.index,
                     operation=parsed.operation,
-                    targets=parsed.targets,
+                    target_belief_ids=parsed.target_belief_ids,
+                    reviewed_candidate_ids=parsed.reviewed_candidate_ids,
                     target_hint=parsed.target_hint,
                     memory=parsed.memory,
                     reason=parsed.reason,
@@ -308,6 +339,7 @@ class MemoryProposeTool:
                 decision=plan.decision,
                 reason=plan.reason,
                 target_belief_ids=plan.target_belief_ids,
+                reviewed_candidate_ids=plan.reviewed_candidate_ids,
                 candidates=plan.candidates,
             )
             proposed_event: CognitiveEvent | None = None
@@ -407,7 +439,7 @@ def _apply_accepted_update(
         context=context,
         extra_sources=extra_sources,
     )
-    if plan.operation == "append":
+    if plan.operation == "append_distinct":
         formed = _emit_belief_formed(
             context=context,
             proposal_id=proposal_id,
@@ -567,14 +599,16 @@ def _parse_update(raw: object, index: int) -> _ParsedUpdate:
         return _ParsedUpdate(
             index=index,
             operation="",
-            targets=[],
+            target_belief_ids=[],
+            reviewed_candidate_ids=[],
             target_hint="",
             memory=None,
             reason="",
             errors=["update_not_object"],
         )
     operation = _string_field(raw.get("operation"), max_length=64)
-    targets = _target_list(raw.get("targets"))
+    target_belief_ids = _id_list(raw.get("target_belief_ids"))
+    reviewed_candidate_ids = _id_list(raw.get("reviewed_candidate_ids"))
     target_hint = _string_field(raw.get("target_hint"), max_length=300)
     reason = _string_field(raw.get("reason"), max_length=500)
     memory, memory_errors = _parse_memory(raw.get("memory"))
@@ -583,14 +617,21 @@ def _parse_update(raw: object, index: int) -> _ParsedUpdate:
         errors.append("invalid_operation")
     if not reason:
         errors.append("missing_reason")
-    if raw.get("targets") is not None and not isinstance(raw.get("targets"), list):
-        errors.append("invalid_targets")
+    if raw.get("target_belief_ids") is not None and not isinstance(
+        raw.get("target_belief_ids"), list
+    ):
+        errors.append("invalid_target_belief_ids")
+    if raw.get("reviewed_candidate_ids") is not None and not isinstance(
+        raw.get("reviewed_candidate_ids"), list
+    ):
+        errors.append("invalid_reviewed_candidate_ids")
     if operation != "retract" and memory is None:
         errors.append("missing_memory")
     return _ParsedUpdate(
         index=index,
         operation=operation,
-        targets=targets,
+        target_belief_ids=target_belief_ids,
+        reviewed_candidate_ids=reviewed_candidate_ids,
         target_hint=target_hint,
         memory=memory,
         reason=reason,
@@ -642,12 +683,20 @@ def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _Oper
             memory=parsed.memory,
         )
 
+    reviewed_check = _validate_reviewed_candidates(parsed, context)
+    if reviewed_check.decision != "accepted":
+        return reviewed_check
+
     target_check = _validate_targets(parsed, context)
     if target_check.decision != "accepted":
         return target_check
 
-    if parsed.operation == "append":
-        return _plan_append(parsed, context, target_check.target_beliefs)
+    if parsed.operation == "append_distinct":
+        return _plan_append_distinct(
+            parsed,
+            context,
+            reviewed_check.reviewed_candidate_beliefs,
+        )
     if parsed.operation == "reinforce":
         if not target_check.target_beliefs:
             return _needs_targets(parsed, context, "reinforce_requires_target")
@@ -744,19 +793,11 @@ def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _Oper
     )
 
 
-def _plan_append(
+def _plan_append_distinct(
     parsed: _ParsedUpdate,
     context: MemoryProposalContext,
-    target_beliefs: list[Belief],
+    reviewed_candidate_beliefs: list[Belief],
 ) -> _OperationPlan:
-    if target_beliefs:
-        return _OperationPlan(
-            decision="accepted",
-            operation="append",
-            reason="accepted_append",
-            target_beliefs=target_beliefs,
-            memory=parsed.memory,
-        )
     exact_duplicates = _exact_duplicate_beliefs(parsed, context)
     if exact_duplicates:
         return _OperationPlan(
@@ -766,19 +807,28 @@ def _plan_append(
             target_beliefs=[exact_duplicates[0]],
             memory=parsed.memory,
         )
+    if reviewed_candidate_beliefs:
+        return _OperationPlan(
+            decision="accepted",
+            operation="append_distinct",
+            reason="accepted_append_distinct",
+            reviewed_candidate_beliefs=reviewed_candidate_beliefs,
+            memory=parsed.memory,
+        )
     candidates = _candidate_outputs(parsed, context)
     if candidates:
         return _OperationPlan(
             decision="needs_target_selection",
-            operation="append",
+            operation="append_distinct",
             reason="related_active_beliefs_require_target_selection",
             candidates=candidates,
             memory=parsed.memory,
         )
     return _OperationPlan(
         decision="accepted",
-        operation="append",
-        reason="accepted_append",
+        operation="append_distinct",
+        reason="accepted_append_distinct",
+        reviewed_candidate_beliefs=reviewed_candidate_beliefs,
         memory=parsed.memory,
     )
 
@@ -808,18 +858,25 @@ def _needs_targets(
 
 
 def _validate_targets(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _OperationPlan:
-    if not parsed.targets:
+    if parsed.operation == "append_distinct" and parsed.target_belief_ids:
+        return _OperationPlan(
+            decision="rejected",
+            operation=parsed.operation,
+            reason="append_distinct_uses_reviewed_candidate_ids",
+            memory=parsed.memory,
+        )
+    if not parsed.target_belief_ids:
         return _OperationPlan(
             decision="accepted",
             operation=parsed.operation,
             reason="targets_valid",
             memory=parsed.memory,
         )
-    if len(set(parsed.targets)) != len(parsed.targets):
+    if len(set(parsed.target_belief_ids)) != len(parsed.target_belief_ids):
         return _OperationPlan(
             decision="rejected",
             operation=parsed.operation,
-            reason="duplicate_targets",
+            reason="duplicate_target_belief_ids",
             memory=parsed.memory,
         )
     projection = context.belief_projection
@@ -831,7 +888,7 @@ def _validate_targets(parsed: _ParsedUpdate, context: MemoryProposalContext) -> 
             memory=parsed.memory,
         )
     target_beliefs: list[Belief] = []
-    for target_id in parsed.targets:
+    for target_id in parsed.target_belief_ids:
         belief = projection.get_by_id(target_id)
         if belief is None:
             return _OperationPlan(
@@ -867,6 +924,80 @@ def _validate_targets(parsed: _ParsedUpdate, context: MemoryProposalContext) -> 
         operation=parsed.operation,
         reason="targets_valid",
         target_beliefs=target_beliefs,
+        memory=parsed.memory,
+    )
+
+
+def _validate_reviewed_candidates(
+    parsed: _ParsedUpdate,
+    context: MemoryProposalContext,
+) -> _OperationPlan:
+    if not parsed.reviewed_candidate_ids:
+        return _OperationPlan(
+            decision="accepted",
+            operation=parsed.operation,
+            reason="reviewed_candidates_valid",
+            memory=parsed.memory,
+        )
+    if parsed.operation != "append_distinct":
+        return _OperationPlan(
+            decision="rejected",
+            operation=parsed.operation,
+            reason="reviewed_candidates_only_for_append_distinct",
+            memory=parsed.memory,
+        )
+    if len(set(parsed.reviewed_candidate_ids)) != len(parsed.reviewed_candidate_ids):
+        return _OperationPlan(
+            decision="rejected",
+            operation=parsed.operation,
+            reason="duplicate_reviewed_candidate_ids",
+            memory=parsed.memory,
+        )
+    projection = context.belief_projection
+    if projection is None:
+        return _OperationPlan(
+            decision="rejected",
+            operation=parsed.operation,
+            reason="missing_belief_projection",
+            memory=parsed.memory,
+        )
+    reviewed: list[Belief] = []
+    for candidate_id in parsed.reviewed_candidate_ids:
+        belief = projection.get_by_id(candidate_id)
+        if belief is None:
+            return _OperationPlan(
+                decision="rejected",
+                operation=parsed.operation,
+                reason="reviewed_candidate_not_found",
+                memory=parsed.memory,
+            )
+        if str(belief.status) != "active":
+            return _OperationPlan(
+                decision="rejected",
+                operation=parsed.operation,
+                reason="reviewed_candidate_not_active",
+                memory=parsed.memory,
+            )
+        if not _target_scope_matches(belief, parsed.memory, context):
+            return _OperationPlan(
+                decision="rejected",
+                operation=parsed.operation,
+                reason="reviewed_candidate_scope_mismatch",
+                memory=parsed.memory,
+            )
+        if parsed.memory is not None and _memory_type_for_belief(belief) != parsed.memory.type:
+            return _OperationPlan(
+                decision="rejected",
+                operation=parsed.operation,
+                reason="reviewed_candidate_type_mismatch",
+                memory=parsed.memory,
+            )
+        reviewed.append(belief)
+    return _OperationPlan(
+        decision="accepted",
+        operation=parsed.operation,
+        reason="reviewed_candidates_valid",
+        reviewed_candidate_beliefs=reviewed,
         memory=parsed.memory,
     )
 
@@ -1231,6 +1362,7 @@ def _change_payload(
         "tool_call_id": tool_call_id or "",
         "operation": plan.operation,
         "target_belief_ids": plan.target_belief_ids,
+        "reviewed_candidate_ids": plan.reviewed_candidate_ids,
         "reason": parsed.reason or plan.reason,
         "evidence": parsed.evidence or parsed.reason,
     }
@@ -1290,15 +1422,15 @@ def _scope_for_belief(belief: Belief) -> str:
     return "counterpart" if belief.about else "global"
 
 
-def _target_list(value: object) -> list[str]:
+def _id_list(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
-    targets: list[str] = []
+    ids: list[str] = []
     for item in value[:5]:
-        target = _non_empty_str(item)
-        if target:
-            targets.append(target)
-    return targets
+        raw_id = _non_empty_str(item)
+        if raw_id:
+            ids.append(raw_id)
+    return ids
 
 
 def _aggregate_status(results: list[_UpdateResult]) -> MemoryStatus:
@@ -1315,7 +1447,7 @@ def _aggregate_next_action(results: list[_UpdateResult]) -> NextAction:
     if "pending_confirmation" in decisions:
         return "ask_user_confirmation"
     if "needs_target_selection" in decisions:
-        return "retry_with_target"
+        return "review_candidates"
     if "rejected" in decisions:
         return "explain_rejection"
     return "none"
