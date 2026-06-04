@@ -4,6 +4,7 @@
 - ANY MODIFICATIONS MUST BE CONSIDERED FROM A GLOBAL PERSPECTIVE, TAKING INTO ACCOUNT THE ENTIRE PROJECT, ALL MODULES, AND THE ASSOCIATED IMPACTS ON DOCUMENTATION.
 - WHEN THE SAME OR HIGHLY SIMILAR LOGIC APPEARS 3 OR MORE TIMES, EXTRACT IT PROMPTLY INTO A SHARED FUNCTION, MODULE, OR MECHANISM INSTEAD OF KEEPING SIMILAR REUSED CODE IN MULTIPLE PLACES.
 - DO NOT INCLUDE LOCAL MACHINE-SPECIFIC ABSOLUTE PATHS IN THE REPOSITORY. USE RELATIVE PATHS, PROJECT-ROOT-RELATIVE PATHS, ENVIRONMENT VARIABLES, OR GENERIC USER-HOME BASED PATHS INSTEAD.
+- Treat `docs/develop_record/` as historical archive only. Do not read it during normal implementation, review, or current-state analysis unless the user explicitly asks for historical context or the task truly requires archaeology. Never use `docs/develop_record/` as evidence of current behavior, current architecture, or live requirements without verifying against active code and non-archived docs.
 
 ## Project Content Navigation
 ```text
@@ -18,7 +19,7 @@ config.example.toml   Example runtime configuration.
 LICENSE               Project license.
 docs/
   cognition/          Reference docs for cognition and memory design.
-  develop_record/     Archived working notes and completed refactor records, no need to read unless required.
+  develop_record/     Historical archive only; skip by default and never treat as current implementation evidence.
   doing/              Execution ledger for active tasks only; record during execution, then clear after self-check.
   todo/               Project todo docs.
 src/
