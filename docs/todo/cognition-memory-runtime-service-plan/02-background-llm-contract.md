@@ -43,6 +43,8 @@ The background pipeline should be layered, but the cognitive work inside each la
 
    Select raw session messages and runtime/tool traces that have not yet been integrated. Existing beliefs may be included as comparison context for consolidation. Audit logs may help troubleshoot worker behavior but are not the canonical cognition source.
 
+   There is no dedicated `tool_traces` table. "Tool traces" maps to existing durable storage: tool results are `session_messages` with `kind=tool_message`, and runtime/tool execution events are `runtime_traces` rows. The ledger `source_type` values `tool_trace` and `runtime_trace` both resolve to `runtime_traces`; tool result content resolves to `session_messages`. Intake selects from these concrete sources, not from an abstract trace store.
+
 2. **Memory Extraction**
 
    Ask the LLM to extract candidate id-less atomic belief drafts using the stable belief ontology. The output must be structured and schema-validated.
@@ -72,11 +74,12 @@ Common envelope:
 ```text
 operation
 authority
-confidence
 rationale
 requires_confirmation
 source_span_note
 ```
+
+The envelope carries no `confidence` score. Source trust is expressed only through `authority`, bounded by the ceiling. Reject outputs that include a `confidence` or any other numeric belief-strength field.
 
 Stage-specific payloads include:
 
@@ -118,6 +121,7 @@ The runtime should reject outputs that:
 - Use unsupported `memory_kind` or `summary_kind`.
 - Omit required scope/about fields.
 - Claim higher authority than the source ceiling allows.
+- Include a numeric `confidence` or any other belief-strength score.
 - Attempt to inject prompt instructions into memory content.
 - Produce unrelated memory outside the selected source window.
 - Ask the system to treat audit logs as canonical source material.
@@ -146,6 +150,8 @@ Prefix reuse shape:
 ```
 
 Tools are part of the provider-visible prefix and must remain stable for cache reuse. `tool_choice` is not part of the prefix and may differ, but compact and extraction should avoid changing tools schema. If extraction needs structured output, prefer direct JSON output or a generic structured-output mechanism that is already part of the stable tools schema. Do not generate per-worker dynamic tools schemas in the cached prefix.
+
+The extraction worker runs after the compaction call has finished, so it cannot reuse that call's in-memory prompt. It must deterministically reconstruct the same prefix from durable inputs: the stored raw `session_messages` for the covered range, the same stable system message, and the same stable tools schema. Prefix reuse is only real if reconstruction is byte-stable, which is why the source window records the prompt prefix hash and tools schema hash. If reconstruction cannot reproduce the recorded prefix hash, the worker still extracts correctly; it just does not get the cache discount. The handover compression code currently builds its own prompt through `build_handover_compression_prompt_*`; extraction must share the same assembled session context and tools schema as compaction, not a parallel rendering that happens to look similar.
 
 Source-window priority:
 
@@ -225,6 +231,7 @@ Tick semantics:
 
 Gate model:
 
+- The gate substrate is new, not the existing scheduler. The current `Scheduler` and `ScheduleTrigger.watches` gate by counting `CognitiveEventKind` events after a checkpoint over the event log. The target gates count unintegrated raw `session_messages` / traces and changed belief sets, tracked through the processing ledger. The compact fast-path trigger, `handover_compression.completed`, is written as a `runtime_traces` row, not a cognitive event, so the old event-kind watcher cannot see it. Reuse the scheduler's coordinator-acquire, yield, chunk-budget, and checkpoint primitives; replace its event-count eligibility with ledger-driven eligibility. Do not try to express raw-message gates as `CognitiveEventKind` watches.
 - Every background stage is gate-driven from the raw-message layer upward.
 - The daemon timer never means "refresh cognition now"; it only means "evaluate gates now".
 - A stage runs only when its own source set has enough new or changed material.

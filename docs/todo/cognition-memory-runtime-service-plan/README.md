@@ -30,7 +30,8 @@ The stable foundation must therefore be the `Belief` contract. Background cognit
 - Background LLM budget, cost controls, and rate limiting are deferred. The current plan defines the correctness contract and worker shape first.
 - Automatic daemon background execution is a core cognition capability. The target config is `[cognition.background].enabled = true` by default after the LLM-mediated background pipeline is implemented; manual cognition commands remain explicit operator/debug actions.
 - Existing database data does not need to be preserved. This plan assumes no live data compatibility requirement.
-- Primary cognition state is stored as current cognition entities, not as read models rebuilt from audit logs.
+- Legacy deterministic cognition subsystems with no role in the target direction are deleted, not adapted or kept dormant. Removal is clean: the model, projection, schema table, event kinds, payload validators, config keys, CLI commands, and tests all go together, and no negative or skipped test is left behind to reference removed behavior. The concrete inventory is in [Legacy Removal Inventory](07-legacy-removal.md).
+- Primary cognition state is stored as current cognition entities, not as read models rebuilt from audit logs. Moving belief storage off the event-sourced projection model is the largest structural change in this plan; it begins in Phase 0, not Phase 2.
 - Atomic and summary beliefs are separate persisted entity types, such as `atomic_beliefs` and `summary_beliefs`, while still belonging to the same `Belief` family.
 - Raw `session_messages` and runtime/tool traces are the durable source material for cognition. If cognition must be regenerated, the system reruns LLM-mediated extraction and consolidation from raw sources; it does not replay audit records expecting identical LLM-derived cognition.
 - Cognitive/audit logs may be written for debugging, evidence inspection, and operational forensics, but they are not the canonical source of current cognition state.
@@ -99,6 +100,12 @@ Audit logs may explain what happened, but they do not define current cognition a
 
    Cognition should be modeled as current belief entities: atomic beliefs and summary beliefs. Search indexes, audit logs, and any compiled runtime controls are implementation support, not cognition concepts. Do not make log replay part of the target architecture.
 
+   This inverts the current implementation, where `cognitive_events` is canonical and `belief_view` is a projection rebuilt through `auto_rebuild`. The inversion cuts the event spine that several consumers rely on today (the scheduler's event-kind backlog gate, the deterministic workers that write by emitting belief events, and the CLI event trace). Treat that as a Phase 0 consequence, and see [Current Implementation Gaps](04-current-gaps.md) for the affected consumers.
+
+10. **Delete Legacy With No Target Role**
+
+    If a subsystem only serves the old deterministic-reflection, value-lens, strategy-guidance, procedure, or context-window-summary model, remove it outright instead of carrying it. Clean removal includes deleting its tests rather than rewriting them as negative or skipped tests. The full inventory and keep/remove split is in [Legacy Removal Inventory](07-legacy-removal.md).
+
 ## Target Architecture
 
 ```mermaid
@@ -140,5 +147,8 @@ Read these files in order when implementing or reviewing this plan:
 2. [Background LLM Contract](02-background-llm-contract.md)
 3. [Runtime Prompt And Memory Paths](03-runtime-memory-contract.md)
 4. [Current Implementation Gaps](04-current-gaps.md)
-5. [Implementation Phases](05-implementation-phases.md)
-6. [Checkpoints, Risks, And Done Definition](06-checkpoints-risks-done.md)
+5. [Legacy Removal Inventory](07-legacy-removal.md)
+6. [Implementation Phases](05-implementation-phases.md)
+7. [Checkpoints, Risks, And Done Definition](06-checkpoints-risks-done.md)
+
+Read the Legacy Removal Inventory together with Current Implementation Gaps, before the Implementation Phases. The phase plan assumes the removal inventory has defined what is deleted versus kept.

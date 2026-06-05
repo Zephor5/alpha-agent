@@ -43,7 +43,6 @@ content            natural-language assertion
 structure          optional structured claim
 authority          user_asserted | human_confirmed | system_defined | llm_interpreted | background_synthesized
 sources            evidence references
-confidence         numeric confidence, subordinate to authority
 validity           observed_at, valid_from, valid_until, recurrence
 relations          typed links to other beliefs
 update_policy      how conflicts and refreshes should be handled
@@ -170,9 +169,11 @@ Scope controls where a belief applies:
 
 For `project` scope, the LLM may derive a project descriptor from raw context. Program logic normalizes that descriptor and generates the project reference id. The LLM does not mint project ids.
 
+`scope` is a first-class stored field on the belief entity. In the current implementation there is no scope column: scope is inferred from whether `about` is non-empty, and the `object` string encodes `"{type}:{scope}"`. Both encodings must be replaced by real `scope` and `memory_kind` columns. The full five-scope vocabulary lives on the entity, but the foreground tool surface does not need to expose all five at once: `memory_propose` and `memory_recall` may stay limited to `{counterpart, global}` in Phase 0, while `self`, `project`, and `session` scopes are written only by background workers. Recall, duplicate detection, and target validation must read the stored `scope` field rather than re-deriving scope from `object` prefixes or `about` presence.
+
 ### Authority
 
-Authority is not the same as confidence.
+Authority is the only source-trust signal on a belief. There is no numeric confidence score. A belief is trusted according to where it came from, not according to a made-up probability, because no reliable calibrated confidence source exists.
 
 Recommended authority order:
 
@@ -182,7 +183,7 @@ Recommended authority order:
 4. `background_synthesized`
 5. `llm_interpreted`
 
-Conflict resolution should prefer higher authority before considering confidence. A low-confidence user-stated constraint still deserves stronger handling than a high-confidence background inference.
+Conflict resolution prefers higher authority first. When two beliefs have equal authority, break ties by evidence and validity (more or fresher supporting sources, narrower applicable validity window), not by a numeric score. A user-stated constraint still outranks a background inference regardless of how strongly the background worker phrases it.
 
 Authority meanings:
 
@@ -193,6 +194,14 @@ Authority meanings:
 - `llm_interpreted`: a weak belief inferred by an LLM without a direct claim or strong evidence chain.
 
 `human_confirmed` and `user_asserted` are intentionally separate. A normal user statement can be remembered as `user_asserted`; it only becomes `human_confirmed` after a distinct confirmation interaction.
+
+### Authority Is New
+
+There is no `authority` concept in the current code. Beliefs instead carry a numeric `confidence` float (hardcoded to `0.72` in `memory_propose`, nudged by `±delta` in strengthen/weaken) plus several opaque `NewType(str)` fields (`update_policy`, `applicability`, `structure`, `derivation`). The numeric `confidence` is removed (see [Legacy Removal Inventory](07-legacy-removal.md), R9); authority replaces the role it was supposed to play. Introducing authority therefore means:
+
+- A new `Authority` enum.
+- Promoting the opaque `NewType(str)` fields that now must enforce invariants (`scope`, `derivation_stage`, `authority`, `validity`, `relations`) into real structured types or enums. Adding enum members to `enums.py` is not sufficient on its own; the model boundary must validate the structured shape.
+- A phased rollout of enforcement, so Phase 0 and Phase 2 do not conflict. Foreground `memory_propose` never accepts a caller-proposed authority value: in Phase 0 it simply stamps a fixed authority by source channel (`user_asserted` for a plain user statement, `system_defined` / `human_confirmed` only through their explicit flows). There is nothing to reject, so Phase 0 needs no overclaim-rejection machinery. Full ceiling enforcement — rejecting a proposed authority that exceeds the source ceiling — is only meaningful once the background LLM can propose authority, so it lands in Phase 2 inside the shared cognition state-write service. From Phase 2 on, both the foreground path and the background workers pass accepted writes through that one ceiling check; the rules below describe that Phase 2 enforcement.
 
 ### Authority Ceiling
 
@@ -213,7 +222,7 @@ Rules:
 - Only an explicit confirmation flow can produce `human_confirmed`.
 - Program logic determines the maximum authority from source channel, source kind, and worker stage. The LLM may propose an authority value inside that envelope, but it does not define the envelope itself.
 - If LLM output claims authority above the source ceiling, reject the output instead of silently downgrading it.
-- `confidence` cannot compensate for lower authority.
+- There is no numeric score that can compensate for lower authority. Authority is the signal; do not reintroduce a confidence float as a back door.
 
 ### Validity
 
@@ -268,3 +277,9 @@ preference   -> preference
 constraint   -> constraint
 procedure    -> procedure
 ```
+
+Today `constraint` is not stored as itself. `memory_propose` maps both `constraint` and `procedure` to `CognitiveType.PROCEDURAL` and disambiguates by parsing the `object` prefix (`"{type}:{scope}"`); `memory_recall` reverses this with the same prefix parsing. Making `constraint` first-class therefore requires three coupled edits, all in Phase 0:
+
+- Store `memory_kind` and `scope` as real columns; stop encoding them in `object`.
+- Replace every `object`-prefix parse (`_memory_type_for_belief`, `_scope_for_belief`, `_target_scope_matches`, duplicate detection, candidate filtering) with reads of the stored fields.
+- Change the `memory_recall` `types` JSON-schema enum, which currently exposes the removed values (`procedural`, `value`, `causal`, `social`, `temporal`, `meta`, `concept`). This enum is part of a `strict=True` tool schema and is therefore a model-visible contract change, not an internal rename.

@@ -2,13 +2,16 @@
 
 ## Checkpoints
 
-### Checkpoint A: Belief Ontology Accepted
+### Checkpoint A: Belief Ontology Accepted And Legacy Removed
 
 Complete after Phase 0.
 
 - The bottom-level belief contract is stable.
 - Memory tools and cognition entity stores use the new classification.
 - The old `CognitiveType` model no longer drives memory semantics.
+- Belief storage is direct entity state; the belief projection-rebuild path is gone.
+- The legacy deterministic subsystems (value, strategy, procedure, context-window, L2/L3 reflectors, L1 reflection projection, `CognitionView`), the state-bearing belief lifecycle events, and numeric `confidence` scoring are deleted with no source or test residue, per the Legacy Removal Inventory completion check.
+- Source trust is carried by `authority` alone; no numeric belief-strength score remains.
 
 ### Checkpoint B: Runtime Contract Protected
 
@@ -91,6 +94,9 @@ Complete after Phase 9.
 - Do not make background summaries answer-path context.
 - Do not use deterministic rules for memory extraction, semantic classification, conflict interpretation, profile synthesis, self-memory synthesis, or domain-guidance synthesis.
 - Do not preserve compatibility with existing database state while refactoring this subsystem.
+- Do not keep the deterministic value, strategy, procedure, context-window, reflector, or `CognitionView` subsystems as dormant or "kept for now" code.
+- Do not store a numeric `confidence` or belief-strength score, and do not let LLM output supply one. Source trust is `authority` only.
+- Do not convert removed-behavior tests into negative, "raises on legacy", skipped, or xfail tests; delete them.
 - Do not define production budget, cost, or rate-limit controls in this phase of the plan.
 
 ## Risks And Mitigations
@@ -115,6 +121,10 @@ Complete after Phase 9.
 | Domain guidance behavior is unclear | Domain guidance summaries either do nothing or leak into prompts | Require every domain guidance summary to declare and test a concrete target domain consumer |
 | Audit log is mistaken for canonical cognition state | Engineers reintroduce log-sourced rebuilds | Treat audit logs as forensic records only; runtime reads current cognition entity stores |
 | Current cognition state becomes stale after writes | Recall or profile loading misses newly persisted memory | Use one shared state-write service that persists entities and updates indexes in the same write path |
+| Belief storage is designed twice across Slice 0.2 and Phase 2 | Wasted rework and conflicting schemas | Fix the boundary: 0.2 builds the primary tables and removes the rebuild path; Phase 2 only adds the write service, ledger, and ceiling on top |
+| Legacy removal deletes load-bearing code | Answer path or daemon breaks | Follow the Keep List in the Legacy Removal Inventory; the answer path imports none of the removed subsystems, so verify each deletion against `respond()` / daemon usage before cutting |
+| Removed behavior leaves test residue | Negative or skipped tests keep the dead contract alive and block a clean tree | Delete the tests with the code; the Phase 0 verification greps for removed symbols across `src tests` and must return nothing |
+| Event-spine consumers break mid-Phase 0 | Scheduler gating or deterministic writers fail once belief events stop | Remove those consumers in the same slice (R7) and replace the event-kind gate with ledger gating; do not leave half-wired event watchers |
 
 ## Done Definition
 
@@ -128,6 +138,7 @@ The work is complete when normal daemon usage supports this loop:
 6. Background integration produces consolidated beliefs and profile summary beliefs when evidence is sufficient.
 7. A later session loads profile memory at session start.
 8. During any turn, the LLM can explicitly call `memory_recall` for additional long-term memory.
-8. Domain guidance summaries affect only their target domain consumers.
-9. Self-understanding is synthesized as self-memory summary beliefs and does not enter prompts by default.
-10. No other cognition state enters the answer prompt by default.
+9. Domain guidance summaries affect only their target domain consumers.
+10. Self-understanding is synthesized as self-memory summary beliefs and does not enter prompts by default.
+11. No other cognition state enters the answer prompt by default.
+12. The legacy deterministic cognition subsystems are gone, with no source or test residue.
