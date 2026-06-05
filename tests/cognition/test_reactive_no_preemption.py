@@ -20,6 +20,8 @@ def test_reactive_try_acquire_does_not_preempt_lower_priority_holder() -> None:
                 with coordinator.try_acquire(reactive):
                     raise AssertionError("unreachable")
         assert coordinator.current_holder() == "consolidation"
+        assert coordinator.yield_to_higher_priority() is True
+        assert coordinator.current_holder() == "consolidation"
 
     with coordinator.try_acquire(reactive):
         assert coordinator.current_holder() == "reactive"

@@ -360,6 +360,12 @@ def _render_daemon_status(status: DaemonStatus) -> None:
     table.add_row("DB path", status.db_path)
     table.add_row("Log dir", status.log_dir)
     table.add_row("Adapters", ", ".join(status.adapters) if status.adapters else "none")
+    table.add_row("Background enabled", str(status.background_enabled).lower())
+    table.add_row("Background state", status.background_state)
+    table.add_row("Background last tick", status.background_last_tick or "-")
+    table.add_row("Background last success", status.background_last_success or "-")
+    table.add_row("Background last error", status.background_last_error or "-")
+    table.add_row("Background next tick", status.background_next_tick or "-")
     table.add_row("Message", status.message)
     console.print(table)
     typer.echo(f"Socket path: {status.socket_path}")
@@ -546,6 +552,16 @@ def config_show() -> None:
             config.max_context_tokens_for_provider(config.llm_provider)
         ),
         "bash_tool_enabled": str(config.bash_tool.enabled).lower(),
+        "cognition_background_enabled": str(config.cognition_background.enabled).lower(),
+        "cognition_background_startup_delay_seconds": str(
+            config.cognition_background.startup_delay_seconds
+        ),
+        "cognition_background_interval_seconds": str(
+            config.cognition_background.interval_seconds
+        ),
+        "cognition_background_tick_timeout_seconds": str(
+            config.cognition_background.tick_timeout_seconds
+        ),
     }
     if config.llm_provider in {"openai-compatible", "openai", "compatible"}:
         rows["compatible_base_url"] = config.compatible_base_url or ""
@@ -675,6 +691,28 @@ def daemon_status() -> None:
             log_dir=str(raw.get("log_dir", config.log_dir)),
             message=str(raw.get("message", "")),
             started_at=str(raw["started_at"]) if raw.get("started_at") is not None else None,
+            background_enabled=bool(raw.get("background_enabled", False)),
+            background_state=str(raw.get("background_state", "disabled")),
+            background_last_tick=(
+                str(raw["background_last_tick"])
+                if raw.get("background_last_tick") is not None
+                else None
+            ),
+            background_last_success=(
+                str(raw["background_last_success"])
+                if raw.get("background_last_success") is not None
+                else None
+            ),
+            background_last_error=(
+                str(raw["background_last_error"])
+                if raw.get("background_last_error") is not None
+                else None
+            ),
+            background_next_tick=(
+                str(raw["background_next_tick"])
+                if raw.get("background_next_tick") is not None
+                else None
+            ),
         )
         _render_daemon_status(status)
         return

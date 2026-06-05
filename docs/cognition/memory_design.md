@@ -117,10 +117,27 @@ but their canonical rows remain available for direct id lookup and audit.
 
 ## Background Work
 
-Retained background memory work is minimal. The archive-expired worker can mark
-expired beliefs as archived directly through the belief projection. Broader
-profile summarization and automatic memory extraction are not implemented in the
-current baseline.
+Daemon background cognition is automatic when `[cognition.background].enabled`
+is `true`, which is the default. The daemon creates one subject-level
+`LoopCoordinator` and shares it between foreground `AlphaAgent` instances and
+the background service, so foreground turns can observe or defer background
+chunks through the same priority boundary.
+
+The background service treats `interval_seconds` as a gate-check cadence, not a
+semantic refresh trigger. Each tick runs bounded eligible chunks sourced from
+lower-layer material:
+
+- source intake from raw `session_messages` and `runtime_traces`;
+- LLM extraction from unprocessed raw source windows;
+- LLM consolidation from extracted atomic belief drafts and active beliefs;
+- conflict review from queued conflict windows;
+- direct archival of expired active beliefs.
+
+Processing state lives in the sidecar ledger tables
+`background_source_progress`, `background_source_window`, and
+`background_stage_run`; raw session messages and traces are not mutated to track
+background progress. Summary gate configuration exists for profile/domain/self
+summary phases, but summary belief generation is still deferred.
 
 ## Prompt Use
 

@@ -10,8 +10,16 @@ from threading import Event
 from types import FrameType
 from typing import Any
 
+from alpha_agent.cognition.coordinator import LoopCoordinator
+from alpha_agent.cognition.loops import BackgroundCognitionService
+from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.config import AlphaConfig
-from alpha_agent.daemon.manager import AgentFactory, AgentManager, initialize_store
+from alpha_agent.daemon.manager import (
+    AgentFactory,
+    AgentManager,
+    build_provider,
+    initialize_store,
+)
 from alpha_agent.daemon.models import (
     DaemonProtocolError,
     DaemonRequest,
@@ -44,6 +52,7 @@ from alpha_agent.gateway.runner import ActiveTurnGuard, GatewayRuntimeBridge
 from alpha_agent.gateway.session import GatewayDeduplicator, GatewaySessionStore, SessionMode
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.state.store import StateStore
+from alpha_agent.tools.default import build_tool_registry
 
 LOCAL_BUSY_MESSAGE = "This session already has an active Alpha turn."
 
@@ -74,8 +83,19 @@ class AlphaDaemon:
         self.config = config
         self.runtime = runtime or daemon_runtime_config(config)
         self.store = store or initialize_store(config)
-        self.agent_manager = agent_manager or AgentManager(AgentFactory(config, self.store))
+        self.loop_coordinator = LoopCoordinator(SUBJECT_SELF)
+        self.agent_manager = agent_manager or AgentManager(
+            AgentFactory(config, self.store, coordinator=self.loop_coordinator)
+        )
         self.turn_guard = turn_guard or ActiveTurnGuard(bypass_commands=set())
+        self.background_service = BackgroundCognitionService(
+            store=self.store,
+            config=config.cognition_background,
+            coordinator=self.loop_coordinator,
+            llm_provider=build_provider(config),
+            tools=build_tool_registry(config).to_llm_tool_definitions(),
+            active_session_ids=getattr(self.agent_manager, "session_ids", lambda: ()),
+        )
         self._server: JsonLineDaemonServer | None = None
         self._stop_requested = Event()
         self._stop_policy: StopPolicy | None = None
@@ -132,6 +152,7 @@ class AlphaDaemon:
             for adapter in adapters:
                 connected_adapters.append(adapter)
                 bridge.connect(adapter)
+            self.background_service.start()
             write_daemon_status(
                 self.runtime.status_path,
                 self._set_status(state="running", message="Daemon is running."),
@@ -146,10 +167,16 @@ class AlphaDaemon:
                     runtime=self.runtime,
                     adapter_names=self._adapter_names,
                     message=f"Daemon stopped after error: {exc}",
+                    background_status=self.background_service.status(),
                 ),
             )
             raise
         finally:
+            self.background_service.stop(
+                immediate=self._stop_policy is StopPolicy.IMMEDIATE,
+                wait=True,
+                timeout=self.config.cognition_background.tick_timeout_seconds + 1,
+            )
             gateway_runtime = gateway_runtime_config(self.config)
             self._disconnect_adapters(connected_adapters, gateway_runtime.log_paths["errors.log"])
             self.agent_manager.evict_all()
@@ -162,6 +189,7 @@ class AlphaDaemon:
                         runtime=self.runtime,
                         adapter_names=self._adapter_names,
                         message="Daemon stopped.",
+                        background_status=self.background_service.status(),
                     ),
                 )
             runtime_lock.release()
@@ -178,6 +206,10 @@ class AlphaDaemon:
 
         self._stop_policy = StopPolicy(policy)
         self._stop_requested.set()
+        self.background_service.stop(
+            immediate=self._stop_policy is StopPolicy.IMMEDIATE,
+            wait=False,
+        )
         write_daemon_status(
             self.runtime.status_path,
             self._set_status(
@@ -217,6 +249,7 @@ class AlphaDaemon:
             adapter_names=self._adapter_names,
             state=state,
             message=message,
+            background_status=self.background_service.status(),
         )
 
     def _set_status(self, *, state: str, message: str) -> DaemonStatus:

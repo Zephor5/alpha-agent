@@ -49,6 +49,34 @@ env_passthrough = []
 enabled = true
 interval_seconds = 300
 
+[cognition.background]
+enabled = true
+startup_delay_seconds = 5
+interval_seconds = 300
+tick_timeout_seconds = 30
+
+[cognition.background.intake]
+batch_size = 64
+min_sources = 1
+
+[cognition.background.extraction]
+batch_size = 12
+min_sources = 1
+
+[cognition.background.consolidation]
+batch_size = 12
+min_drafts = 1
+
+[cognition.background.conflict]
+batch_size = 4
+min_conflicts = 1
+
+[cognition.background.summary]
+batch_size = 4
+initial_min_beliefs = 12
+changed_source_min = 6
+invalidated_source_min = 1
+
 [cognition.drive]
 enabled = false
 interval_seconds = 300

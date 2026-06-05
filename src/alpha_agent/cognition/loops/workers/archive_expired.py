@@ -64,7 +64,7 @@ class ArchiveExpiredWorker:
                         },
                     )
                 emitted += 1
-            if coordinator.yield_to_higher_priority():
+            if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
                 return report(
                     self.name,
                     checkpoint,

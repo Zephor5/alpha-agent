@@ -94,11 +94,13 @@ with lookup and FTS indexes. Model-facing dynamic lookup goes through
 assembled before the provider call. Runtime handover compression remains the
 only prompt-continuity compression mechanism.
 
-Manual consolidation currently retains only direct archival of expired beliefs.
-Deleted deterministic value, procedure, context-window, and self-model
-subsystems are not compatibility-shimmed. The Drive Loop stores event-sourced
-goals in `goal_view` and exposes a disabled-by-default synchronous manual loop
-that can enqueue one eligible active goal as a self-signal.
+Daemon background cognition now runs the LLM-mediated target worker path on a
+bounded gate-check cadence: source intake, memory extraction, memory
+consolidation, conflict review, and direct archival of expired beliefs. Deleted
+deterministic value, procedure, context-window, and self-model subsystems are
+not compatibility-shimmed. The Drive Loop stores event-sourced goals in
+`goal_view` and exposes a disabled-by-default synchronous manual loop that can
+enqueue one eligible active goal as a self-signal.
 
 ## Install
 
@@ -283,6 +285,34 @@ env_passthrough = []
 enabled = true
 interval_seconds = 300
 
+[cognition.background]
+enabled = true
+startup_delay_seconds = 5
+interval_seconds = 300
+tick_timeout_seconds = 30
+
+[cognition.background.intake]
+batch_size = 64
+min_sources = 1
+
+[cognition.background.extraction]
+batch_size = 12
+min_sources = 1
+
+[cognition.background.consolidation]
+batch_size = 12
+min_drafts = 1
+
+[cognition.background.conflict]
+batch_size = 4
+min_conflicts = 1
+
+[cognition.background.summary]
+batch_size = 4
+initial_min_beliefs = 12
+changed_source_min = 6
+invalidated_source_min = 1
+
 [cognition.drive]
 enabled = false
 interval_seconds = 300
@@ -363,6 +393,31 @@ Useful environment overrides:
   Defaults to `true`.
 - `ALPHA_COGNITION_CONSOLIDATION_INTERVAL_SECONDS`: Worker schedule interval
   setting; manual `--now` runs force a pass immediately.
+- `ALPHA_COGNITION_BACKGROUND_ENABLED`: Enables daemon-owned automatic
+  background cognition ticks. Defaults to `true`.
+- `ALPHA_COGNITION_BACKGROUND_STARTUP_DELAY_SECONDS`: Delay before the first
+  daemon background tick. Defaults to `5`.
+- `ALPHA_COGNITION_BACKGROUND_INTERVAL_SECONDS`: Background gate-check cadence.
+  Defaults to `300`.
+- `ALPHA_COGNITION_BACKGROUND_TICK_TIMEOUT_SECONDS`: Soft timeout for one
+  bounded background tick. Defaults to `30`.
+- `ALPHA_COGNITION_BACKGROUND_INTAKE_BATCH_SIZE` /
+  `ALPHA_COGNITION_BACKGROUND_INTAKE_MIN_SOURCES`: Raw source intake chunk and
+  gate.
+- `ALPHA_COGNITION_BACKGROUND_EXTRACTION_BATCH_SIZE` /
+  `ALPHA_COGNITION_BACKGROUND_EXTRACTION_MIN_SOURCES`: LLM extraction chunk and
+  gate.
+- `ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_BATCH_SIZE` /
+  `ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MIN_DRAFTS`: LLM consolidation chunk
+  and gate.
+- `ALPHA_COGNITION_BACKGROUND_CONFLICT_BATCH_SIZE` /
+  `ALPHA_COGNITION_BACKGROUND_CONFLICT_MIN_CONFLICTS`: LLM conflict-review chunk
+  and gate.
+- `ALPHA_COGNITION_BACKGROUND_SUMMARY_BATCH_SIZE`,
+  `ALPHA_COGNITION_BACKGROUND_SUMMARY_INITIAL_MIN_BELIEFS`,
+  `ALPHA_COGNITION_BACKGROUND_SUMMARY_CHANGED_SOURCE_MIN`, and
+  `ALPHA_COGNITION_BACKGROUND_SUMMARY_INVALIDATED_SOURCE_MIN`: Summary gate
+  placeholders for later profile/domain/self summary generation.
 - `ALPHA_COGNITION_DRIVE_ENABLED`: Enables scheduled Drive Loop use when a
   caller wires it in. Defaults to `false`.
 - `ALPHA_COGNITION_DRIVE_INTERVAL_SECONDS`: Global Drive Loop interval setting.
@@ -444,6 +499,9 @@ The current SQLite state baseline is deliberately narrow:
   entities.
 - `belief_entity_index` and `belief_about_index`: lookup indexes for belief
   entity/about references.
+- `background_source_progress`, `background_source_window`, and
+  `background_stage_run`: sidecar processing ledger for daemon background
+  cognition stages.
 - `goal_view`: active/satisfied/abandoned goal materialization for the Drive
   Loop.
 - `subject_view`: current Subject identity materialization.
@@ -457,16 +515,23 @@ subsystem is also in place, with `memory_propose` and `memory_recall` always
 registered, `web_search` registered when Tavily credentials are configured, and
 `bash` registered only when `tools.bash.enabled=true`.
 
+Daemon startup creates one subject-level `LoopCoordinator` shared by
+daemon-created agents and the daemon-owned background cognition service.
+`[cognition.background].enabled = true` starts automatic gate-check ticks after
+`startup_delay_seconds`; setting it to `false` leaves the service disabled with
+no ticks. The legacy `[cognition.consolidation]` section remains for explicit
+manual `alpha cognition consolidate --now` runs and is not the daemon lifecycle
+switch.
+
 ## Current Limitations
 
-- Consolidation is deterministic v1 only: it runs through manual synchronous
-  CLI passes, not a daemon-owned cadence, and it has no LLM summarization
-  policy.
-- Background memory integration is not implemented yet; removed deterministic
-  cognition workers are not compatibility-shimmed.
+- Background memory integration runs daemon-owned bounded chunks for source
+  intake, LLM extraction, LLM consolidation, conflict review, and expired-belief
+  archival, but production budget/rate controls are not defined yet.
+- Background summary generation is still a placeholder: the summary gates are
+  configured, but profile/domain/self summary synthesis lands in later phases.
 - Drive Loop v1 is synchronous and disabled by default: no daemon-owned drive
   cadence, no autonomous goal generation, and one self-signal per manual pass.
-- Background profile summarization is not implemented yet.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.

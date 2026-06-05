@@ -68,7 +68,18 @@ class ScheduledWorker(Protocol):
 
 
 class YieldingCoordinator(Protocol):
+    """Cooperative yield and budget surface passed to scheduled workers.
+
+    Workers must check this surface inside loops and before starting blocking
+    operations such as LLM calls; the scheduler cannot hard-kill arbitrary
+    Python code once an uncooperative operation has started.
+    """
+
     def yield_to_higher_priority(self) -> bool: ...
+
+    def budget_exhausted(self) -> bool: ...
+
+    def remaining_seconds(self) -> float: ...
 
 
 class AcquiringCoordinator(YieldingCoordinator, Protocol):

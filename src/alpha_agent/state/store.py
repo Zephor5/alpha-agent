@@ -268,6 +268,22 @@ class StateStore:
         by_id = {str(row["id"]): self._session_message_from_row(row) for row in rows}
         return [by_id[message_id] for message_id in message_ids if message_id in by_id]
 
+    def list_session_ids(self) -> list[str]:
+        """List known session ids that have source messages or runtime traces."""
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id
+                FROM session_messages
+                UNION
+                SELECT session_id
+                FROM runtime_traces
+                ORDER BY session_id ASC
+                """
+            ).fetchall()
+        return [str(row["session_id"]) for row in rows]
+
     def latest_session_ordinal(self, session_id: str) -> int:
         """Return the latest source ordinal for a session, or zero if it has none."""
 

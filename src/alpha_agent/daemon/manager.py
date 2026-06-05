@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, RLock
 
+from alpha_agent.cognition.coordinator import LoopCoordinator
+from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.config import AlphaConfig
 from alpha_agent.llm.base import LLMProvider
 from alpha_agent.llm.codex import CodexResponsesProvider
@@ -52,9 +54,16 @@ def initialize_store(config: AlphaConfig) -> StateStore:
 class AgentFactory:
     """Build AlphaAgent instances sharing daemon-owned infrastructure."""
 
-    def __init__(self, config: AlphaConfig, store: StateStore):
+    def __init__(
+        self,
+        config: AlphaConfig,
+        store: StateStore,
+        *,
+        coordinator: LoopCoordinator | None = None,
+    ):
         self.config = config
         self.store = store
+        self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
         self._lock = Lock()
 
     def create(self) -> AlphaAgent:
@@ -73,6 +82,7 @@ class AgentFactory:
             max_context_tokens=self.config.max_context_tokens_for_provider(
                 self.config.llm_provider
             ),
+            coordinator=self.coordinator,
         )
 
 
@@ -135,6 +145,12 @@ class AgentManager:
         with self._lock:
             for session_id in list(self._agents):
                 self._release(session_id)
+
+    def session_ids(self) -> tuple[str, ...]:
+        """Return session ids currently represented by cached agents."""
+
+        with self._lock:
+            return tuple(self._agents.keys())
 
     def _evict_overflow(self) -> None:
         while len(self._agents) > self.max_size:

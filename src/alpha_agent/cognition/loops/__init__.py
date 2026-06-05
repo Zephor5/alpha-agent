@@ -1,5 +1,10 @@
 """Cognition loop infrastructure."""
 
+from alpha_agent.cognition.loops.background_service import (
+    BackgroundCognitionService,
+    BackgroundCognitionStatus,
+    SourceIntakeWorker,
+)
 from alpha_agent.cognition.loops.consolidation import ConsolidationConfig, ConsolidationLoop
 from alpha_agent.cognition.loops.drive import DriveConfig, DriveLoop, DriveReport
 from alpha_agent.cognition.loops.scheduler import (
@@ -13,6 +18,8 @@ from alpha_agent.cognition.loops.scheduler import (
 
 __all__ = [
     "CheckpointStore",
+    "BackgroundCognitionService",
+    "BackgroundCognitionStatus",
     "ConsolidationConfig",
     "ConsolidationLoop",
     "DriveConfig",
@@ -21,6 +28,7 @@ __all__ = [
     "InMemoryCheckpointStore",
     "ScheduleTrigger",
     "Scheduler",
+    "SourceIntakeWorker",
     "WorkerCheckpoint",
     "WorkerReport",
 ]

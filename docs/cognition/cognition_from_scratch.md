@@ -72,9 +72,18 @@ projection set:
 - `goal_view`
 - `subject_view`
 
-The retained deterministic worker archives expired beliefs by setting
-`lifecycle=archived` directly. Removed deterministic workers are not preserved
-as compatibility shims.
+Daemon startup creates a `BackgroundCognitionService` when
+`[cognition.background].enabled` is true. It shares the daemon's single
+subject-level `LoopCoordinator` with all daemon-created `AlphaAgent` instances.
+Background ticks are bounded gate checks: source intake, LLM memory extraction,
+LLM consolidation, conflict review, and expired-belief archival run only when
+their lower-layer source material is eligible. The timer decides when to check
+for work; it does not refresh cognition by elapsed time alone.
+
+Background progress uses the sidecar processing ledger rather than mutating raw
+session messages or replaying audit logs. Summary-generation gates exist in
+configuration, but profile/domain/self summary synthesis is still deferred.
+Removed deterministic workers are not preserved as compatibility shims.
 
 ## Drive Loop
 

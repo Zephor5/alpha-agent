@@ -3,6 +3,8 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from alpha_agent.cognition.coordinator import LoopCoordinator
+from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.config import AlphaConfig, BashToolConfig
 from alpha_agent.daemon.manager import AgentFactory, AgentManager
 from alpha_agent.state.store import StateStore
@@ -113,6 +115,29 @@ def test_agent_factory_registers_configured_default_tools(tmp_path: Path) -> Non
         "bash",
         "web_search",
     ]
+
+
+def test_agent_factory_injects_shared_loop_coordinator(tmp_path: Path) -> None:
+    config = AlphaConfig(
+        db_path=tmp_path / "alpha.db",
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway-status.json",
+    )
+    store = StateStore(config.db_path)
+    store.initialize()
+    coordinator = LoopCoordinator(SUBJECT_SELF)
+    factory = AgentFactory(config, store, coordinator=coordinator)
+
+    first = factory.create()
+    second = factory.create()
+    manager = AgentManager(factory)
+    cached = manager.get_or_create("s1")
+    same_cached = manager.get_or_create("s1")
+
+    assert first.coordinator is coordinator
+    assert second.coordinator is coordinator
+    assert cached.coordinator is coordinator
+    assert same_cached is cached
 
 
 class _MonotonicClock:

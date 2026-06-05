@@ -40,6 +40,12 @@ class DaemonStatus:
     log_dir: str = ""
     message: str = ""
     started_at: str | None = None
+    background_enabled: bool = False
+    background_state: str = "disabled"
+    background_last_tick: str | None = None
+    background_last_success: str | None = None
+    background_last_error: str | None = None
+    background_next_tick: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         """Return a JSON-compatible representation."""
@@ -64,6 +70,7 @@ def running_status(
     adapter_names: tuple[str, ...] = (),
     state: str = "running",
     message: str = "Daemon is running.",
+    background_status: Any | None = None,
 ) -> DaemonStatus:
     """Build a running status for the current daemon process."""
 
@@ -80,6 +87,7 @@ def running_status(
         started_at=now,
         adapters=list(adapter_names),
         message=message,
+        **_background_fields(config, background_status),
     )
 
 
@@ -89,6 +97,7 @@ def idle_status(
     runtime: DaemonRuntimeConfig,
     adapter_names: tuple[str, ...] = (),
     message: str = "Daemon is idle; not running.",
+    background_status: Any | None = None,
 ) -> DaemonStatus:
     """Build an idle status when no daemon process is active."""
 
@@ -103,6 +112,7 @@ def idle_status(
         updated_at=utc_now_iso(),
         adapters=list(adapter_names),
         message=message,
+        **_background_fields(config, background_status),
     )
 
 
@@ -112,6 +122,7 @@ def error_status(
     runtime: DaemonRuntimeConfig,
     adapter_names: tuple[str, ...] = (),
     message: str = "Daemon stopped after an error.",
+    background_status: Any | None = None,
 ) -> DaemonStatus:
     """Build an error status after daemon startup or runtime failure."""
 
@@ -126,6 +137,7 @@ def error_status(
         updated_at=utc_now_iso(),
         adapters=list(adapter_names),
         message=message,
+        **_background_fields(config, background_status),
     )
 
 
@@ -160,6 +172,12 @@ def read_daemon_status(path: Path) -> DaemonStatus | None:
             adapters=[str(adapter) for adapter in raw.get("adapters", [])],
             message=str(raw.get("message", "")),
             started_at=_optional_str(raw.get("started_at")),
+            background_enabled=bool(raw.get("background_enabled", False)),
+            background_state=str(raw.get("background_state", "disabled")),
+            background_last_tick=_optional_str(raw.get("background_last_tick")),
+            background_last_success=_optional_str(raw.get("background_last_success")),
+            background_last_error=_optional_str(raw.get("background_last_error")),
+            background_next_tick=_optional_str(raw.get("background_next_tick")),
         )
     except (TypeError, ValueError):
         return None
@@ -184,6 +202,27 @@ def cleanup_runtime_files(runtime: DaemonRuntimeConfig) -> None:
         runtime.socket_path.unlink()
     except FileNotFoundError:
         return
+
+
+def _background_fields(config: AlphaConfig, status: Any | None) -> dict[str, Any]:
+    if status is None:
+        enabled = config.cognition_background.enabled
+        return {
+            "background_enabled": enabled,
+            "background_state": "stopped" if enabled else "disabled",
+            "background_last_tick": None,
+            "background_last_success": None,
+            "background_last_error": None,
+            "background_next_tick": None,
+        }
+    return {
+        "background_enabled": bool(getattr(status, "enabled", False)),
+        "background_state": str(getattr(status, "state", "unknown")),
+        "background_last_tick": _optional_str(getattr(status, "last_tick", None)),
+        "background_last_success": _optional_str(getattr(status, "last_success", None)),
+        "background_last_error": _optional_str(getattr(status, "last_error", None)),
+        "background_next_tick": _optional_str(getattr(status, "next_tick", None)),
+    }
 
 
 def daemon_lock_path(runtime: DaemonRuntimeConfig) -> Path:

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from alpha_agent.config import AlphaConfig
+from alpha_agent.cognition.coordinator import LoopAcquireRequest
+from alpha_agent.cognition.models import LoopPriority
+from alpha_agent.config import AlphaConfig, CognitionBackgroundConfig
 from alpha_agent.daemon.runtime import AlphaDaemon, DaemonAlreadyRunningError
 from alpha_agent.daemon.status import DaemonRuntimeConfig, running_status, write_daemon_status
 from alpha_agent.state.store import StateStore
@@ -145,6 +148,73 @@ def test_daemon_status_response_includes_runtime_paths(tmp_path: Path) -> None:
     assert response["status"]["state"] == "running"
     assert response["status"]["socket_path"] == str(config.daemon_socket_path)
     assert response["status"]["status_path"] == str(config.daemon_status_path)
+    assert response["status"]["background_enabled"] is True
+    assert response["status"]["background_state"] == "stopped"
+    assert response["status"]["background_last_tick"] is None
+    assert response["status"]["background_last_success"] is None
+    assert response["status"]["background_last_error"] is None
+    assert response["status"]["background_next_tick"] is None
+
+
+def test_daemon_disabled_background_status_has_no_ticks(tmp_path: Path) -> None:
+    config = AlphaConfig(
+        db_path=tmp_path / "alpha.db",
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway-status.json",
+        daemon_socket_path=tmp_path / "daemon.sock",
+        daemon_status_path=tmp_path / "daemon-status.json",
+        cognition_background=CognitionBackgroundConfig(enabled=False),
+    )
+    store = StateStore(config.db_path)
+    store.initialize()
+    daemon = AlphaDaemon(config, store=store)
+
+    daemon.background_service.start()
+    response = daemon.handle_payload({"type": "status"})
+
+    assert response["ok"] is True
+    assert response["status"]["background_enabled"] is False
+    assert response["status"]["background_state"] == "disabled"
+    assert response["status"]["background_last_tick"] is None
+    assert response["status"]["background_next_tick"] is None
+
+
+def test_daemon_created_agents_and_background_share_loop_coordinator(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    daemon = AlphaDaemon(config, store=store)
+
+    first = daemon.agent_manager.get_or_create("s1")
+    second = daemon.agent_manager.get_or_create("s2")
+
+    assert first.coordinator is daemon.loop_coordinator
+    assert second.coordinator is daemon.loop_coordinator
+    assert daemon.background_service.coordinator is daemon.loop_coordinator
+
+
+def test_background_holder_makes_daemon_foreground_turn_busy(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    daemon = AlphaDaemon(config, store=store)
+    request = LoopAcquireRequest(
+        loop_name="background:test",
+        priority=LoopPriority.CONSOLIDATION,
+        max_chunk_duration=timedelta(seconds=30),
+    )
+
+    with daemon.loop_coordinator.try_acquire(request):
+        response = daemon.handle_payload(
+            {"type": "ask", "message": "hello", "session_id": "s1"}
+        )
+        should_yield = daemon.loop_coordinator.yield_to_higher_priority()
+
+    assert response["ok"] is True
+    assert response["session_id"] == "s1"
+    assert "Agent is currently background:test" in response["response"]
+    assert should_yield is True
+    assert store.list_session_messages("s1") == []
 
 
 def test_daemon_stop_response_uses_current_graceful_stopping_status(tmp_path: Path) -> None:

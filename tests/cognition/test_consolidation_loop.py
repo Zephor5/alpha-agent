@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import TypedDict
 
 import pytest
 
+import alpha_agent.cognition.loops.background_service as background_service_module
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     BackgroundLLMValidationError,
@@ -15,8 +17,15 @@ from alpha_agent.cognition.background_llm_contract import (
     validate_background_llm_json,
 )
 from alpha_agent.cognition.emitter import EventEmitter
+from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
-from alpha_agent.cognition.loops.scheduler import WorkerCheckpoint
+from alpha_agent.cognition.loops import BackgroundCognitionService
+from alpha_agent.cognition.loops.scheduler import (
+    ScheduleTrigger,
+    WorkerCheckpoint,
+    WorkerReport,
+    YieldingCoordinator,
+)
 from alpha_agent.cognition.loops.workers.archive_expired import ArchiveExpiredWorker
 from alpha_agent.cognition.loops.workers.memory_consolidation import (
     MemoryConflictReviewWorker,
@@ -29,6 +38,7 @@ from alpha_agent.cognition.models import (
     BeliefId,
     BeliefLifecycle,
     BeliefScope,
+    CognitiveEventKind,
     DerivationStage,
     Instant,
     MemoryKind,
@@ -47,6 +57,13 @@ from alpha_agent.cognition.processing_ledger import (
 from alpha_agent.cognition.projections.belief import BeliefRecallParams, BeliefSearchParams
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
+from alpha_agent.config import (
+    BackgroundConflictConfig,
+    BackgroundConsolidationConfig,
+    BackgroundExtractionConfig,
+    BackgroundIntakeConfig,
+    CognitionBackgroundConfig,
+)
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
@@ -202,6 +219,132 @@ def test_processing_ledger_tracks_source_window_and_stage_run_without_mutating_r
     assert finished.status == BackgroundStageRunStatus.FAILED
     assert store.list_session_messages("s1")[0].raw_content == user_message.raw_content
     assert store.list_runtime_traces("s1")[0].content == runtime_trace.content
+
+
+def test_background_service_tick_runs_bounded_intake_chunk(tmp_path) -> None:
+    store = _store(tmp_path)
+    messages = [
+        store.append_session_message(
+            session_id="s1",
+            kind="user_message",
+            llm_role="user",
+            raw_content=f"message {index}",
+        )
+        for index in range(3)
+    ]
+    service = CognitionStateStore(store)
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=1,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
+            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=99),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == ["source_intake"]
+    assert reports[0].emitted == 1
+
+    def intake_status(message_id: str) -> BackgroundProgressStatus | None:
+        try:
+            return service.ledger.get_source_progress(
+                BackgroundSourceRef("session_message", message_id),
+                stage=BackgroundStage.INTAKE,
+                target_unit="session:s1",
+            ).status
+        except KeyError:
+            return None
+
+    statuses = [intake_status(message.id) for message in messages]
+    assert statuses == [BackgroundProgressStatus.PROCESSED, None, None]
+    assert background.status().last_success is not None
+
+
+def test_background_service_does_not_start_worker_without_remaining_tick_budget(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="message",
+    )
+    service = CognitionStateStore(store)
+    worker = _RecordingScheduledWorker("source_intake")
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=0,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
+            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=99),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+        workers=[worker],
+    )
+
+    reports = background.tick_once()
+
+    assert reports == []
+    assert worker.calls == 0
+
+
+def test_background_service_stops_before_subsequent_worker_after_deadline(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="message",
+    )
+    service = CognitionStateStore(store)
+    first = _RecordingScheduledWorker("source_intake")
+    second = _RecordingScheduledWorker("memory_extraction")
+    monotonic_values = [100.0, 100.1, 100.2, 101.1]
+
+    def monotonic() -> float:
+        if monotonic_values:
+            return monotonic_values.pop(0)
+        return 101.1
+
+    monkeypatch.setattr(background_service_module.time, "monotonic", monotonic)
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=1,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
+            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=1),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+        workers=[first, second],
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == ["source_intake"]
+    assert first.calls == 1
+    assert second.calls == 0
 
 
 def test_archive_expired_worker_archives_through_state_service_audit(tmp_path) -> None:
@@ -1391,6 +1534,43 @@ def test_memory_extraction_worker_rejects_malformed_output_without_processed_mar
     assert progress.checkpoint_id is None
 
 
+def test_memory_extraction_worker_yields_before_llm_when_budget_exhausts(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    provider = _RecordingLLMProvider(_llm_json())
+    coordinator = _BudgetExpiresBeforeLlmCoordinator()
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={"s1"},
+    ).run_once(coordinator=coordinator)
+
+    assert report.emitted == 0
+    assert report.yielded_to_higher_priority is True
+    assert report.new_checkpoint.last_status == "yielded"
+    assert provider.calls == []
+    window = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )[0]
+    assert window.status == BackgroundProgressStatus.FAILED
+    progress = service.ledger.get_source_progress(
+        BackgroundSourceRef("session_message", message.id),
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    assert progress.status == BackgroundProgressStatus.FAILED
+
+
 def test_memory_extraction_worker_normalizes_project_descriptor_from_llm_draft(
     tmp_path,
 ) -> None:
@@ -1627,6 +1807,70 @@ def _atomic_belief(
 class _NeverYieldCoordinator:
     def yield_to_higher_priority(self) -> bool:
         return False
+
+    def budget_exhausted(self) -> bool:
+        return False
+
+    def remaining_seconds(self) -> float:
+        return float("inf")
+
+
+class _BudgetExpiresBeforeLlmCoordinator:
+    def __init__(self) -> None:
+        self.budget_checks = 0
+
+    def yield_to_higher_priority(self) -> bool:
+        return False
+
+    def budget_exhausted(self) -> bool:
+        self.budget_checks += 1
+        return self.budget_checks >= 2
+
+    def remaining_seconds(self) -> float:
+        return 0.0 if self.budget_checks >= 1 else 1.0
+
+
+class _RecordingScheduledWorker:
+    trigger = ScheduleTrigger(
+        min_interval=timedelta(seconds=0),
+        max_interval=timedelta(seconds=0),
+        watches=frozenset(),
+        min_new_events=0,
+    )
+    handles_event_kinds: frozenset[CognitiveEventKind] = frozenset()
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self.calls = 0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def run(
+        self,
+        log: EventLog,
+        projections: ProjectionRegistry,
+        emitter: EventEmitter,
+        coordinator: YieldingCoordinator,
+        config: object,
+        checkpoint: WorkerCheckpoint,
+    ) -> WorkerReport:
+        del log, projections, emitter, coordinator, config
+        self.calls += 1
+        return WorkerReport(
+            worker=self.name,
+            inspected=1,
+            emitted=1,
+            notes=[],
+            yielded_to_higher_priority=False,
+            new_checkpoint=WorkerCheckpoint(
+                worker_name=self.name,
+                last_processed_event_id=checkpoint.last_processed_event_id,
+                last_status="ok",
+                metadata=checkpoint.metadata,
+            ),
+        )
 
 
 class _ProviderCall(TypedDict):

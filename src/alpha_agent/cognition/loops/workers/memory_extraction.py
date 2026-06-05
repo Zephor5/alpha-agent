@@ -115,6 +115,12 @@ class _NeverYieldCoordinator:
     def yield_to_higher_priority(self) -> bool:
         return False
 
+    def budget_exhausted(self) -> bool:
+        return False
+
+    def remaining_seconds(self) -> float:
+        return float("inf")
+
 
 class MemoryExtractionWorker:
     """Select raw source windows and ask an LLM for id-less atomic belief drafts."""
@@ -239,7 +245,7 @@ class MemoryExtractionWorker:
                 emitted=0,
                 status="skipped_no_backlog",
             )
-        if coordinator.yield_to_higher_priority():
+        if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
             return _worker_report(
                 self.name,
                 checkpoint,
@@ -279,6 +285,24 @@ class MemoryExtractionWorker:
             window_id=window.window_id,
             input_refs=candidate.source_refs,
         )
+        if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
+            message = "memory extraction yielded before LLM call"
+            _mark_failed_if_needed(
+                state_service,
+                window=window,
+                run_id=run.run_id,
+                error=message,
+            )
+            return _worker_report(
+                self.name,
+                checkpoint,
+                inspected=len(candidate.source_refs),
+                emitted=0,
+                status="yielded",
+                yielded=True,
+                notes=[message],
+                metadata={"last_window_id": window.window_id},
+            )
         try:
             response = llm_provider.complete(
                 [

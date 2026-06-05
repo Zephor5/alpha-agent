@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from datetime import timedelta
 from alpha_agent.cognition.models import Instant, SubjectId
 from alpha_agent.cognition.models.enums import LoopPriority
 from alpha_agent.utils.time import utc_now_iso
+
+_MIN_PENDING_YIELD_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -42,6 +45,15 @@ class _Waiter:
 class _YieldingHolder:
     loop_name: str
     priority: LoopPriority
+    max_chunk_duration: timedelta | None
+
+
+@dataclass
+class _PendingYieldRequest:
+    loop_name: str
+    priority: LoopPriority
+    expires_at: float
+    sequence: int
 
 
 class LoopCoordinator:
@@ -53,7 +65,9 @@ class LoopCoordinator:
         self._holder: str | None = None
         self._holder_priority: LoopPriority | None = None
         self._holder_since: Instant | None = None
+        self._holder_max_chunk_duration: timedelta | None = None
         self._waiters: list[_Waiter] = []
+        self._pending_yield_requests: list[_PendingYieldRequest] = []
         self._sequence = 0
         self._yielding_holder: _YieldingHolder | None = None
 
@@ -77,6 +91,7 @@ class LoopCoordinator:
 
         with self._condition:
             if self._holder is not None:
+                self._record_pending_yield_request_locked(req)
                 raise LockBusy(self._holder, self._holder_since or Instant(""))
             self._set_holder(req)
         try:
@@ -90,12 +105,20 @@ class LoopCoordinator:
         with self._condition:
             if self._holder is None or self._holder_priority is None:
                 return False
-            holder = _YieldingHolder(self._holder, self._holder_priority)
+            holder = _YieldingHolder(
+                self._holder,
+                self._holder_priority,
+                self._holder_max_chunk_duration,
+            )
             has_higher_waiter = any(waiter.priority < holder.priority for waiter in self._waiters)
+            has_pending_yield = self._consume_pending_yield_request_locked(holder.priority)
+            if has_pending_yield and not has_higher_waiter:
+                return True
             self._yielding_holder = holder
             self._holder = None
             self._holder_priority = None
             self._holder_since = None
+            self._holder_max_chunk_duration = None
             self._condition.notify_all()
             if has_higher_waiter:
                 self._condition.wait_for(
@@ -108,9 +131,20 @@ class LoopCoordinator:
             self._holder = holder.loop_name
             self._holder_priority = holder.priority
             self._holder_since = Instant(utc_now_iso())
+            self._holder_max_chunk_duration = holder.max_chunk_duration
             self._yielding_holder = None
             self._condition.notify_all()
-            return has_higher_waiter
+            return has_higher_waiter or has_pending_yield
+
+    def budget_exhausted(self) -> bool:
+        """Return whether this coordinator has no cooperative budget left."""
+
+        return False
+
+    def remaining_seconds(self) -> float:
+        """Return remaining cooperative budget for callers without a deadline."""
+
+        return float("inf")
 
     def current_holder(self) -> str | None:
         with self._condition:
@@ -152,6 +186,7 @@ class LoopCoordinator:
         self._holder = req.loop_name
         self._holder_priority = req.priority
         self._holder_since = Instant(utc_now_iso())
+        self._holder_max_chunk_duration = req.max_chunk_duration
         self._condition.notify_all()
 
     def _release_if_holder(self, loop_name: str) -> None:
@@ -160,4 +195,44 @@ class LoopCoordinator:
                 self._holder = None
                 self._holder_priority = None
                 self._holder_since = None
+                self._holder_max_chunk_duration = None
                 self._condition.notify_all()
+
+    def _record_pending_yield_request_locked(self, req: LoopAcquireRequest) -> None:
+        if self._holder_priority is None or req.priority >= self._holder_priority:
+            return
+        self._sequence += 1
+        ttl_seconds = (
+            self._holder_max_chunk_duration.total_seconds()
+            if self._holder_max_chunk_duration is not None
+            else _MIN_PENDING_YIELD_SECONDS
+        )
+        self._pending_yield_requests.append(
+            _PendingYieldRequest(
+                loop_name=req.loop_name,
+                priority=req.priority,
+                expires_at=time.monotonic() + max(_MIN_PENDING_YIELD_SECONDS, ttl_seconds),
+                sequence=self._sequence,
+            )
+        )
+        self._condition.notify_all()
+
+    def _consume_pending_yield_request_locked(self, holder_priority: LoopPriority) -> bool:
+        self._drop_expired_pending_yield_requests_locked()
+        pending: list[_PendingYieldRequest] = []
+        consumed = False
+        for request in self._pending_yield_requests:
+            if request.priority < holder_priority:
+                consumed = True
+                continue
+            pending.append(request)
+        self._pending_yield_requests = pending
+        return consumed
+
+    def _drop_expired_pending_yield_requests_locked(self) -> None:
+        now = time.monotonic()
+        self._pending_yield_requests = [
+            request
+            for request in self._pending_yield_requests
+            if request.expires_at > now
+        ]
