@@ -38,10 +38,6 @@ from alpha_agent.cognition.models import (
 )
 from alpha_agent.cognition.projections.goal import GoalProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
-from alpha_agent.cognition.render import (
-    render_counterpart_profile,
-    wrap_system_reminder,
-)
 from alpha_agent.config import (
     AlphaConfig,
     default_config_path,
@@ -72,11 +68,11 @@ from alpha_agent.gateway.config import (
 )
 from alpha_agent.gateway.logging import append_gateway_log
 from alpha_agent.gateway.status import gateway_tables_available
-from alpha_agent.llm.base import ChatMessage
 from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
-from alpha_agent.runtime.agent import AlphaAgent, default_runtime_system_message
+from alpha_agent.runtime.agent import AlphaAgent
+from alpha_agent.runtime.prompt_builder import build_answer_prompt_messages
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.runtime.session_context import (
     SYSTEM_REMINDER_CLOSE,
@@ -878,12 +874,11 @@ def prompt(
     store = _store(config)
     session_id = session or new_session_id()
     context = SessionContextAssembler(store).load(session_id)
-    messages = [
-        default_runtime_system_message(),
-        *_debug_profile_context_messages(store, session_id),
-        *context.chat_messages,
-        {"role": "user", "content": message},
-    ]
+    messages = build_answer_prompt_messages(
+        profile_snapshot=store.get_session_profile_snapshot(session_id),
+        session_history=context.chat_messages,
+        current_turn_messages=[{"role": "user", "content": message}],
+    )
     for index, prompt_message in enumerate(messages, start=1):
         role = prompt_message["role"]
         content = prompt_message.get("content") or ""
@@ -1068,18 +1063,6 @@ def _linked_cognitive_event_ids(
 def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
     raw_session_id = event.payload.get("session_id")
     return isinstance(raw_session_id, str) and raw_session_id == session_id
-
-
-def _debug_profile_context_messages(store: StateStore, session_id: str) -> list[ChatMessage]:
-    snapshot = store.get_session_profile_snapshot(session_id)
-    if snapshot is None:
-        return []
-    return [
-        {
-            "role": "user",
-            "content": wrap_system_reminder(render_counterpart_profile(snapshot.content)),
-        }
-    ]
 
 
 @cognition_app.command("consolidate")

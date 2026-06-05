@@ -173,6 +173,64 @@ def test_agent_reuses_session_profile_snapshot_before_history(tmp_path) -> None:
     assert snapshot.content == "Stable profile v1."
 
 
+def test_answer_prompt_excludes_internal_cognition_state_by_default(tmp_path) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    projection = BeliefProjection(store)
+    counterpart = counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))
+    projection.upsert_atomic(
+        belief(
+            "belief:context-window-background",
+            "CONTEXT_WINDOW_BACKGROUND_SENTINEL",
+            about=[counterpart],
+            object_="context-window background",
+        )
+    )
+    projection.upsert_summary(
+        summary_belief(
+            "belief:domain-guidance",
+            "DOMAIN_GUIDANCE_SUMMARY_SENTINEL",
+            about=[counterpart],
+            object_="domain guidance",
+            summary_kind=SummaryKind.DOMAIN_SUMMARY,
+        )
+    )
+    projection.upsert_summary(
+        summary_belief(
+            "belief:self-memory",
+            "SELF_MEMORY_SUMMARY_SENTINEL",
+            about=[counterpart],
+            object_="self memory",
+            summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+        )
+    )
+    store.append_runtime_trace(
+        session_id="s1",
+        event_type="audit.log",
+        content="AUDIT_LOG_SENTINEL RUNTIME_TRACE_SENTINEL",
+        metadata={"internal_entity_dump": "INTERNAL_ENTITY_DUMP_SENTINEL"},
+    )
+    provider = _RecordingProvider("answer")
+    agent = AlphaAgent(store=store, llm_provider=provider, event_log=log)
+
+    agent.respond("visible user question", session_id="s1")
+
+    rendered_prompt = json.dumps(provider.calls[0], sort_keys=True)
+    assert "visible user question" in rendered_prompt
+    for hidden_text in [
+        "CONTEXT_WINDOW_BACKGROUND_SENTINEL",
+        "DOMAIN_GUIDANCE_SUMMARY_SENTINEL",
+        "SELF_MEMORY_SUMMARY_SENTINEL",
+        "AUDIT_LOG_SENTINEL",
+        "RUNTIME_TRACE_SENTINEL",
+        "INTERNAL_ENTITY_DUMP_SENTINEL",
+        "belief:context-window-background",
+        "belief:domain-guidance",
+        "belief:self-memory",
+    ]:
+        assert hidden_text not in rendered_prompt
+
+
 def test_session_profile_snapshots_are_keyed_by_session(tmp_path) -> None:
     store = _store(tmp_path)
 

@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import timedelta
 from pathlib import Path
 from threading import Lock, RLock
-from typing import Any, cast
+from typing import Any
 
 import httpx
 
@@ -43,7 +43,6 @@ from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
 from alpha_agent.cognition.render import (
     estimate_chat_tokens,
-    render_counterpart_profile,
     source_message_to_chat,
     wrap_system_reminder,
 )
@@ -60,6 +59,13 @@ from alpha_agent.runtime.context_budget import ContextBudgetEstimate, estimate_c
 from alpha_agent.runtime.context_handover import compress_session_context
 from alpha_agent.runtime.counterpart_router import CounterpartRouter
 from alpha_agent.runtime.events import deterministic_json
+from alpha_agent.runtime.prompt_builder import (
+    AnswerPromptFrame,
+    build_answer_prompt_frame,
+    build_answer_prompt_messages,
+    build_answer_prompt_messages_from_frame,
+    default_runtime_system_message,
+)
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
 from alpha_agent.state.models import RuntimeTrace, SessionMessage, SessionProfileSnapshot
@@ -132,17 +138,6 @@ _SESSION_TURN_LOCKS: dict[str, RLock] = {}
 _SESSION_TURN_LOCKS_GUARD = Lock()
 # Memory remains LLM-directed: the runtime exposes memory tools and context,
 # but it does not perform hidden recall or hidden writes before the model acts.
-_DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {
-    "role": "system",
-    "content": (
-        "Identity: Alpha Agent.\n"
-        "Use the current turn and session context and answer concisely. "
-        "Call tools only when they are useful. "
-        "When stable counterpart profile context is present, it is already visible near "
-        "the start of the prompt. Use memory_recall for explicit long-term belief "
-        "lookups, and use memory_propose only for explicit long-term memory updates."
-    ),
-}
 
 
 @contextmanager
@@ -154,16 +149,6 @@ def _serialized_session_turn(session_id: str) -> Iterator[None]:
         yield
     finally:
         lock.release()
-
-
-def _copy_chat_message(message: ChatMessage) -> ChatMessage:
-    return cast(ChatMessage, dict(message))
-
-
-def default_runtime_system_message() -> ChatMessage:
-    """Return the system message used by the real runtime prompt path."""
-
-    return _copy_chat_message(_DEFAULT_RUNTIME_SYSTEM_MESSAGE)
 
 
 @dataclass(frozen=True)
@@ -190,13 +175,6 @@ class AgentLoopResult:
     llm_call_ids: list[str]
     llm_trace_ids: list[str]
     tool_cognitive_event_ids: list[str]
-
-
-@dataclass(frozen=True)
-class PromptFrame:
-    system_message: ChatMessage
-    prefix_context_messages: list[ChatMessage]
-    suffix_context_messages: list[ChatMessage]
 
 
 class LLMCompletionService:
@@ -400,11 +378,7 @@ class AlphaAgent:
 
             session_context = self.session_context.load(session_id)
             debug["chat_history_message_count"] = len(session_context.chat_messages)
-            prompt_frame = PromptFrame(
-                self._default_system_message(),
-                self._session_profile_context_messages(session_id),
-                [],
-            )
+            prompt_frame = self._answer_prompt_frame(session_id)
             messages = self._rebuild_runtime_llm_messages(
                 session_id=session_id,
                 prompt_frame=prompt_frame,
@@ -507,15 +481,25 @@ class AlphaAgent:
         debug: dict[str, Any],
     ) -> None:
         pending_message: ChatMessage = {"role": "user", "content": pending_user_message}
-        profile_messages = self._session_profile_context_messages(session_id)
+        profile_snapshot = self.store.get_session_profile_snapshot(session_id)
         pending_only_estimate = self._estimate_context_budget(
-            [self._default_system_message(), *profile_messages, pending_message],
+            build_answer_prompt_messages(
+                profile_snapshot=profile_snapshot,
+                session_history=[],
+                current_turn_messages=[pending_message],
+                system_message=self._default_system_message(),
+            ),
             tools=model_tools,
         )
         if pending_only_estimate.used_context_tokens > self.max_context_tokens:
             self._raise_pending_user_too_large(pending_only_estimate)
 
-        planning_messages = [self._default_system_message(), *profile_messages, pending_message]
+        planning_messages = build_answer_prompt_messages(
+            profile_snapshot=profile_snapshot,
+            session_history=[],
+            current_turn_messages=[pending_message],
+            system_message=self._default_system_message(),
+        )
         projected_messages = self._source_prompt_messages(
             session_id=session_id,
             extra_source_messages=[pending_message],
@@ -575,7 +559,7 @@ class AlphaAgent:
         *,
         turn_context: AgentTurnContext,
         session_id: str,
-        prompt_frame: PromptFrame,
+        prompt_frame: AnswerPromptFrame,
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         debug: dict[str, Any],
@@ -596,8 +580,7 @@ class AlphaAgent:
                 tools=model_tools,
                 planning_messages=[
                     prompt_frame.system_message,
-                    *prompt_frame.prefix_context_messages,
-                    *prompt_frame.suffix_context_messages,
+                    *prompt_frame.profile_context_messages,
                 ],
             )
             llm_messages = self._rebuild_runtime_llm_messages(
@@ -632,31 +615,23 @@ class AlphaAgent:
         session_id: str,
         extra_source_messages: Sequence[ChatMessage] | None = None,
     ) -> list[ChatMessage]:
-        return [
-            self._default_system_message(),
-            *self._session_profile_context_messages(session_id),
-            *self.session_context.load(session_id).chat_messages,
-            *(extra_source_messages or ()),
-        ]
+        return build_answer_prompt_messages(
+            profile_snapshot=self.store.get_session_profile_snapshot(session_id),
+            session_history=self.session_context.load(session_id).chat_messages,
+            current_turn_messages=extra_source_messages or (),
+            system_message=self._default_system_message(),
+        )
 
     def _rebuild_runtime_llm_messages(
         self,
         *,
         session_id: str,
-        prompt_frame: PromptFrame,
+        prompt_frame: AnswerPromptFrame,
     ) -> list[ChatMessage]:
-        return [
-            _copy_chat_message(prompt_frame.system_message),
-            *[
-                _copy_chat_message(message)
-                for message in prompt_frame.prefix_context_messages
-            ],
-            *self.session_context.load(session_id).chat_messages,
-            *[
-                _copy_chat_message(message)
-                for message in prompt_frame.suffix_context_messages
-            ],
-        ]
+        return build_answer_prompt_messages_from_frame(
+            frame=prompt_frame,
+            session_history=self.session_context.load(session_id).chat_messages,
+        )
 
     def _estimate_context_budget(
         self,
@@ -689,6 +664,12 @@ class AlphaAgent:
 
     def _default_system_message(self) -> ChatMessage:
         return default_runtime_system_message()
+
+    def _answer_prompt_frame(self, session_id: str) -> AnswerPromptFrame:
+        return build_answer_prompt_frame(
+            profile_snapshot=self.store.get_session_profile_snapshot(session_id),
+            system_message=self._default_system_message(),
+        )
 
     def _session_counterpart_ref(
         self,
@@ -751,20 +732,6 @@ class AlphaAgent:
             content=content,
         )
 
-    def _session_profile_context_messages(
-        self,
-        session_id: str,
-    ) -> list[ChatMessage]:
-        snapshot = self.store.get_session_profile_snapshot(session_id)
-        if snapshot is None:
-            return []
-        return [
-            {
-                "role": "user",
-                "content": wrap_system_reminder(render_counterpart_profile(snapshot.content)),
-            }
-        ]
-
     def _raise_pending_user_too_large(self, estimate: ContextBudgetEstimate) -> None:
         raise ContextWindowExceededError(
             "pending user message exceeds configured context window "
@@ -783,7 +750,7 @@ class AlphaAgent:
         turn_context: AgentTurnContext,
         session_id: str,
         messages: list[ChatMessage],
-        prompt_frame: PromptFrame,
+        prompt_frame: AnswerPromptFrame,
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         initial_prompt_token_estimate: int,

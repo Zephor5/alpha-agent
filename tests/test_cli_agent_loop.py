@@ -17,6 +17,8 @@ from alpha_agent.llm.base import (
 )
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.runtime.agent import AlphaAgent
+from alpha_agent.runtime.prompt_builder import build_answer_prompt_messages
+from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_TOOL_NAME
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
@@ -139,6 +141,52 @@ def test_debug_prompt_renders_session_profile_snapshot(
     assert "Message 1 [system]" in result.output
     assert "Counterpart profile: Stable debug profile." in result.output
     assert "hello" in result.output
+
+
+def test_debug_prompt_matches_shared_answer_prompt_builder(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.create_session_profile_snapshot(
+        session_id="s1",
+        counterpart_id="counterpart:main-user",
+        source_belief_id="belief:digest:v1",
+        content="Stable shared profile.",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="hi",
+    )
+    expected_messages = build_answer_prompt_messages(
+        profile_snapshot=store.get_session_profile_snapshot("s1"),
+        session_history=SessionContextAssembler(store).load("s1").chat_messages,
+        current_turn_messages=[{"role": "user", "content": "continue"}],
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["debug", "prompt", "continue", "--session", "s1"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    header_positions = []
+    for index, expected in enumerate(expected_messages, start=1):
+        header_positions.append(result.output.index(f"Message {index} [{expected['role']}]"))
+        content = str(expected.get("content") or "")
+        if expected["role"] != "system":
+            assert content in result.output
+    assert header_positions == sorted(header_positions)
+    assert "Identity: Alpha Agent" in result.output
+    assert f"Message {len(expected_messages) + 1} [" not in result.output
 
 
 def test_debug_prompt_uses_latest_compressed_boundary(tmp_path: Path) -> None:
