@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, TypeVar
@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS background_source_window (
     stage TEXT NOT NULL,
     target_unit TEXT NOT NULL,
     source_refs TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     closed_at TEXT,
     status TEXT NOT NULL,
@@ -128,6 +129,11 @@ def _loads(value: str | None, default: Any) -> Any:
         return default
     loaded = json.loads(value)
     return loaded if loaded is not None else default
+
+
+def _loads_dict(value: str | None) -> dict[str, Any]:
+    loaded = _loads(value, {})
+    return loaded if isinstance(loaded, dict) else {}
 
 
 @dataclass(frozen=True, order=True)
@@ -180,6 +186,7 @@ class BackgroundSourceWindow:
     status: BackgroundProgressStatus
     idempotency_key: str
     created_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
     closed_at: str | None = None
     claimed_by: str | None = None
     claimed_at: str | None = None
@@ -433,6 +440,7 @@ class ProcessingLedger:
         target_unit: str,
         source_refs: Sequence[BackgroundSourceRef],
         idempotency_key: str,
+        metadata: Mapping[str, Any] | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> BackgroundSourceWindow:
         if not source_refs:
@@ -449,15 +457,16 @@ class ProcessingLedger:
             db.execute(
                 """
                 INSERT OR IGNORE INTO background_source_window
-                    (window_id, stage, target_unit, source_refs, created_at, status,
+                    (window_id, stage, target_unit, source_refs, metadata, created_at, status,
                      idempotency_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     window_id,
                     stage_value.value,
                     target_unit,
                     _dumps([item.to_record() for item in source_refs]),
+                    _dumps(dict(metadata or {})),
                     now,
                     BackgroundProgressStatus.PENDING.value,
                     idempotency_key,
@@ -466,6 +475,37 @@ class ProcessingLedger:
             return self._get_source_window_row(db, window_id)
 
         return self._write(conn, op)
+
+    def list_source_windows(
+        self,
+        *,
+        stage: BackgroundStage | str | None = None,
+        target_unit: str | None = None,
+        status: BackgroundProgressStatus | str | None = None,
+    ) -> list[BackgroundSourceWindow]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if stage is not None:
+            conditions.append("stage = ?")
+            params.append(BackgroundStage(stage).value)
+        if target_unit is not None:
+            conditions.append("target_unit = ?")
+            params.append(target_unit)
+        if status is not None:
+            conditions.append("status = ?")
+            params.append(BackgroundProgressStatus(status).value)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with self.store.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM background_source_window
+                {where}
+                ORDER BY created_at ASC, window_id ASC
+                """,
+                params,
+            ).fetchall()
+        return [self._window_from_row(row) for row in rows]
 
     def claim_source_window(
         self,
@@ -828,6 +868,7 @@ class ProcessingLedger:
             status=BackgroundProgressStatus(row["status"]),
             idempotency_key=row["idempotency_key"],
             created_at=row["created_at"],
+            metadata=_loads_dict(row["metadata"]),
             closed_at=row["closed_at"],
             claimed_by=row["claimed_by"],
             claimed_at=row["claimed_at"],

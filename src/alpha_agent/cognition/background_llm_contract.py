@@ -32,6 +32,8 @@ _SUPPORTED_OPERATIONS = frozenset(
         "profile_summary_candidate",
     }
 )
+_EXTRACTION_OPERATION = "create_atomic_belief"
+_EXTRACTION_PAYLOAD_KEYS = frozenset({"atomic_belief_draft"})
 _FORBIDDEN_PROVENANCE_KEYS = frozenset(
     {
         "checkpoint_id",
@@ -239,6 +241,7 @@ def validate_background_llm_output(
     payload = output.get("payload")
     if not isinstance(payload, Mapping):
         raise BackgroundLLMValidationError("payload must be an object")
+    _validate_stage_output_shape(operation=operation, payload=payload, context=context)
 
     payloads = _validate_payloads(operation=operation, payload=payload, context=context)
     return ValidatedBackgroundLLMOutput(
@@ -266,6 +269,27 @@ def _validate_payloads(
     if operation == "update_belief":
         return (_validate_belief_update(payload.get("belief_update"), context),)
     raise BackgroundLLMValidationError(f"unsupported operation: {operation}")
+
+
+def _validate_stage_output_shape(
+    *,
+    operation: str,
+    payload: Mapping[str, Any],
+    context: BackgroundLLMValidationContext,
+) -> None:
+    if BackgroundStage(context.source_window.stage) != BackgroundStage.EXTRACTION:
+        return
+    if operation != _EXTRACTION_OPERATION:
+        raise BackgroundLLMValidationError(
+            "extraction stage accepts only create_atomic_belief outputs"
+        )
+    extra_payload_keys = {str(key) for key in payload} - _EXTRACTION_PAYLOAD_KEYS
+    if extra_payload_keys:
+        extra = ", ".join(sorted(extra_payload_keys))
+        raise BackgroundLLMValidationError(
+            "extraction payload accepts only atomic_belief_draft; "
+            f"unexpected payload keys: {extra}"
+        )
 
 
 def _validate_atomic_draft(
@@ -364,11 +388,15 @@ def _validate_scope_about(
     if project_descriptor is not None and not isinstance(project_descriptor, str | Mapping):
         raise BackgroundLLMValidationError("project_descriptor must be a string or object")
     if scope == BeliefScope.PROJECT:
-        if any(ref.kind == "project" for ref in about):
-            raise BackgroundLLMValidationError("project ids are program-owned, not LLM output")
+        if about:
+            raise BackgroundLLMValidationError(
+                "project-scoped output must not include LLM-supplied about references; "
+                "use project_descriptor"
+            )
         if project_descriptor is None:
             raise BackgroundLLMValidationError("project scope requires project_descriptor")
-        _validate_project_about_refs(about, context)
+        if not _resolvable_project_descriptor(project_descriptor):
+            raise BackgroundLLMValidationError("project_descriptor is not resolvable")
         return scope, about, project_descriptor
 
     expected_kinds = _SCOPE_REFERENCE_KINDS.get(scope)
@@ -427,19 +455,6 @@ def _reject_forbidden_provenance_keys(value: object, *, path: str = "") -> None:
             _reject_forbidden_provenance_keys(item, path=f"{path}{index}.")
 
 
-def _validate_project_about_refs(
-    about: tuple[Reference, ...],
-    context: BackgroundLLMValidationContext,
-) -> None:
-    if not about:
-        return
-    if context.allowed_about_refs is None:
-        raise BackgroundLLMValidationError(
-            "project-scoped output must not invent non-project about references"
-        )
-    _validate_allowed_about_refs(about, context)
-
-
 def _validate_allowed_about_refs(
     about: tuple[Reference, ...],
     context: BackgroundLLMValidationContext,
@@ -451,6 +466,20 @@ def _validate_allowed_about_refs(
             raise BackgroundLLMValidationError(
                 f"about reference {ref.kind}:{ref.id} was not included in LLM input"
             )
+
+
+def _resolvable_project_descriptor(descriptor: str | Mapping[str, Any]) -> bool:
+    if isinstance(descriptor, str):
+        return bool(descriptor.strip())
+    if not descriptor:
+        return False
+    for value in descriptor.values():
+        if isinstance(value, str):
+            if value.strip():
+                return True
+        elif value is not None:
+            return True
+    return False
 
 
 def _normalized_generated_key(key: object) -> str:

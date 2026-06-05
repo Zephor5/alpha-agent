@@ -15,9 +15,12 @@ from alpha_agent.llm.base import (
 from alpha_agent.runtime.context_handover import (
     DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
     DEFAULT_HANDOVER_COMPRESSION_VERSION,
+    DEFAULT_MEMORY_EXTRACTION_VERSION,
     build_handover_compression_prompt,
     build_handover_compression_prompt_from_projection_with_prefix,
     compress_session_context,
+    handover_prompt_prefix_hash,
+    handover_tools_schema_hash,
 )
 from alpha_agent.runtime.session_context import SessionContextAssembler, wrap_system_reminder
 from alpha_agent.state.store import StateStore
@@ -220,6 +223,30 @@ def test_compression_call_preserves_runtime_prefix_and_passes_tools(tmp_path) ->
     assert traces[0].metadata["compression_point_ordinal"] == assistant.ordinal
     assert traces[0].metadata["prompt_message_count"] == len(runtime_messages) + 1
     assert traces[1].metadata["compressed_message_id"] == compressed.id
+    assert traces[1].metadata["provider"] == provider.name
+    assert traces[1].metadata["model"] == "test-model"
+    assert traces[1].metadata["extraction_version"] == DEFAULT_MEMORY_EXTRACTION_VERSION
+    assert traces[1].metadata["prompt_prefix_hash"] == handover_prompt_prefix_hash(
+        runtime_messages
+    )
+    assert traces[1].metadata["tools_schema_hash"] == handover_tools_schema_hash(tools)
+    assert traces[1].metadata["covered_source_message_ids"] == [user.id, assistant.id]
+    assert traces[1].metadata["covered_source_message_refs"] == [
+        {
+            "source_type": "session_message",
+            "source_id": user.id,
+            "ordinal": user.ordinal,
+            "kind": user.kind,
+        },
+        {
+            "source_type": "session_message",
+            "source_id": assistant.id,
+            "ordinal": assistant.ordinal,
+            "kind": assistant.kind,
+        },
+    ]
+    assert traces[1].metadata["covered_ordinal_start"] == user.ordinal
+    assert traces[1].metadata["covered_ordinal_end"] == assistant.ordinal
     assert all(
         DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in trace.content
         and DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in str(trace.metadata)

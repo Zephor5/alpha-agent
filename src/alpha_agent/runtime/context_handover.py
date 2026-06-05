@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,7 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.runtime.session_context import (
     SessionContextAssembler,
     SessionContextProjection,
@@ -21,6 +23,7 @@ from alpha_agent.runtime.session_context import (
 from alpha_agent.state.models import SessionMessage
 
 DEFAULT_HANDOVER_COMPRESSION_VERSION = "handover-compression-v1"
+DEFAULT_MEMORY_EXTRACTION_VERSION = "memory-extraction-v1"
 DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION = (
     """Create an operational continuity handover for the next context holder.
 
@@ -66,6 +69,20 @@ def build_handover_compression_prompt(
     )
 
 
+def handover_prompt_prefix_hash(messages: Sequence[ChatMessage]) -> str:
+    """Hash the provider-visible message prefix before the compression suffix."""
+
+    return _stable_hash({"messages": list(messages), "shape": "handover_prompt_prefix_v1"})
+
+
+def handover_tools_schema_hash(
+    tools: Sequence[LLMToolDefinitionInput] | None,
+) -> str:
+    """Hash the stable provider-visible tool schema used by handover compression."""
+
+    return _stable_hash({"shape": "handover_tools_schema_v1", "tools": list(tools or [])})
+
+
 def build_handover_compression_prompt_from_projection_with_prefix(
     projection: SessionContextProjection,
     *,
@@ -101,6 +118,7 @@ def compress_session_context(
     before_ordinal: int | None = None,
     instruction: str = DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
     compression_version: str = DEFAULT_HANDOVER_COMPRESSION_VERSION,
+    extraction_version: str = DEFAULT_MEMORY_EXTRACTION_VERSION,
     trace_metadata: Mapping[str, Any] | None = None,
 ) -> HandoverCompressionResult:
     """Call the LLM for handover compression and append the returned source record."""
@@ -121,11 +139,17 @@ def compress_session_context(
         **dict(trace_metadata or {}),
         "compression_point_ordinal": prompt.compression_point_ordinal,
         "compression_version": compression_version,
+        "extraction_version": extraction_version,
         "before_ordinal": before_ordinal,
         "provider": _provider_name(llm_provider),
+        "model": _provider_model(llm_provider),
+        "prompt_prefix_hash": handover_prompt_prefix_hash(llm_messages),
+        "tools_schema_hash": handover_tools_schema_hash(tools),
+        "prompt_prefix_message_count": len(llm_messages),
         "prompt_message_count": len(prompt.messages),
         "tool_count": len(tools) if tools is not None else 0,
         "tool_choice": tool_choice,
+        **_covered_source_metadata(projection, prompt.compression_point_ordinal),
     }
     _append_compression_trace(
         assembler,
@@ -173,6 +197,8 @@ def compress_session_context(
         content="Handover compression completed.",
         metadata={
             **compression_trace_metadata,
+            "provider": response.provider,
+            "model": response.model,
             "response_provider": response.provider,
             "response_model": response.model,
             "finish_reason": response.finish_reason,
@@ -189,6 +215,49 @@ def compress_session_context(
 
 def _provider_name(llm_provider: LLMProvider) -> str:
     return str(getattr(llm_provider, "name", type(llm_provider).__name__))
+
+
+def _provider_model(llm_provider: LLMProvider) -> str | None:
+    model = getattr(llm_provider, "model", None)
+    return str(model) if model is not None else None
+
+
+def _stable_hash(payload: Any) -> str:
+    return hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
+
+
+def _covered_source_metadata(
+    projection: SessionContextProjection,
+    compression_point_ordinal: int,
+) -> dict[str, Any]:
+    context_refs = [
+        _session_message_ref_record(message)
+        for message in projection.source_messages
+        if message.ordinal <= compression_point_ordinal
+    ]
+    covered_refs = [
+        _session_message_ref_record(message)
+        for message in projection.source_messages
+        if message.kind != "compressed_message"
+        and message.ordinal <= compression_point_ordinal
+    ]
+    ordinals = [int(item["ordinal"]) for item in covered_refs]
+    return {
+        "context_source_message_refs": context_refs,
+        "covered_source_message_refs": covered_refs,
+        "covered_source_message_ids": [str(item["source_id"]) for item in covered_refs],
+        "covered_ordinal_start": min(ordinals) if ordinals else None,
+        "covered_ordinal_end": max(ordinals) if ordinals else None,
+    }
+
+
+def _session_message_ref_record(message: SessionMessage) -> dict[str, Any]:
+    return {
+        "source_type": "session_message",
+        "source_id": message.id,
+        "ordinal": message.ordinal,
+        "kind": message.kind,
+    }
 
 
 def _append_compression_trace(
@@ -213,9 +282,12 @@ def _append_compression_trace(
 __all__ = [
     "DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION",
     "DEFAULT_HANDOVER_COMPRESSION_VERSION",
+    "DEFAULT_MEMORY_EXTRACTION_VERSION",
     "HandoverCompressionPrompt",
     "HandoverCompressionResult",
     "build_handover_compression_prompt",
     "build_handover_compression_prompt_from_projection_with_prefix",
     "compress_session_context",
+    "handover_prompt_prefix_hash",
+    "handover_tools_schema_hash",
 ]

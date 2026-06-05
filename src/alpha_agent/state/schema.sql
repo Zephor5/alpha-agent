@@ -289,6 +289,7 @@ CREATE TABLE IF NOT EXISTS background_source_window (
     stage TEXT NOT NULL,
     target_unit TEXT NOT NULL,
     source_refs TEXT NOT NULL DEFAULT '[]',
+    metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     closed_at TEXT,
     status TEXT NOT NULL,

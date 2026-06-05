@@ -594,12 +594,18 @@ def normalize_project_descriptor(descriptor: str | Mapping[str, Any]) -> str:
     """Return a stable canonical project descriptor string."""
 
     if isinstance(descriptor, str):
-        return _normalize_descriptor_text(descriptor)
+        normalized = _normalize_descriptor_text(descriptor)
+        if not normalized:
+            raise ValueError("project descriptor must be resolvable")
+        return normalized
     for key in ("name", "repository", "repo"):
         value = descriptor.get(key)
         if isinstance(value, str) and value.strip():
             return _normalize_descriptor_text(value)
-    return _normalize_descriptor_text(_dumps(dict(descriptor)))
+    normalized = _normalize_descriptor_text(_dumps(dict(descriptor)))
+    if not normalized or normalized == "{}":
+        raise ValueError("project descriptor must be resolvable")
+    return normalized
 
 
 def _normalize_descriptor_text(value: str) -> str:

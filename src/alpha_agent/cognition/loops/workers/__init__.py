@@ -2,6 +2,7 @@
 
 from alpha_agent.cognition.loops.scheduler import ScheduledWorker
 from alpha_agent.cognition.loops.workers.archive_expired import ArchiveExpiredWorker
+from alpha_agent.cognition.loops.workers.memory_extraction import MemoryExtractionWorker
 
 
 def default_workers() -> list[ScheduledWorker]:
@@ -10,5 +11,6 @@ def default_workers() -> list[ScheduledWorker]:
 
 __all__ = [
     "ArchiveExpiredWorker",
+    "MemoryExtractionWorker",
     "default_workers",
 ]
