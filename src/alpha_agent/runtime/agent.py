@@ -46,6 +46,7 @@ from alpha_agent.cognition.render import (
     source_message_to_chat,
     wrap_system_reminder,
 )
+from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS, LLMContextConfig
 from alpha_agent.llm.base import (
     ChatCompletionToolCall,
@@ -386,7 +387,8 @@ class AlphaAgent:
             prompt_token_estimate = estimate_chat_tokens(messages, tools=model_tools or None)
             debug["prompt_token_estimate"] = prompt_token_estimate
             debug["renderer"] = "runtime_session_history"
-            belief_projection = BeliefProjection(self.store)
+            memory_state = CognitionStateStore(self.store)
+            belief_projection = memory_state.beliefs
             memory_propose_context = {
                 "turn_id": agent_turn.turn_id,
                 "session_id": session_id,
@@ -396,6 +398,7 @@ class AlphaAgent:
                 "subject": Subject(),
                 "situation": situation_ref(SituationId(f"situation:{agent_turn.turn_id}")),
                 "counterpart": counterpart,
+                "memory_state": memory_state,
                 "belief_projection": belief_projection,
             }
             memory_recall_context = {

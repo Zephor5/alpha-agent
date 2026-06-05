@@ -263,14 +263,20 @@ class BeliefProjection(Projection):
         self.store.initialize()
         self._ensure_schema()
 
-    def upsert_atomic(self, belief: AtomicBelief) -> AtomicBelief:
-        with self.store.transaction() as conn:
+    def upsert_atomic(self, belief: AtomicBelief, *, conn: Any | None = None) -> AtomicBelief:
+        if conn is not None:
             self._upsert_belief_row(conn, _ATOMIC_TABLE, belief)
+            return belief
+        with self.store.transaction() as local:
+            self._upsert_belief_row(local, _ATOMIC_TABLE, belief)
         return belief
 
-    def upsert_summary(self, belief: SummaryBelief) -> SummaryBelief:
-        with self.store.transaction() as conn:
+    def upsert_summary(self, belief: SummaryBelief, *, conn: Any | None = None) -> SummaryBelief:
+        if conn is not None:
             self._upsert_belief_row(conn, _SUMMARY_TABLE, belief)
+            return belief
+        with self.store.transaction() as local:
+            self._upsert_belief_row(local, _SUMMARY_TABLE, belief)
         return belief
 
     def reaffirm(
@@ -279,8 +285,9 @@ class BeliefProjection(Projection):
         *,
         source: Reference,
         observed_at: str,
+        conn: Any | None = None,
     ) -> AtomicBelief | None:
-        belief = self.get_by_id(belief_id)
+        belief = self.get_by_id(belief_id, conn=conn)
         if not isinstance(belief, AtomicBelief):
             return None
         source_key = (source.kind, source.id)
@@ -297,7 +304,7 @@ class BeliefProjection(Projection):
             },
         }
         updated = AtomicBelief.from_record(record)
-        return self.upsert_atomic(updated)
+        return self.upsert_atomic(updated, conn=conn)
 
     def supersede_many(
         self,
@@ -305,18 +312,25 @@ class BeliefProjection(Projection):
         new_belief: AtomicBelief,
         *,
         at: str,
+        conn: Any | None = None,
     ) -> AtomicBelief:
-        with self.store.transaction() as conn:
-            self._upsert_belief_row(conn, _ATOMIC_TABLE, new_belief)
+        def op(db: Any) -> None:
+            self._upsert_belief_row(db, _ATOMIC_TABLE, new_belief)
             for old_id in old_belief_ids:
                 self._mark_lifecycle_row(
-                    conn,
+                    db,
                     _ATOMIC_TABLE,
                     str(old_id),
                     BeliefLifecycle.SUPERSEDED,
                     at=at,
                     superseded_by=str(new_belief.id),
                 )
+
+        if conn is not None:
+            op(conn)
+            return new_belief
+        with self.store.transaction() as local:
+            op(local)
         return new_belief
 
     def mark_lifecycle(
@@ -325,13 +339,17 @@ class BeliefProjection(Projection):
         lifecycle: BeliefLifecycle,
         *,
         at: str,
+        conn: Any | None = None,
     ) -> None:
-        belief = self.get_by_id(belief_id)
+        belief = self.get_by_id(belief_id, conn=conn)
         if belief is None:
             return
         table_key = _SUMMARY_TABLE if isinstance(belief, SummaryBelief) else _ATOMIC_TABLE
-        with self.store.transaction() as conn:
+        if conn is not None:
             self._mark_lifecycle_row(conn, table_key, str(belief_id), lifecycle, at=at)
+            return
+        with self.store.transaction() as local:
+            self._mark_lifecycle_row(local, table_key, str(belief_id), lifecycle, at=at)
 
     def recall(
         self,
@@ -485,19 +503,29 @@ class BeliefProjection(Projection):
             ).fetchone()
         return self._from_summary_row(row) if row is not None else None
 
-    def get_by_id(self, belief_id: BeliefId | str) -> BeliefRecord | None:
-        with self.store.connect() as conn:
-            row = conn.execute(
+    def get_by_id(
+        self,
+        belief_id: BeliefId | str,
+        *,
+        conn: Any | None = None,
+    ) -> BeliefRecord | None:
+        def op(db: Any) -> BeliefRecord | None:
+            row = db.execute(
                 "SELECT * FROM atomic_beliefs WHERE id = ?",
                 (str(belief_id),),
             ).fetchone()
             if row is not None:
                 return self._from_atomic_row(row)
-            row = conn.execute(
+            row = db.execute(
                 "SELECT * FROM summary_beliefs WHERE id = ?",
                 (str(belief_id),),
             ).fetchone()
-        return self._from_summary_row(row) if row is not None else None
+            return self._from_summary_row(row) if row is not None else None
+
+        if conn is not None:
+            return op(conn)
+        with self.store.connect() as local:
+            return op(local)
 
     def list_active(self) -> list[AtomicBelief]:
         with self.store.connect() as conn:

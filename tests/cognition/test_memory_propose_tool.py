@@ -16,6 +16,7 @@ from alpha_agent.cognition.models import (
     Reference,
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
+from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
@@ -107,6 +108,11 @@ def test_memory_propose_append_writes_atomic_belief_directly_in_runtime_turn(tmp
     assert belief.sources == [Reference("session_message", messages[0].id)]
     assert belief.derivation is not None
     assert "memory_propose" in str(belief.derivation)
+    audit_records = CognitionStateStore(store).audit_records(kind="memory_propose_write")
+    assert len(audit_records) == 1
+    assert audit_records[0].entity_refs == (Reference("belief", str(belief.id)),)
+    assert audit_records[0].payload["source"] == MEMORY_PROPOSE_TOOL_NAME
+    assert audit_records[0].payload["operation"] == "append_distinct"
 
     source_recorded = [
         event for event in events if event.kind == CognitiveEventKind.TURN_SOURCES_RECORDED

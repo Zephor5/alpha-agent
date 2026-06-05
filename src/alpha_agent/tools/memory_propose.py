@@ -31,6 +31,7 @@ from alpha_agent.cognition.models import (
     situation_ref,
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefSearchParams
+from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.tools.base import ToolExecutionContext, ToolResult
 from alpha_agent.utils.ids import new_id
@@ -89,6 +90,7 @@ class MemoryProposalContext:
     counterpart: Reference | None
     llm_call_id: str
     llm_trace_ids: list[str]
+    memory_state: CognitionStateStore | None = None
     belief_projection: BeliefProjection | None = None
 
 
@@ -407,23 +409,25 @@ def _apply_accepted_update(
     tool_call_id: str | None,
 ) -> _AcceptedEmission:
     del proposed_event, tool_call_id
-    projection = context.belief_projection
-    if projection is None:
+    memory_state = context.memory_state
+    if memory_state is None:
         return _AcceptedEmission(event_ids=[])
     if plan.operation == "reinforce":
         target = plan.target_beliefs[0]
-        projection.reaffirm(
+        memory_state.reaffirm_atomic_belief(
             target.id,
             source=Reference("session_message", context.user_message_id),
             observed_at=context.emitter.clock(),
+            audit=_state_audit("memory_propose_reaffirm", proposal_id, parsed, plan),
         )
         return _AcceptedEmission(event_ids=[])
     if plan.operation == "retract":
         for target in plan.target_beliefs:
-            projection.mark_lifecycle(
+            memory_state.mark_belief_lifecycle(
                 target.id,
                 BeliefLifecycle.RETRACTED,
                 at=context.emitter.clock(),
+                audit=_state_audit("memory_propose_retract", proposal_id, parsed, plan),
             )
         return _AcceptedEmission(event_ids=[])
     if plan.memory is None:
@@ -443,20 +447,28 @@ def _apply_accepted_update(
         extra_sources=extra_sources,
     )
     if plan.operation == "append_distinct":
-        projection.upsert_atomic(belief)
+        memory_state.write_atomic_belief(
+            belief,
+            source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
+            audit=_state_audit("memory_propose_write", proposal_id, parsed, plan),
+        )
         return _AcceptedEmission(event_ids=[], new_belief_id=str(belief.id))
     if plan.operation == "replace":
-        projection.supersede_many(
+        memory_state.supersede_atomic_beliefs(
             [plan.target_beliefs[0].id],
             belief,
+            source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
             at=context.emitter.clock(),
+            audit=_state_audit("memory_propose_replace", proposal_id, parsed, plan),
         )
         return _AcceptedEmission(event_ids=[], new_belief_id=str(belief.id))
     if plan.operation == "merge":
-        projection.supersede_many(
+        memory_state.supersede_atomic_beliefs(
             [target.id for target in plan.target_beliefs],
             belief,
+            source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
             at=context.emitter.clock(),
+            audit=_state_audit("memory_propose_merge", proposal_id, parsed, plan),
         )
         return _AcceptedEmission(event_ids=[], new_belief_id=str(belief.id))
     return _AcceptedEmission(event_ids=[])
@@ -469,8 +481,8 @@ def _apply_pending_update(
     parsed: _ParsedUpdate,
     plan: _OperationPlan,
 ) -> _AcceptedEmission:
-    projection = context.belief_projection
-    if projection is None or plan.memory is None:
+    memory_state = context.memory_state
+    if memory_state is None or plan.memory is None:
         return _AcceptedEmission(event_ids=[])
     if plan.memory.scope == "counterpart" and context.counterpart is None:
         return _AcceptedEmission(event_ids=[])
@@ -486,7 +498,11 @@ def _apply_pending_update(
         extra_sources=extra_sources,
         lifecycle=BeliefLifecycle.PENDING_CONFIRMATION,
     )
-    projection.upsert_atomic(belief)
+    memory_state.write_atomic_belief(
+        belief,
+        source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
+        audit=_state_audit("memory_propose_pending", proposal_id, parsed, plan),
+    )
     return _AcceptedEmission(event_ids=[], new_belief_id=str(belief.id))
 
 
@@ -563,6 +579,19 @@ def _memory_proposal_context(extensions: Mapping[str, Any]) -> MemoryProposalCon
     if not all([turn_id, session_id, user_message_id]):
         return None
     counterpart = raw.get("counterpart")
+    memory_state = raw.get("memory_state")
+    if not isinstance(memory_state, CognitionStateStore):
+        memory_state = raw.get("memory_state_service")
+    if not isinstance(memory_state, CognitionStateStore):
+        memory_state = None
+    raw_projection = raw.get("belief_projection")
+    belief_projection = (
+        raw_projection
+        if isinstance(raw_projection, BeliefProjection)
+        else memory_state.beliefs
+        if memory_state is not None
+        else None
+    )
     return MemoryProposalContext(
         turn_id=turn_id,
         session_id=session_id,
@@ -574,9 +603,8 @@ def _memory_proposal_context(extensions: Mapping[str, Any]) -> MemoryProposalCon
         counterpart=counterpart if isinstance(counterpart, Reference) else None,
         llm_call_id=_non_empty_str(raw.get("llm_call_id")),
         llm_trace_ids=_string_list(raw.get("llm_trace_ids")),
-        belief_projection=raw.get("belief_projection")
-        if isinstance(raw.get("belief_projection"), BeliefProjection)
-        else None,
+        memory_state=memory_state,
+        belief_projection=belief_projection,
     )
 
 
@@ -666,6 +694,14 @@ def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _Oper
             operation=parsed.operation,
             reason="missing_counterpart_scope",
             memory=parsed.memory,
+        )
+    if context.memory_state is None:
+        return _OperationPlan(
+            decision="rejected",
+            operation=parsed.operation,
+            reason="missing_memory_state_service",
+            memory=parsed.memory,
+            emit_memory_proposed=False,
         )
     if context.belief_projection is None:
         return _OperationPlan(
@@ -1188,6 +1224,26 @@ def _change_payload(
         "reviewed_candidate_ids": plan.reviewed_candidate_ids,
         "reason": parsed.reason or plan.reason,
         "evidence": parsed.evidence or parsed.reason,
+    }
+
+
+def _state_audit(
+    kind: str,
+    proposal_id: str,
+    parsed: _ParsedUpdate,
+    plan: _OperationPlan,
+) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "payload": {
+            "source": MEMORY_PROPOSE_TOOL_NAME,
+            "proposal_id": proposal_id,
+            "operation": plan.operation,
+            "decision": plan.decision,
+            "target_belief_ids": plan.target_belief_ids,
+            "reviewed_candidate_ids": plan.reviewed_candidate_ids,
+            "reason": parsed.reason or plan.reason,
+        },
     }
 
 

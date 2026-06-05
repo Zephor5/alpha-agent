@@ -17,6 +17,7 @@ from alpha_agent.cognition.loops.workers._common import after_cursor_wrap, repor
 from alpha_agent.cognition.models import BeliefLifecycle, CognitiveEventKind, Instant
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
+from alpha_agent.cognition.state_service import CognitionStateStore
 
 
 class ArchiveExpiredWorker:
@@ -41,6 +42,7 @@ class ArchiveExpiredWorker:
         del log, emitter
         now = datetime.now(UTC)
         projection = projections.get_typed(BeliefProjection)
+        state_service = CognitionStateStore(projection.store)
         active = sorted(projection.list_active(), key=lambda item: str(item.id))
         pending = after_cursor_wrap(
             active,
@@ -52,10 +54,14 @@ class ArchiveExpiredWorker:
             valid_until = _valid_until(belief.validity.valid_until)
             if valid_until is not None and valid_until < now:
                 if not bool(getattr(config, "dry_run", False)):
-                    projection.mark_lifecycle(
+                    state_service.mark_belief_lifecycle(
                         belief.id,
                         BeliefLifecycle.ARCHIVED,
                         at=datetime.now(UTC).isoformat(),
+                        audit={
+                            "kind": "archive_expired_lifecycle_mark",
+                            "payload": {"operation": "archive_expired"},
+                        },
                     )
                 emitted += 1
             if coordinator.yield_to_higher_priority():

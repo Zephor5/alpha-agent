@@ -251,6 +251,75 @@ USING fts5(
     tokenize = "trigram"
 );
 
+CREATE TABLE IF NOT EXISTS cognition_state_audit (
+    audit_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    entity_refs TEXT NOT NULL DEFAULT '[]',
+    payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cognition_state_audit_kind_time
+    ON cognition_state_audit(kind, created_at);
+
+CREATE TABLE IF NOT EXISTS background_source_progress (
+    source_type TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    target_unit TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    claimed_by TEXT,
+    claimed_at TEXT,
+    processed_at TEXT,
+    checkpoint_id TEXT,
+    idempotency_key TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(source_type, source_id, stage, target_unit)
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_source_progress_status
+    ON background_source_progress(stage, target_unit, status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_background_source_progress_idempotency
+    ON background_source_progress(idempotency_key);
+
+CREATE TABLE IF NOT EXISTS background_source_window (
+    window_id TEXT PRIMARY KEY,
+    stage TEXT NOT NULL,
+    target_unit TEXT NOT NULL,
+    source_refs TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    closed_at TEXT,
+    status TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    claimed_by TEXT,
+    claimed_at TEXT,
+    last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_source_window_status
+    ON background_source_window(stage, target_unit, status, created_at);
+
+CREATE TABLE IF NOT EXISTS background_stage_run (
+    run_id TEXT PRIMARY KEY,
+    worker_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    target_unit TEXT NOT NULL,
+    window_id TEXT,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    input_refs TEXT NOT NULL DEFAULT '[]',
+    output_refs TEXT NOT NULL DEFAULT '[]',
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_stage_run_window
+    ON background_stage_run(window_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_background_stage_run_status
+    ON background_stage_run(stage, target_unit, status, started_at);
+
 CREATE TABLE IF NOT EXISTS subject_view (
     id TEXT PRIMARY KEY,
     role TEXT,
