@@ -30,10 +30,24 @@ _SUPPORTED_OPERATIONS = frozenset(
         "create_summary_belief",
         "update_belief",
         "profile_summary_candidate",
+        "create",
+        "strengthen",
+        "supersede",
+        "retract",
+        "archive",
+        "pending-confirmation",
+        "pending_confirmation",
     }
 )
 _EXTRACTION_OPERATION = "create_atomic_belief"
 _EXTRACTION_PAYLOAD_KEYS = frozenset({"atomic_belief_draft"})
+_SEMANTIC_OPERATIONS = frozenset(
+    {"create", "strengthen", "supersede", "retract", "archive", "pending-confirmation"}
+)
+_SEMANTIC_OPERATION_ALIASES = {"pending_confirmation": "pending-confirmation"}
+_CONSOLIDATION_STAGES = frozenset(
+    {BackgroundStage.CONSOLIDATION, BackgroundStage.CONFLICT_REVIEW}
+)
 _FORBIDDEN_PROVENANCE_KEYS = frozenset(
     {
         "checkpoint_id",
@@ -219,7 +233,7 @@ def validate_background_llm_output(
     _reject_forbidden_provenance_keys(output)
     _reject_prompt_injection(output)
 
-    operation = _required_str(output, "operation")
+    operation = _canonical_operation(_required_str(output, "operation"))
     if operation not in _SUPPORTED_OPERATIONS:
         raise BackgroundLLMValidationError(f"unsupported operation: {operation}")
     try:
@@ -267,7 +281,16 @@ def _validate_payloads(
     if operation == "profile_summary_candidate":
         return (_validate_summary_draft(payload.get("profile_summary_candidate"), context),)
     if operation == "update_belief":
-        return (_validate_belief_update(payload.get("belief_update"), context),)
+        return (_validate_belief_update(payload.get("belief_update"), context, operation),)
+    if operation in {"create", "pending-confirmation"}:
+        return (_validate_atomic_draft(payload.get("atomic_belief_draft"), context),)
+    if operation == "supersede":
+        return (
+            _validate_belief_update(payload.get("belief_update"), context, operation),
+            _validate_atomic_draft(payload.get("atomic_belief_draft"), context),
+        )
+    if operation in {"strengthen", "retract", "archive"}:
+        return (_validate_belief_update(payload.get("belief_update"), context, operation),)
     raise BackgroundLLMValidationError(f"unsupported operation: {operation}")
 
 
@@ -277,7 +300,11 @@ def _validate_stage_output_shape(
     payload: Mapping[str, Any],
     context: BackgroundLLMValidationContext,
 ) -> None:
-    if BackgroundStage(context.source_window.stage) != BackgroundStage.EXTRACTION:
+    stage = BackgroundStage(context.source_window.stage)
+    if stage in _CONSOLIDATION_STAGES:
+        _validate_consolidation_stage_output_shape(operation=operation, payload=payload)
+        return
+    if stage != BackgroundStage.EXTRACTION:
         return
     if operation != _EXTRACTION_OPERATION:
         raise BackgroundLLMValidationError(
@@ -289,6 +316,30 @@ def _validate_stage_output_shape(
         raise BackgroundLLMValidationError(
             "extraction payload accepts only atomic_belief_draft; "
             f"unexpected payload keys: {extra}"
+        )
+
+
+def _validate_consolidation_stage_output_shape(
+    *,
+    operation: str,
+    payload: Mapping[str, Any],
+) -> None:
+    if operation not in _SEMANTIC_OPERATIONS:
+        raise BackgroundLLMValidationError(
+            "consolidation stages accept only semantic operations: create, strengthen, "
+            "supersede, retract, archive, pending-confirmation"
+        )
+    keys = {str(key) for key in payload}
+    if operation in {"create", "pending-confirmation"}:
+        expected = {"atomic_belief_draft"}
+    elif operation in {"strengthen", "retract", "archive"}:
+        expected = {"belief_update"}
+    else:
+        expected = {"belief_update", "atomic_belief_draft"}
+    if keys != expected:
+        expected_text = ", ".join(sorted(expected))
+        raise BackgroundLLMValidationError(
+            f"{operation} payload must contain exactly: {expected_text}"
         )
 
 
@@ -353,12 +404,20 @@ def _validate_summary_draft(
 def _validate_belief_update(
     raw: object,
     context: BackgroundLLMValidationContext,
+    operation: str,
 ) -> ValidatedBeliefUpdate:
     if not isinstance(raw, Mapping):
         raise BackgroundLLMValidationError("belief_update must be an object")
-    update_kind = _required_str(raw, "update_kind")
+    if operation == "update_belief":
+        update_kind = _required_str(raw, "update_kind")
+    else:
+        update_kind = _optional_str(raw.get("update_kind")) or operation
+        if update_kind != operation:
+            raise BackgroundLLMValidationError(
+                f"belief_update update_kind {update_kind!r} does not match operation {operation!r}"
+            )
     target_belief_id = _required_str(raw, "target_belief_id")
-    allowed_ids = context.allowed_target_belief_ids | context.input_belief_ids
+    allowed_ids = context.allowed_target_belief_ids
     if target_belief_id not in allowed_ids:
         raise BackgroundLLMValidationError(
             f"target belief id {target_belief_id!r} was not included in LLM input"
@@ -368,6 +427,10 @@ def _validate_belief_update(
         target_belief_id=target_belief_id,
         rationale=_required_str(raw, "rationale"),
     )
+
+
+def _canonical_operation(operation: str) -> str:
+    return _SEMANTIC_OPERATION_ALIASES.get(operation, operation)
 
 
 def _validate_scope_about(
