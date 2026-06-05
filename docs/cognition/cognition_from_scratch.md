@@ -36,23 +36,20 @@ Foreground runtime events are intentionally small:
 - `perceived`: accepted runtime input.
 - `acted`: completed model/tool-loop outcome.
 - `turn_sources_recorded`: persisted artifacts linked to one turn.
-- `memory_proposed`: proposed memory state transition.
-- `belief_form_pending_confirmation`: concrete memory proposal requiring user
-  confirmation.
+- `memory_proposed`: audit record for a proposed memory update.
 - `received_feedback`: explicit external or service feedback, not an automatic
   per-turn placeholder.
-- `reflected`: concrete audit findings based on runtime/tool outcomes.
 
-Belief lifecycle events such as `belief_formed`, `belief_superseded`, and
-`belief_retracted` are durable state events owned by tools and background
-workers.
+Belief lifecycle changes are not event-sourced belief state. Accepted memory
+updates and retained workers mutate `atomic_beliefs` or `summary_beliefs`
+directly; cognition events remain audit/source records.
 
 ## Memory
 
 The main LLM decides when to call `memory_recall` or `memory_propose`.
 
 `memory_recall` is read-only and returns compact belief handles with id,
-content, type, scope, status, and held_since. Runtime does not perform hidden
+content, type, scope, lifecycle, and held_since. Runtime does not perform hidden
 dynamic recall from the user message.
 
 `memory_propose` owns write gating for explicit memory updates. The model sends
@@ -66,20 +63,18 @@ candidates or ask the user for confirmation without a separate review queue.
 
 ## Projections And Workers
 
-Projections keep durable, deterministic views over the event log:
+Current cognition state keeps direct belief stores and a small retained
+projection set:
 
-- `belief_view`
-- `context_window_view`
+- `atomic_beliefs`
+- `summary_beliefs`
 - `counterpart_view`
-- `reflection_view`
-- `strategy_view`
 - `goal_view`
 - `subject_view`
 
-Background workers merge equivalent beliefs, archive expired state, compress
-old foreground context, maintain counterpart summaries, resolve queued
-conflicts, learn conservative value-lens shifts, expire strategies, and
-aggregate a deterministic self-model.
+The retained deterministic worker archives expired beliefs by setting
+`lifecycle=archived` directly. Removed deterministic workers are not preserved
+as compatibility shims.
 
 ## Drive Loop
 

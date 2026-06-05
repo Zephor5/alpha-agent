@@ -48,11 +48,6 @@ env_passthrough = []
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300
-context_foreground_max = 8
-context_absorb_batch = 4
-context_summary_chars = 480
-counterpart_digest_min_beliefs = 5
-counterpart_digest_min_new_beliefs = 3
 
 [cognition.drive]
 enabled = false

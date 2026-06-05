@@ -291,7 +291,7 @@ provider = "mock"
 
 [cognition.consolidation]
 enabled = true
-context_foreground_max = 7
+interval_seconds = 7
 """,
         encoding="utf-8",
     )
@@ -303,7 +303,7 @@ context_foreground_max = 7
     assert result.exit_code == 0
     saved = config_path.read_text(encoding="utf-8")
     assert "[cognition.consolidation]" in saved
-    assert "context_foreground_max = 7" in saved
+    assert "interval_seconds = 7" in saved
 
 
 def test_config_set_preserves_cognition_drive_section(

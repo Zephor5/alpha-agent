@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar
 
@@ -14,8 +13,8 @@ from alpha_agent.cognition.loops.scheduler import (
     WorkerReport,
     YieldingCoordinator,
 )
-from alpha_agent.cognition.loops.workers._common import after_cursor_wrap, emit_projected, report
-from alpha_agent.cognition.models import CognitiveEventKind
+from alpha_agent.cognition.loops.workers._common import after_cursor_wrap, report
+from alpha_agent.cognition.models import BeliefLifecycle, CognitiveEventKind, Instant
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 
@@ -28,9 +27,7 @@ class ArchiveExpiredWorker:
         watches=frozenset(),
         min_new_events=0,
     )
-    handles_event_kinds: ClassVar[frozenset[CognitiveEventKind]] = frozenset(
-        {CognitiveEventKind.BELIEF_ARCHIVED}
-    )
+    handles_event_kinds: ClassVar[frozenset[CognitiveEventKind]] = frozenset()
 
     def run(
         self,
@@ -41,12 +38,10 @@ class ArchiveExpiredWorker:
         config: object,
         checkpoint: WorkerCheckpoint,
     ) -> WorkerReport:
-        del log
+        del log, emitter
         now = datetime.now(UTC)
-        active = sorted(
-            projections.get_typed(BeliefProjection).list_active(),
-            key=lambda item: str(item.id),
-        )
+        projection = projections.get_typed(BeliefProjection)
+        active = sorted(projection.list_active(), key=lambda item: str(item.id))
         pending = after_cursor_wrap(
             active,
             str(checkpoint.metadata.get("last_belief_id", "")),
@@ -54,17 +49,15 @@ class ArchiveExpiredWorker:
         )
         emitted = 0
         for belief in pending:
-            valid_until = _valid_until(str(belief.applicability))
+            valid_until = _valid_until(belief.validity.valid_until)
             if valid_until is not None and valid_until < now:
-                event = emit_projected(
-                    emitter,
-                    projections,
-                    CognitiveEventKind.BELIEF_ARCHIVED,
-                    config=config,
-                    payload={"belief_id": str(belief.id), "reason": "valid_until_expired"},
-                    rationale="Archived expired belief.",
-                )
-                emitted += 1 if event is not None or getattr(config, "dry_run", False) else 0
+                if not bool(getattr(config, "dry_run", False)):
+                    projection.mark_lifecycle(
+                        belief.id,
+                        BeliefLifecycle.ARCHIVED,
+                        at=datetime.now(UTC).isoformat(),
+                    )
+                emitted += 1
             if coordinator.yield_to_higher_priority():
                 return report(
                     self.name,
@@ -77,11 +70,13 @@ class ArchiveExpiredWorker:
         return report(self.name, checkpoint, inspected=len(active), emitted=emitted, metadata={})
 
 
-def _valid_until(raw: str) -> datetime | None:
+def _valid_until(raw: Instant | str | None) -> datetime | None:
+    if raw is None:
+        return None
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
         return None
-    if not isinstance(parsed, dict) or not parsed.get("valid_until"):
-        return None
-    return datetime.fromisoformat(str(parsed["valid_until"]).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed

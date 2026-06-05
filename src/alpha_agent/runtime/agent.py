@@ -20,7 +20,6 @@ from alpha_agent.cognition.coordinator import (
     LoopAcquireRequest,
     LoopCoordinator,
 )
-from alpha_agent.cognition.counterpart_profile import active_counterpart_digest
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
@@ -35,6 +34,7 @@ from alpha_agent.cognition.models import (
     SituationId,
     StimulusKind,
     Subject,
+    SummaryKind,
     counterpart_ref,
     situation_ref,
 )
@@ -412,18 +412,13 @@ class AlphaAgent:
             prompt_token_estimate = estimate_chat_tokens(messages, tools=model_tools or None)
             debug["prompt_token_estimate"] = prompt_token_estimate
             debug["renderer"] = "runtime_session_history"
-            belief_projection = BeliefProjection(
-                self.store,
-                event_log=self.event_log,
-                auto_rebuild=True,
-            )
+            belief_projection = BeliefProjection(self.store)
             memory_propose_context = {
                 "turn_id": agent_turn.turn_id,
                 "session_id": session_id,
                 "user_message_id": user_record.id,
                 "turn_received_event_id": agent_turn.turn_received_event_id,
                 "emitter": self.emitter,
-                "apply_cognitive_event": self._apply_tool_cognitive_event,
                 "subject": Subject(),
                 "situation": situation_ref(SituationId(f"situation:{agent_turn.turn_id}")),
                 "counterpart": counterpart,
@@ -740,21 +735,19 @@ class AlphaAgent:
         # prompt prefix mid-conversation.
         if snapshot is not None or counterpart is None:
             return snapshot
-        projection = BeliefProjection(
-            self.store,
-            event_log=self.event_log,
-            auto_rebuild=True,
+        profile = BeliefProjection(self.store).latest_summary(
+            summary_kind=SummaryKind.COUNTERPART_PROFILE,
+            about=counterpart,
         )
-        digest = active_counterpart_digest(projection, counterpart)
-        if digest is None:
+        if profile is None:
             return None
-        content = str(digest.content).strip()
+        content = str(profile.content).strip()
         if not content:
             return None
         return self.store.create_session_profile_snapshot(
             session_id=session_id,
             counterpart_id=counterpart.id,
-            source_belief_id=str(digest.id),
+            source_belief_id=str(profile.id),
             content=content,
         )
 
@@ -1396,11 +1389,6 @@ class AlphaAgent:
             check_canceled=lambda stage: self._check_canceled(session_id, stage),
             recover_errors=recover_errors,
         )
-
-    def _apply_tool_cognitive_event(self, event: Any) -> None:
-        projection = BeliefProjection(self.store)
-        if event.kind in projection.handles:
-            projection.apply(event)
 
     def _check_canceled(self, session_id: str, stage: str) -> None:
         if self.is_canceled(session_id):

@@ -7,8 +7,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from alpha_agent.cli import app
-from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
-from alpha_agent.cognition.models import CognitiveEventKind
+from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
@@ -21,7 +20,6 @@ from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_TOOL_NAME
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
-from tests.cognition.helpers import clock_factory, emit, id_factory
 from tests.cognition.test_belief_projection_apply import belief
 
 
@@ -59,7 +57,8 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
             "gateway_dedup",
             "cognitive_events",
             "counterpart_view",
-            "belief_view",
+            "atomic_beliefs",
+            "summary_beliefs",
             "belief_entity_index",
             "belief_about_index",
             "belief_search_terms_fts",
@@ -74,14 +73,8 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
             "belief_search_trigram_fts_data",
             "belief_search_trigram_fts_docsize",
             "belief_search_trigram_fts_idx",
-            "context_window_view",
-            "context_window_background",
-            "reflection_view",
-            "procedure_view",
-            "strategy_view",
             "goal_view",
             "subject_view",
-            "subject_value_lens",
             "cognition_worker_checkpoint",
         }
 
@@ -231,20 +224,12 @@ def test_debug_prompt_trace_renders_recent_cognitive_events(tmp_path: Path) -> N
 def test_debug_prompt_trace_summarizes_memory_tool_results(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
-    emit(
-        SQLiteEventLog(store),
-        CognitiveEventKind.BELIEF_FORMED,
-        payload={
-            "turn_id": "turn-seed",
-            "session_id": "s1",
-            "belief": belief(
-                "belief:python",
-                "User prefers Python examples.",
-                object_="preference:global",
-            ).to_record(),
-        },
-        event_ids=id_factory(),
-        clock=clock_factory(),
+    BeliefProjection(store).upsert_atomic(
+        belief(
+            "belief:python",
+            "User prefers Python examples.",
+            object_="Python examples",
+        )
     )
     AlphaAgent(store=store, llm_provider=_MemoryTraceProvider()).respond(
         "Actually use Rust examples.",

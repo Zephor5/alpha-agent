@@ -9,13 +9,13 @@ from typing import cast
 import pytest
 
 from alpha_agent.cognition.coordinator import LockBusy, LoopAcquireRequest, LoopCoordinator
-from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import (
     SUBJECT_SELF,
     CognitiveEventKind,
     CounterpartId,
     Instant,
+    SummaryKind,
     counterpart_ref,
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
@@ -39,7 +39,7 @@ from alpha_agent.tools.base import Tool, ToolExecutionContext, ToolResult
 from alpha_agent.tools.default import build_tool_registry
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
 from alpha_agent.tools.registry import ToolRegistry
-from tests.cognition.test_belief_projection_apply import belief
+from tests.cognition.test_belief_projection_apply import belief, summary_belief
 
 
 def _store(tmp_path) -> StateStore:
@@ -461,14 +461,14 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
     assert follow_up_tool_message["tool_call_id"] == "call_recall"
     assert json.loads(follow_up_tool_message["content"]) == {
         "results": [
-            {
-                "id": "belief:python",
-                "content": "User prefers Python examples.",
-                "type": "preference",
-                "scope": "counterpart",
-                "status": "active",
-                "held_since": "2026-01-01T00:00:00+00:00",
-            }
+                {
+                    "id": "belief:python",
+                    "content": "User prefers Python examples.",
+                    "memory_kind": "preference",
+                    "scope": "counterpart",
+                    "lifecycle": "active",
+                    "held_since": "2026-01-01T00:00:00+00:00",
+                }
         ]
     }
 
@@ -485,14 +485,14 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
     assert messages[2].provider_metadata == {"tool_name": MEMORY_RECALL_TOOL_NAME}
     assert json.loads(messages[2].raw_content) == {
         "results": [
-            {
-                "id": "belief:python",
-                "content": "User prefers Python examples.",
-                "type": "preference",
-                "scope": "counterpart",
-                "status": "active",
-                "held_since": "2026-01-01T00:00:00+00:00",
-            }
+                {
+                    "id": "belief:python",
+                    "content": "User prefers Python examples.",
+                    "memory_kind": "preference",
+                    "scope": "counterpart",
+                    "lifecycle": "active",
+                    "held_since": "2026-01-01T00:00:00+00:00",
+                }
         ]
     }
     assert messages[2].metadata["tool_output_kind"] == "json"
@@ -764,21 +764,19 @@ def _seed_active_digest(
     counterpart_id: str = str(DEFAULT_COUNTERPART_ID),
     held_since: str = "2026-01-01T00:00:00+00:00",
 ) -> BeliefProjection:
+    del log
     projection = projection or BeliefProjection(store)
     counterpart = counterpart_ref(CounterpartId(counterpart_id))
-    event = EventEmitter(log).emit(
-        CognitiveEventKind.BELIEF_FORMED,
-        payload={
-            "belief": belief(
-                belief_id,
-                content,
-                about=[counterpart],
-                object_=f"counterpart_digest:{counterpart_id}",
-                held_since=held_since,
-            ).to_record()
-        },
+    projection.upsert_summary(
+        summary_belief(
+            belief_id,
+            content,
+            about=[counterpart],
+            object_="counterpart profile",
+            summary_kind=SummaryKind.COUNTERPART_PROFILE,
+            held_since=held_since,
+        )
     )
-    projection.apply(event)
     return projection
 
 
@@ -796,21 +794,18 @@ def _seed_active_belief(
     object_: str,
     held_since: str = "2026-01-01T00:00:00+00:00",
 ) -> BeliefProjection:
+    del log
     projection = BeliefProjection(store)
     counterpart = counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))
-    event = EventEmitter(log).emit(
-        CognitiveEventKind.BELIEF_FORMED,
-        payload={
-            "belief": belief(
-                belief_id,
-                content,
-                about=[counterpart],
-                object_=object_,
-                held_since=held_since,
-            ).to_record()
-        },
+    projection.upsert_atomic(
+        belief(
+            belief_id,
+            content,
+            about=[counterpart],
+            object_=object_,
+            held_since=held_since,
+        )
     )
-    projection.apply(event)
     return projection
 
 

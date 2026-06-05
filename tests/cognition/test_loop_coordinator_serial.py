@@ -8,8 +8,12 @@ from alpha_agent.cognition.models.subject import SUBJECT_SELF
 
 def test_acquire_serializes_scheduled_loops() -> None:
     coordinator = LoopCoordinator(SUBJECT_SELF)
-    first = LoopAcquireRequest("l3", LoopPriority.L3, timedelta(seconds=30))
-    second = LoopAcquireRequest("l2", LoopPriority.L2, timedelta(seconds=30))
+    first = LoopAcquireRequest("drive", LoopPriority.DRIVE, timedelta(seconds=30))
+    second = LoopAcquireRequest(
+        "consolidation",
+        LoopPriority.CONSOLIDATION,
+        timedelta(seconds=30),
+    )
     acquired_second = Event()
     release_first = Event()
     order: list[str] = []

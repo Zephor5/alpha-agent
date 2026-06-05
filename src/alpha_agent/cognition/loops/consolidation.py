@@ -25,13 +25,6 @@ from alpha_agent.utils.time import utc_now_iso
 class ConsolidationConfig:
     enabled: bool = True
     interval_seconds: int = 300
-    context_foreground_max: int = 8
-    context_absorb_batch: int = 4
-    context_summary_chars: int = 480
-    counterpart_digest_min_beliefs: int = 5
-    counterpart_digest_min_new_beliefs: int = 3
-    value_lens_learning_threshold: int = 5
-    value_lens_sensitivity_delta: float = 0.1
     dry_run: bool = False
 
 

@@ -13,14 +13,10 @@ class ProjectionView(Protocol):
 
 
 class Projection(ABC):
-    """Base class for idempotently rebuildable projections."""
+    """Base class for resettable materialized cognition views."""
 
     name: ClassVar[str]
     handles: ClassVar[frozenset[CognitiveEventKind]]
-
-    @abstractmethod
-    def apply(self, event: CognitiveEvent) -> None:
-        """Apply one event."""
 
     @abstractmethod
     def reset(self) -> None:
@@ -29,3 +25,11 @@ class Projection(ABC):
     @abstractmethod
     def view(self) -> Any:
         """Return the current projection view."""
+
+
+class EventProjection(Projection):
+    """Projection that materializes state by applying cognitive events."""
+
+    @abstractmethod
+    def apply(self, event: CognitiveEvent) -> None:
+        """Apply one event."""

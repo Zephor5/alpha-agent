@@ -2,40 +2,37 @@ from __future__ import annotations
 
 import pytest
 
-from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import (
-    Applicability,
-    Belief,
+    AtomicBelief,
+    Authority,
     BeliefId,
-    CognitiveEventKind,
-    CognitiveType,
+    BeliefLifecycle,
+    BeliefScope,
     CounterpartId,
-    DerivationTrace,
-    FeedbackEntry,
+    DerivationStage,
     Instant,
-    Lifecycle,
+    MemoryKind,
     NLStatement,
     Reference,
-    ReflectionId,
     Role,
     SituationId,
-    SubjectId,
-    UpdatePolicy,
-    ValueProfile,
+    SummaryBelief,
+    SummaryKind,
+    ValidityWindow,
     counterpart_ref,
     entity_ref,
     situation_ref,
     subject_ref,
 )
-from alpha_agent.cognition.projection_runner import ProjectionRunner
+from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.belief import (
     BeliefProjection,
+    BeliefRecallParams,
+    BeliefSearchParams,
     build_term_fts_query,
     build_trigram_fts_query,
 )
-from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.state.store import StateStore
-from tests.cognition.helpers import clock_factory, emit, id_factory
 
 
 def belief(
@@ -44,37 +41,71 @@ def belief(
     *,
     about: list[Reference] | None = None,
     object_: str = "python",
-    cognitive_type: CognitiveType = CognitiveType.PREFERENCE,
-    confidence: float = 0.6,
+    memory_kind: MemoryKind = MemoryKind.PREFERENCE,
+    lifecycle: BeliefLifecycle = BeliefLifecycle.ACTIVE,
     held_since: str = "2026-01-01T00:00:00+00:00",
-) -> Belief:
-    return Belief(
+    scope: BeliefScope | None = None,
+) -> AtomicBelief:
+    about_refs = list(about or [])
+    return AtomicBelief(
         id=BeliefId(belief_id),
-        subject=subject_ref(SubjectId("subject:self")),
-        about=list(about or []),
+        subject=subject_ref(SUBJECT_SELF),
+        about=about_refs,
         object=object_,
         content=NLStatement(content),
-        cognitive_type=cognitive_type,
+        memory_kind=memory_kind,
+        derivation_stage=DerivationStage.TOOL_WRITTEN,
+        scope=scope or _scope_for_about(about_refs),
+        authority=Authority.USER_ASSERTED,
         structure=None,
         sources=[],
-        confidence=confidence,
-        applicability=Applicability("{}"),
-        value_profile=ValueProfile(),
+        validity=ValidityWindow(observed_at=Instant(held_since)),
         relations=[],
         formed_in=situation_ref(SituationId("situation:test")),
-        holder_role=Role("holder"),
+        holder_role=Role("agent"),
         action_orientation=[],
-        update_policy=UpdatePolicy("{}"),
-        status=Lifecycle("active"),
+        update_policy={"updates": "operation_driven"},
+        lifecycle=lifecycle,
         held_since=Instant(held_since),
     )
 
 
+def summary_belief(
+    belief_id: str,
+    content: str,
+    *,
+    about: list[Reference],
+    object_: str = "profile",
+    summary_kind: SummaryKind = SummaryKind.COUNTERPART_PROFILE,
+    held_since: str = "2026-01-01T00:00:00+00:00",
+) -> SummaryBelief:
+    return SummaryBelief(
+        id=BeliefId(belief_id),
+        subject=subject_ref(SUBJECT_SELF),
+        about=list(about),
+        object=object_,
+        content=NLStatement(content),
+        summary_kind=summary_kind,
+        derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
+        scope=BeliefScope.COUNTERPART,
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        validity=ValidityWindow(observed_at=Instant(held_since)),
+        formed_in=situation_ref(SituationId("situation:test")),
+        holder_role=Role("agent"),
+        lifecycle=BeliefLifecycle.ACTIVE,
+        held_since=Instant(held_since),
+    )
+
+
+def _store(tmp_path) -> StateStore:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    return store
+
+
 def _fts_ids(store: StateStore, table: str) -> list[str]:
     with store.connect() as conn:
-        rows = conn.execute(
-            f"SELECT belief_id FROM {table} ORDER BY belief_id"
-        ).fetchall()
+        rows = conn.execute(f"SELECT belief_id FROM {table} ORDER BY belief_id").fetchall()
     return [str(row["belief_id"]) for row in rows]
 
 
@@ -104,47 +135,54 @@ def _search_terms_for(store: StateStore, belief_id: str) -> str:
     return str(row["search_terms"])
 
 
-def test_apply_belief_formed_materializes_view(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event = emit(
-        log,
-        CognitiveEventKind.BELIEF_FORMED,
-        payload={"belief": belief("belief:python", "User prefers Python.").to_record()},
-    )
+def test_belief_models_enforce_atomic_and_summary_split() -> None:
+    atomic_record = belief("belief:atomic", "User prefers Python.").to_record()
+    with pytest.raises(ValueError, match="summary_kind"):
+        AtomicBelief.from_record({**atomic_record, "summary_kind": "counterpart_profile"})
 
-    projection.apply(event)
+    summary_record = summary_belief(
+        "belief:summary",
+        "User profile summary.",
+        about=[counterpart_a()],
+    ).to_record()
+    with pytest.raises(ValueError, match="memory_kind"):
+        SummaryBelief.from_record({**summary_record, "memory_kind": "preference"})
+
+
+def test_scope_requires_matching_about_reference() -> None:
+    with pytest.raises(ValueError, match="counterpart-scoped"):
+        belief(
+            "belief:bad-scope",
+            "User prefers Python.",
+            about=[],
+            scope=BeliefScope.COUNTERPART,
+        )
+
+
+def test_upsert_atomic_belief_stores_current_entity_state(tmp_path) -> None:
+    store = _store(tmp_path)
+    projection = BeliefProjection(store)
+
+    projection.upsert_atomic(belief("belief:python", "User prefers Python."))
 
     materialized = projection.get_by_id(BeliefId("belief:python"))
-    assert materialized is not None
+    assert isinstance(materialized, AtomicBelief)
     assert materialized.content == "User prefers Python."
+    assert materialized.memory_kind == MemoryKind.PREFERENCE
+    assert materialized.lifecycle == BeliefLifecycle.ACTIVE
     assert [item.id for item in projection.list_active()] == ["belief:python"]
 
 
-def test_apply_belief_formed_indexes_active_belief_in_fts_without_duplicates(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
+def test_upsert_atomic_belief_indexes_fts_without_duplicates(tmp_path) -> None:
+    store = _store(tmp_path)
     projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
 
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={
-                "belief": belief(
-                    "belief:examples",
-                    "User prefers Python examples.",
-                    about=[python_entity()],
-                    object_="Python",
-                ).to_record()
-            },
-            event_ids=event_ids,
-            clock=clock,
+    projection.upsert_atomic(
+        belief(
+            "belief:examples",
+            "User prefers Python examples.",
+            about=[counterpart_a(), python_entity()],
+            object_="Python",
         )
     )
 
@@ -153,22 +191,14 @@ def test_apply_belief_formed_indexes_active_belief_in_fts_without_duplicates(tmp
     terms = _search_terms_for(store, "belief:examples")
     assert "python" in terms
     assert "examples" in terms
-    assert "user prefers python examples." in terms
+    assert "counterpart:user-a" in terms
 
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={
-                "belief": belief(
-                    "belief:examples",
-                    "User prefers Rust snippets.",
-                    about=[entity_ref("rust")],
-                    object_="Rust",
-                ).to_record()
-            },
-            event_ids=event_ids,
-            clock=clock,
+    projection.upsert_atomic(
+        belief(
+            "belief:examples",
+            "User prefers Rust snippets.",
+            about=[counterpart_a(), entity_ref("rust")],
+            object_="Rust",
         )
     )
 
@@ -177,336 +207,194 @@ def test_apply_belief_formed_indexes_active_belief_in_fts_without_duplicates(tmp
     terms = _search_terms_for(store, "belief:examples")
     assert "rust" in terms
     assert "snippets" in terms
-    assert "python" not in terms
 
 
-def test_belief_formed_round_trips_full_record_fields(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
+def test_supersede_and_retract_mutate_lifecycle_directly(tmp_path) -> None:
+    store = _store(tmp_path)
     projection = BeliefProjection(store)
-    original = Belief.from_record(
-        {
-            **belief("belief:full", "User prefers explicit plans.").to_record(),
-            "derivation": DerivationTrace("derived-from-user-statement"),
-            "feedback_history": [
-                FeedbackEntry("confirmed-on-followup"),
-                FeedbackEntry("used-successfully"),
-            ],
-            "self_audit": [
-                {"kind": "reflection", "id": ReflectionId("reflection:phase03-audit")},
-            ],
-        }
-    )
-
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={"belief": original.to_record()},
-        )
-    )
-
-    materialized = projection.get_by_id(BeliefId("belief:full"))
-    assert materialized is not None
-    assert materialized.derivation == original.derivation
-    assert materialized.feedback_history == original.feedback_history
-    assert materialized.self_audit == original.self_audit
-
-
-def test_apply_belief_superseded_marks_old_and_keeps_new_active(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
-    old_belief = belief("belief:old", "User prefers Python.")
-    new_belief = belief("belief:new", "User prefers Rust.")
-
-    for item in [old_belief, new_belief]:
-        projection.apply(
-            emit(
-                log,
-                CognitiveEventKind.BELIEF_FORMED,
-                payload={"belief": item.to_record()},
-                event_ids=event_ids,
-                clock=clock,
-            )
-        )
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_SUPERSEDED,
-            payload={"old_belief_id": "belief:old", "new_belief_id": "belief:new"},
-            event_ids=event_ids,
-            clock=clock,
-        )
-    )
-
-    materialized_old = projection.get_by_id(BeliefId("belief:old"))
-    materialized_new = projection.get_by_id(BeliefId("belief:new"))
-    assert materialized_old is not None
-    assert materialized_new is not None
-    assert materialized_old.superseded_by is not None
-    assert materialized_new.supersedes is not None
-    assert materialized_old.status == "superseded"
-    assert materialized_old.superseded_by.id == "belief:new"
-    assert materialized_new.status == "active"
-    assert materialized_new.supersedes.id == "belief:old"
-    assert [item.id for item in projection.list_active()] == ["belief:new"]
-    assert _fts_ids(store, "belief_search_terms_fts") == ["belief:new"]
-    assert _fts_ids(store, "belief_search_trigram_fts") == ["belief:new"]
-
-
-def test_apply_belief_superseded_payload_new_belief_updates_fts_in_one_lifecycle(
-    tmp_path,
-) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
     old_belief = belief("belief:old", "User prefers Python.")
     new_belief = belief("belief:new", "User prefers Rust.", object_="rust")
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={"belief": old_belief.to_record()},
-            event_ids=event_ids,
-            clock=clock,
-        )
-    )
+    projection.upsert_atomic(old_belief)
 
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_SUPERSEDED,
-            payload={"old_belief_id": "belief:old", "belief": new_belief.to_record()},
-            event_ids=event_ids,
-            clock=clock,
-        )
-    )
+    projection.supersede_many([old_belief.id], new_belief, at="2026-01-02T00:00:00+00:00")
 
     materialized_old = projection.get_by_id(BeliefId("belief:old"))
     materialized_new = projection.get_by_id(BeliefId("belief:new"))
-    assert materialized_old is not None
-    assert materialized_new is not None
-    assert materialized_old.status == "superseded"
+    assert isinstance(materialized_old, AtomicBelief)
+    assert isinstance(materialized_new, AtomicBelief)
+    assert materialized_old.lifecycle == BeliefLifecycle.SUPERSEDED
     assert materialized_old.superseded_by is not None
     assert materialized_old.superseded_by.id == "belief:new"
-    assert materialized_new.status == "active"
-    assert materialized_new.supersedes is not None
-    assert materialized_new.supersedes.id == "belief:old"
-    assert _fts_ids(store, "belief_search_terms_fts") == ["belief:new"]
-    assert _fts_ids(store, "belief_search_trigram_fts") == ["belief:new"]
-    assert _fts_count(store, "belief_search_terms_fts", "belief:new") == 1
-    assert _fts_count(store, "belief_search_trigram_fts", "belief:new") == 1
+    assert materialized_new.lifecycle == BeliefLifecycle.ACTIVE
+    assert [item.id for item in projection.list_active()] == ["belief:new"]
 
-
-def test_apply_belief_superseded_payload_new_belief_rolls_back_as_one_transaction(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={"belief": belief("belief:old", "User prefers Python.").to_record()},
-            event_ids=event_ids,
-            clock=clock,
-        )
-    )
-    original_delete_fts = projection._delete_belief_fts
-
-    def fail_on_old_fts_delete(conn, belief_id: str) -> None:
-        if belief_id == "belief:old":
-            raise RuntimeError("simulated supersede failure")
-        original_delete_fts(conn, belief_id)
-
-    monkeypatch.setattr(projection, "_delete_belief_fts", fail_on_old_fts_delete)
-
-    with pytest.raises(RuntimeError, match="simulated supersede failure"):
-        projection.apply(
-            emit(
-                log,
-                CognitiveEventKind.BELIEF_SUPERSEDED,
-                payload={
-                    "old_belief_id": "belief:old",
-                    "belief": belief(
-                        "belief:new",
-                        "User prefers Rust.",
-                        object_="rust",
-                    ).to_record(),
-                },
-                event_ids=event_ids,
-                clock=clock,
-            )
-        )
-
-    materialized_old = projection.get_by_id(BeliefId("belief:old"))
-    assert materialized_old is not None
-    assert materialized_old.status == "active"
-    assert projection.get_by_id(BeliefId("belief:new")) is None
-    assert _fts_ids(store, "belief_search_terms_fts") == ["belief:old"]
-    assert _fts_ids(store, "belief_search_trigram_fts") == ["belief:old"]
-
-
-def test_apply_belief_retracted_removes_from_active_scope(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={"belief": belief("belief:python", "User prefers Python.").to_record()},
-            event_ids=event_ids,
-            clock=clock,
-        )
+    projection.mark_lifecycle(
+        materialized_new.id,
+        BeliefLifecycle.RETRACTED,
+        at="2026-01-03T00:00:00+00:00",
     )
 
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_RETRACTED,
-            payload={"belief_id": "belief:python", "reason": "user corrected preference"},
-            event_ids=event_ids,
-            clock=clock,
-        )
-    )
-
-    materialized = projection.get_by_id(BeliefId("belief:python"))
-    assert materialized is not None
-    assert materialized.status == "retracted"
     assert projection.list_active() == []
     assert _fts_ids(store, "belief_search_terms_fts") == []
     assert _fts_ids(store, "belief_search_trigram_fts") == []
 
 
-def test_apply_belief_archived_removes_from_active_scope(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
+def test_recall_filters_by_memory_kind_scope_and_lifecycle(tmp_path) -> None:
+    store = _store(tmp_path)
     projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={"belief": belief("belief:python", "User prefers Python.").to_record()},
-            event_ids=event_ids,
-            clock=clock,
-        )
-    )
-
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_ARCHIVED,
-            payload={"belief_id": "belief:python", "reason": "obsolete"},
-            event_ids=event_ids,
-            clock=clock,
-        )
-    )
-
-    materialized = projection.get_by_id(BeliefId("belief:python"))
-    assert materialized is not None
-    assert materialized.status == "archived"
-    assert projection.list_active() == []
-    assert _fts_ids(store, "belief_search_terms_fts") == []
-    assert _fts_ids(store, "belief_search_trigram_fts") == []
-
-
-def test_reset_clears_belief_fts_tables(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={"belief": belief("belief:python", "User prefers Python.").to_record()},
-        )
-    )
-    assert _fts_ids(store, "belief_search_terms_fts") == ["belief:python"]
-    assert _fts_ids(store, "belief_search_trigram_fts") == ["belief:python"]
-
-    projection.reset()
-
-    assert _fts_ids(store, "belief_search_terms_fts") == []
-    assert _fts_ids(store, "belief_search_trigram_fts") == []
-
-
-def test_replay_and_auto_rebuild_restore_belief_fts_consistently(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
-
     for item in [
-        belief("belief:old", "User prefers Python."),
-        belief("belief:new", "User prefers Rust.", object_="rust"),
+        belief("belief:a-python", "User A prefers Python.", about=[counterpart_a()]),
+        belief("belief:global-fact", "Python uses indentation.", memory_kind=MemoryKind.FACT),
+        belief(
+            "belief:retracted",
+            "User A used to prefer Go.",
+            about=[counterpart_a()],
+            lifecycle=BeliefLifecycle.RETRACTED,
+        ),
     ]:
-        projection.apply(
-            emit(
-                log,
-                CognitiveEventKind.BELIEF_FORMED,
-                payload={"belief": item.to_record()},
-                event_ids=event_ids,
-                clock=clock,
-            )
-        )
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_SUPERSEDED,
-            payload={"old_belief_id": "belief:old", "new_belief_id": "belief:new"},
-            event_ids=event_ids,
-            clock=clock,
+        projection.upsert_atomic(item)
+
+    recalled = projection.recall(
+        BeliefRecallParams(
+            counterpart=counterpart_a(),
+            memory_kinds=frozenset({MemoryKind.PREFERENCE}),
+            scopes=frozenset({BeliefScope.COUNTERPART}),
         )
     )
-    assert _fts_ids(store, "belief_search_terms_fts") == ["belief:new"]
 
-    registry = ProjectionRegistry()
-    rebuilt = BeliefProjection(store)
-    registry.register(rebuilt)
-    ProjectionRunner(log, registry).replay_all()
-    ProjectionRunner(log, registry).replay_all()
+    assert [item.id for item in recalled] == ["belief:a-python"]
 
-    assert _fts_ids(store, "belief_search_terms_fts") == ["belief:new"]
-    assert _fts_ids(store, "belief_search_trigram_fts") == ["belief:new"]
-    assert _fts_count(store, "belief_search_terms_fts", "belief:new") == 1
-    assert _fts_count(store, "belief_search_trigram_fts", "belief:new") == 1
 
-    rebuilt.reset()
-    auto_rebuilt = BeliefProjection(store, event_log=log, auto_rebuild=True)
+def test_recall_explicit_non_counterpart_scope_without_counterpart(tmp_path) -> None:
+    store = _store(tmp_path)
+    projection = BeliefProjection(store)
+    self_memory = belief(
+        "belief:self-python",
+        "The agent should prefer concise Python snippets.",
+        about=[subject_ref(SUBJECT_SELF)],
+        scope=BeliefScope.SELF,
+    )
+    projection.upsert_atomic(self_memory)
+    projection.upsert_atomic(belief("belief:global-python", "Python uses indentation."))
 
-    assert [item.id for item in auto_rebuilt.list_active()] == ["belief:new"]
-    assert _fts_ids(store, "belief_search_terms_fts") == ["belief:new"]
-    assert _fts_ids(store, "belief_search_trigram_fts") == ["belief:new"]
+    recalled = projection.recall(
+        BeliefRecallParams(
+            counterpart=None,
+            include_global=False,
+            scopes=frozenset({BeliefScope.SELF}),
+        )
+    )
+    searched = projection.recall_candidates(
+        BeliefSearchParams(
+            query="concise Python",
+            counterpart=None,
+            include_global=False,
+            scopes=frozenset({BeliefScope.SELF}),
+        )
+    )
+
+    assert [item.id for item in recalled] == ["belief:self-python"]
+    assert [candidate.belief.id for candidate in searched] == ["belief:self-python"]
+
+
+@pytest.mark.parametrize(
+    ("scope", "about", "belief_id", "content", "query"),
+    [
+        (
+            BeliefScope.PROJECT,
+            [Reference("project", "alpha-agent")],
+            "belief:project-deploy",
+            "The alpha-agent project deploy task uses the gateway daemon.",
+            "deploy gateway",
+        ),
+        (
+            BeliefScope.SELF,
+            [subject_ref(SUBJECT_SELF)],
+            "belief:self-style",
+            "The agent should keep implementation notes concise.",
+            "concise implementation",
+        ),
+    ],
+)
+def test_recall_explicit_non_counterpart_scope_with_counterpart_context(
+    tmp_path,
+    scope: BeliefScope,
+    about: list[Reference],
+    belief_id: str,
+    content: str,
+    query: str,
+) -> None:
+    store = _store(tmp_path)
+    projection = BeliefProjection(store)
+    projection.upsert_atomic(
+        belief(
+            belief_id,
+            content,
+            about=about,
+            object_=scope.value,
+            scope=scope,
+        )
+    )
+    projection.upsert_atomic(
+        belief(
+            "belief:a-python",
+            "User A prefers Python examples.",
+            about=[counterpart_a()],
+            object_="python",
+        )
+    )
+    projection.upsert_atomic(belief("belief:global-python", "Python uses indentation."))
+
+    recalled = projection.recall(
+        BeliefRecallParams(
+            counterpart=counterpart_a(),
+            scopes=frozenset({scope}),
+        )
+    )
+    searched = projection.recall_candidates(
+        BeliefSearchParams(
+            query=query,
+            counterpart=counterpart_a(),
+            scopes=frozenset({scope}),
+        )
+    )
+
+    assert [item.id for item in recalled] == [belief_id]
+    assert [candidate.belief.id for candidate in searched] == [belief_id]
+
+
+def test_summary_beliefs_are_stored_separately_and_not_recalled_by_default(tmp_path) -> None:
+    store = _store(tmp_path)
+    projection = BeliefProjection(store)
+    projection.upsert_atomic(belief("belief:preference", "User A prefers Python."))
+    profile = summary_belief(
+        "belief:profile",
+        "User A likes concise Python examples.",
+        about=[counterpart_a()],
+    )
+    projection.upsert_summary(profile)
+
+    ordinary = projection.recall_candidates(BeliefSearchParams(query="Python"))
+    explicit_summary = projection.recall_candidates(
+        BeliefSearchParams(
+            query="Python",
+            counterpart=counterpart_a(),
+            summary_kinds=frozenset({SummaryKind.COUNTERPART_PROFILE}),
+        )
+    )
+
+    assert [candidate.belief.id for candidate in ordinary] == ["belief:preference"]
+    assert [candidate.belief.id for candidate in explicit_summary] == ["belief:profile"]
+    assert projection.latest_summary(
+        summary_kind=SummaryKind.COUNTERPART_PROFILE,
+        about=counterpart_a(),
+    ) == profile
 
 
 def test_fts_query_builders_escape_special_characters_and_skip_short_trigrams(
     tmp_path,
 ) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
+    store = _store(tmp_path)
     BeliefProjection(store)
     term_query = build_term_fts_query(
         [
@@ -537,22 +425,26 @@ def test_fts_query_builders_escape_special_characters_and_skip_short_trigrams(
     with store.transaction() as conn:
         conn.execute(
             """
-            INSERT INTO belief_search_terms_fts (belief_id, search_terms, object)
-            VALUES (?, ?, ?)
+            INSERT INTO belief_search_terms_fts
+                (belief_table, belief_id, search_terms, object, about)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
+                "atomic",
                 "belief:special",
                 'C++ C# v3.0.1 src/alpha_agent/runtime:agent.py "quoted" OpenAI API',
                 "OpenAI API",
+                "",
             ),
         )
         conn.execute(
             """
             INSERT INTO belief_search_trigram_fts
-                (belief_id, content, object, normalized_content)
-            VALUES (?, ?, ?, ?)
+                (belief_table, belief_id, content, object, normalized_content)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
+                "atomic",
                 "belief:special",
                 'C++ C# v3.0.1 src/alpha_agent/runtime:agent.py "quoted"',
                 "OpenAI API",
@@ -582,7 +474,6 @@ def test_fts_query_builders_escape_special_characters_and_skip_short_trigrams(
     assert [row["belief_id"] for row in trigram_rows] == ["belief:special"]
 
 
-
 def counterpart_a():
     return counterpart_ref(CounterpartId("counterpart:user-a"))
 
@@ -593,3 +484,9 @@ def counterpart_b():
 
 def python_entity():
     return entity_ref("python")
+
+
+def _scope_for_about(about: list[Reference]) -> BeliefScope:
+    if any(ref.kind == "counterpart" for ref in about):
+        return BeliefScope.COUNTERPART
+    return BeliefScope.GLOBAL

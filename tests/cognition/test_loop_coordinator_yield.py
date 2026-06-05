@@ -9,7 +9,7 @@ from alpha_agent.cognition.models.subject import SUBJECT_SELF
 def test_holder_yield_lets_higher_priority_waiter_run_then_resumes() -> None:
     coordinator = LoopCoordinator(SUBJECT_SELF)
     low = LoopAcquireRequest("consolidation", LoopPriority.CONSOLIDATION, timedelta(seconds=30))
-    high = LoopAcquireRequest("l2", LoopPriority.L2, timedelta(seconds=30))
+    high = LoopAcquireRequest("drive", LoopPriority.DRIVE, timedelta(seconds=30))
     high_waiting = Event()
     high_done = Event()
     order: list[str] = []

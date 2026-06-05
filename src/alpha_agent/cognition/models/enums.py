@@ -5,29 +5,76 @@ from __future__ import annotations
 from enum import IntEnum, StrEnum
 
 
-class CognitiveType(StrEnum):
-    """Shape of a belief's cognitive content."""
+class MemoryKind(StrEnum):
+    """Atomic memory assertion kinds."""
 
-    FACTUAL = "factual"
-    PROCEDURAL = "procedural"
+    FACT = "fact"
     PREFERENCE = "preference"
+    CONSTRAINT = "constraint"
+    PROCEDURE = "procedure"
     VALUE = "value"
-    CAUSAL = "causal"
-    SOCIAL = "social"
-    TEMPORAL = "temporal"
-    META = "meta"
-    CONCEPT = "concept"
+    RELATIONSHIP = "relationship"
 
 
-class ValueKind(StrEnum):
-    """Value dimensions used by profiles and lenses."""
+class SummaryKind(StrEnum):
+    """Summary belief kinds."""
 
-    HELPFULNESS = "helpfulness"
-    HONESTY = "honesty"
-    SAFETY = "safety"
-    AUTONOMY = "autonomy"
-    EFFICIENCY = "efficiency"
-    LEARNING = "learning"
+    COUNTERPART_PROFILE = "counterpart_profile"
+    PROJECT_PROFILE = "project_profile"
+    DOMAIN_SUMMARY = "domain_summary"
+    SELF_MEMORY_SUMMARY = "self_memory_summary"
+
+
+class DerivationStage(StrEnum):
+    """How a belief was produced."""
+
+    TOOL_WRITTEN = "tool_written"
+    BACKGROUND_EXTRACTED = "background_extracted"
+    BACKGROUND_CONSOLIDATED = "background_consolidated"
+    BACKGROUND_SUMMARIZED = "background_summarized"
+    HUMAN_CONFIRMED = "human_confirmed"
+
+
+class BeliefScope(StrEnum):
+    """Where a belief applies."""
+
+    GLOBAL = "global"
+    COUNTERPART = "counterpart"
+    SELF = "self"
+    PROJECT = "project"
+    SESSION = "session"
+
+
+class Authority(StrEnum):
+    """Categorical source-trust signal for a belief."""
+
+    SYSTEM_DEFINED = "system_defined"
+    HUMAN_CONFIRMED = "human_confirmed"
+    USER_ASSERTED = "user_asserted"
+    BACKGROUND_SYNTHESIZED = "background_synthesized"
+    LLM_INTERPRETED = "llm_interpreted"
+
+
+class BeliefLifecycle(StrEnum):
+    """Lifecycle state for a belief entity."""
+
+    PENDING_CONFIRMATION = "pending_confirmation"
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    RETRACTED = "retracted"
+    ARCHIVED = "archived"
+
+
+class BeliefRelationKind(StrEnum):
+    """Typed relationship between belief entities."""
+
+    SUPPORTS = "supports"
+    CONTRADICTS = "contradicts"
+    SUPERSEDES = "supersedes"
+    CAUSES = "causes"
+    CAUSED_BY = "caused_by"
+    DERIVED_FROM = "derived_from"
+    ABOUT_SAME_ENTITY_AS = "about_same_entity_as"
 
 
 class CognitiveEventKind(StrEnum):
@@ -36,29 +83,7 @@ class CognitiveEventKind(StrEnum):
     PERCEIVED = "perceived"
     ACTED = "acted"
     RECEIVED_FEEDBACK = "received_feedback"
-    REFLECTED = "reflected"
     MEMORY_PROPOSED = "memory_proposed"
-    BELIEF_FORMED = "belief_formed"
-    BELIEF_STRENGTHENED = "belief_strengthened"
-    BELIEF_WEAKENED = "belief_weakened"
-    BELIEF_SUPERSEDED = "belief_superseded"
-    BELIEF_RETRACTED = "belief_retracted"
-    BIAS_DETECTED = "bias_detected"
-    STRATEGY_CHANGED = "strategy_changed"
-    STRATEGY_EXPIRED = "strategy_expired"
-    SELF_MODEL_UPDATED = "self_model_updated"
-    PROCEDURE_LEARNED = "procedure_learned"
-    PROCEDURE_STRENGTHENED = "procedure_strengthened"
-    PROCEDURE_WEAKENED = "procedure_weakened"
-    PROCEDURE_MATCHED = "procedure_matched"
-    VALUE_LENS_SHIFTED = "value_lens_shifted"
-    CONTEXT_COMPRESSED = "context_compressed"
-    CONSOLIDATION_CONFLICT_QUEUED = "consolidation_conflict_queued"
-    CONFLICT_KEPT_FOR_HUMAN_REVIEW = "conflict_kept_for_human_review"
-    BELIEF_ARCHIVED = "belief_archived"
-    BELIEF_FORM_PENDING_CONFIRMATION = "belief_form_pending_confirmation"
-    CONTEXT_ANCHOR_SET = "context_anchor_set"
-    CONTEXT_ANCHOR_CLEARED = "context_anchor_cleared"
     COUNTERPART_FIRST_OBSERVED = "counterpart_first_observed"
     COUNTERPART_IDENTIFIED = "counterpart_identified"
     COUNTERPART_RELATIONSHIP_CHANGED = "counterpart_relationship_changed"
@@ -102,7 +127,5 @@ class LoopPriority(IntEnum):
     """Single-subject loop scheduling priority. Lower numbers run first."""
 
     REACTIVE = 0
-    L2 = 1
-    DRIVE = 2
-    CONSOLIDATION = 3
-    L3 = 4
+    DRIVE = 1
+    CONSOLIDATION = 2

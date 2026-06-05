@@ -143,65 +143,107 @@ CREATE TABLE IF NOT EXISTS counterpart_view (
 CREATE INDEX IF NOT EXISTS idx_counterpart_role
     ON counterpart_view(role, last_interaction_at DESC);
 
-CREATE TABLE IF NOT EXISTS belief_view (
+CREATE TABLE IF NOT EXISTS atomic_beliefs (
     id TEXT PRIMARY KEY,
     record TEXT NOT NULL DEFAULT '{}',
     object TEXT NOT NULL,
     content TEXT NOT NULL,
     normalized_content TEXT NOT NULL,
-    cognitive_type TEXT NOT NULL,
+    memory_kind TEXT NOT NULL,
+    derivation_stage TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    authority TEXT NOT NULL,
+    lifecycle TEXT NOT NULL DEFAULT 'active',
     structure TEXT NOT NULL DEFAULT '{}',
     sources TEXT NOT NULL DEFAULT '[]',
-    confidence REAL NOT NULL DEFAULT 0.5,
-    applicability TEXT NOT NULL DEFAULT '{}',
-    value_profile TEXT NOT NULL DEFAULT '{}',
+    validity TEXT NOT NULL DEFAULT '{}',
     relations TEXT NOT NULL DEFAULT '[]',
+    update_policy TEXT NOT NULL DEFAULT '{}',
     formed_in_situation TEXT,
     holder_role TEXT,
     action_orientation TEXT NOT NULL DEFAULT '[]',
-    update_policy TEXT NOT NULL DEFAULT '{}',
-    status TEXT NOT NULL DEFAULT 'active',
     held_since TEXT NOT NULL,
     held_until TEXT,
     supersedes TEXT,
     superseded_by TEXT,
-    last_event_id TEXT NOT NULL
+    updated_at TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_belief_view_status
-    ON belief_view(status);
-CREATE INDEX IF NOT EXISTS idx_belief_view_type
-    ON belief_view(cognitive_type, status);
+CREATE INDEX IF NOT EXISTS idx_atomic_beliefs_kind_scope_lifecycle
+    ON atomic_beliefs(memory_kind, scope, lifecycle);
+CREATE INDEX IF NOT EXISTS idx_atomic_beliefs_lifecycle
+    ON atomic_beliefs(lifecycle, held_since);
+CREATE INDEX IF NOT EXISTS idx_atomic_beliefs_scope
+    ON atomic_beliefs(scope, lifecycle);
+
+CREATE TABLE IF NOT EXISTS summary_beliefs (
+    id TEXT PRIMARY KEY,
+    record TEXT NOT NULL DEFAULT '{}',
+    object TEXT NOT NULL,
+    content TEXT NOT NULL,
+    normalized_content TEXT NOT NULL,
+    summary_kind TEXT NOT NULL,
+    derivation_stage TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    authority TEXT NOT NULL,
+    lifecycle TEXT NOT NULL DEFAULT 'active',
+    structure TEXT NOT NULL DEFAULT '{}',
+    sources TEXT NOT NULL DEFAULT '[]',
+    validity TEXT NOT NULL DEFAULT '{}',
+    relations TEXT NOT NULL DEFAULT '[]',
+    update_policy TEXT NOT NULL DEFAULT '{}',
+    source_belief_ids TEXT NOT NULL DEFAULT '[]',
+    formed_in_situation TEXT,
+    holder_role TEXT,
+    action_orientation TEXT NOT NULL DEFAULT '[]',
+    held_since TEXT NOT NULL,
+    held_until TEXT,
+    supersedes TEXT,
+    superseded_by TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_summary_beliefs_kind_scope_lifecycle
+    ON summary_beliefs(summary_kind, scope, lifecycle);
+CREATE INDEX IF NOT EXISTS idx_summary_beliefs_lifecycle
+    ON summary_beliefs(lifecycle, held_since);
+CREATE INDEX IF NOT EXISTS idx_summary_beliefs_scope
+    ON summary_beliefs(scope, lifecycle);
 
 CREATE TABLE IF NOT EXISTS belief_entity_index (
+    belief_table TEXT NOT NULL,
     belief_id TEXT NOT NULL,
     entity_id TEXT NOT NULL,
-    PRIMARY KEY(belief_id, entity_id)
+    PRIMARY KEY(belief_table, belief_id, entity_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_belief_entity_lookup
-    ON belief_entity_index(entity_id, belief_id);
+    ON belief_entity_index(entity_id, belief_table, belief_id);
 
 CREATE TABLE IF NOT EXISTS belief_about_index (
+    belief_table TEXT NOT NULL,
     belief_id TEXT NOT NULL,
     about_kind TEXT NOT NULL,
     about_id TEXT NOT NULL,
-    PRIMARY KEY(belief_id, about_kind, about_id)
+    PRIMARY KEY(belief_table, belief_id, about_kind, about_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_belief_about_lookup
-    ON belief_about_index(about_kind, about_id, belief_id);
+    ON belief_about_index(about_kind, about_id, belief_table, belief_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS belief_search_terms_fts
 USING fts5(
+    belief_table UNINDEXED,
     belief_id UNINDEXED,
     search_terms,
     object,
+    about,
     tokenize = "unicode61 remove_diacritics 1 tokenchars '_-#./:+'"
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS belief_search_trigram_fts
 USING fts5(
+    belief_table UNINDEXED,
     belief_id UNINDEXED,
     content,
     object,
@@ -209,78 +251,13 @@ USING fts5(
     tokenize = "trigram"
 );
 
-CREATE TABLE IF NOT EXISTS context_window_view (
-    session_id TEXT PRIMARY KEY,
-    counterpart_id TEXT,
-    foreground_ids TEXT NOT NULL DEFAULT '[]',
-    anchored_ids TEXT NOT NULL DEFAULT '[]',
-    matched_procedure_ids TEXT NOT NULL DEFAULT '[]',
-    background_summary_id TEXT,
-    last_event_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_ctx_window_counterpart
-    ON context_window_view(counterpart_id);
-
-CREATE TABLE IF NOT EXISTS context_window_background (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    summary TEXT NOT NULL,
-    derived_from_perception_ids TEXT NOT NULL DEFAULT '[]',
-    preserved_anchors TEXT NOT NULL DEFAULT '[]',
-    compression_policy TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_ctx_bg_session_time
-    ON context_window_background(session_id, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS reflection_view (
-    id TEXT PRIMARY KEY,
-    turn_id TEXT NOT NULL,
-    level TEXT NOT NULL DEFAULT 'L1',
-    kind TEXT NOT NULL,
-    severity TEXT NOT NULL,
-    target_kind TEXT NOT NULL,
-    target_id TEXT NOT NULL,
-    finding TEXT NOT NULL,
-    suggested_remedy TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_reflection_severity
-    ON reflection_view(severity, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_reflection_kind
-    ON reflection_view(kind, created_at DESC);
-
-CREATE TABLE IF NOT EXISTS strategy_view (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    payload TEXT NOT NULL DEFAULT '{}',
-    target_domains TEXT NOT NULL DEFAULT '[]',
-    for_counterpart TEXT,
-    set_by TEXT NOT NULL,
-    set_at TEXT NOT NULL,
-    valid_until TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active',
-    last_event_id TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_strategy_status_validity
-    ON strategy_view(status, valid_until);
-CREATE INDEX IF NOT EXISTS idx_strategy_for_counterpart
-    ON strategy_view(for_counterpart, status);
-
 CREATE TABLE IF NOT EXISTS subject_view (
     id TEXT PRIMARY KEY,
     role TEXT,
     capabilities TEXT NOT NULL DEFAULT '[]',
     declared_needs TEXT NOT NULL DEFAULT '[]',
-    value_lens_id TEXT,
-    self_model TEXT NOT NULL DEFAULT '{}',
+    membership TEXT NOT NULL DEFAULT '[]',
     served_counterparts TEXT NOT NULL DEFAULT '[]',
-    known_biases TEXT NOT NULL DEFAULT '[]',
     held_at TEXT NOT NULL,
     last_event_id TEXT NOT NULL
 );
@@ -304,33 +281,6 @@ CREATE INDEX IF NOT EXISTS idx_goal_status_priority
     ON goal_view(status, priority DESC);
 CREATE INDEX IF NOT EXISTS idx_goal_for_counterpart
     ON goal_view(for_counterpart, status);
-
-CREATE TABLE IF NOT EXISTS subject_value_lens (
-    subject_id TEXT PRIMARY KEY,
-    priority TEXT NOT NULL,
-    sensitivity TEXT NOT NULL DEFAULT '{}',
-    tradeoff_preferences TEXT NOT NULL DEFAULT '[]',
-    updated_at TEXT NOT NULL,
-    last_event_id TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS procedure_view (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    trigger_pattern TEXT NOT NULL,
-    steps TEXT NOT NULL DEFAULT '[]',
-    expected_outcome TEXT NOT NULL DEFAULT '',
-    learned_from_event_ids TEXT NOT NULL DEFAULT '[]',
-    success_count INTEGER NOT NULL DEFAULT 0,
-    failure_count INTEGER NOT NULL DEFAULT 0,
-    confidence REAL NOT NULL DEFAULT 0.5,
-    status TEXT NOT NULL DEFAULT 'active',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_procedure_trigger
-    ON procedure_view(trigger_pattern);
 
 CREATE TABLE IF NOT EXISTS cognition_worker_checkpoint (
     worker_name TEXT PRIMARY KEY,

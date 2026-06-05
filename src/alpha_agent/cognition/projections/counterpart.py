@@ -14,7 +14,7 @@ from alpha_agent.cognition.models import (
     CounterpartRole,
     Relationship,
 )
-from alpha_agent.cognition.projections.base import Projection
+from alpha_agent.cognition.projections.base import EventProjection
 from alpha_agent.state.store import StateStore
 
 
@@ -41,7 +41,7 @@ class CounterpartProjectionView:
     counterparts: tuple[Counterpart, ...]
 
 
-class CounterpartProjection(Projection):
+class CounterpartProjection(EventProjection):
     """Materialize counterpart lifecycle events into counterpart_view."""
 
     name = "counterpart"

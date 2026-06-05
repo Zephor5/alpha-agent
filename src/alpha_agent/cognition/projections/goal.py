@@ -10,7 +10,7 @@ from typing import Any
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.models import CognitiveEvent, CognitiveEventKind, CounterpartRef, Goal
 from alpha_agent.cognition.models._ids import BeliefId, GoalId, Instant
-from alpha_agent.cognition.projections.base import Projection
+from alpha_agent.cognition.projections.base import EventProjection
 from alpha_agent.state.store import StateStore
 
 ACTIVE_GOAL_LIMIT = 8
@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS idx_goal_for_counterpart
 """
 
 
-class GoalProjection(Projection):
+class GoalProjection(EventProjection):
     """Materialize goal lifecycle events into a deterministic view."""
 
     name = "goal"

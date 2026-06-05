@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from alpha_agent.cognition.models import CognitiveEvent, CognitiveEventKind
-from alpha_agent.cognition.projections.base import Projection
+from alpha_agent.cognition.projections.base import EventProjection
 
 
 @dataclass(frozen=True)
@@ -13,7 +13,7 @@ class EventCountByKindView:
     counts: dict[CognitiveEventKind, int] = field(default_factory=dict)
 
 
-class EventCountByKind(Projection):
+class EventCountByKind(EventProjection):
     """Trivial replay target used to prove projection plumbing."""
 
     name = "event_count_by_kind"

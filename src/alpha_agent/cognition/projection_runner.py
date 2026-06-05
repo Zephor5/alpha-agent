@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.models import CognitiveEvent
+from alpha_agent.cognition.projections.base import EventProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 
 
@@ -23,4 +24,9 @@ class ProjectionRunner:
     def apply_one(self, event: CognitiveEvent) -> None:
         for projection in self.registry.all():
             if event.kind in projection.handles:
+                if not isinstance(projection, EventProjection):
+                    raise TypeError(
+                        f"projection {projection.name!r} declares event handles "
+                        "but does not implement event application"
+                    )
                 projection.apply(event)

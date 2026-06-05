@@ -70,48 +70,35 @@ Dynamic memory recall is available only through an explicit `memory_recall` tool
 call during the normal provider tool loop. Runtime passes the recall context to
 the tool executor, but it does not decide when recall is needed and does not
 automatically inject recalled beliefs into the prompt. Tool-visible recall
-results remain compact belief handles with id, content, type, scope, status,
-and held_since, without confidence scores, sources, or evidence.
+results remain compact belief handles with id, content, type, scope, lifecycle,
+and held_since, without numeric scoring fields, sources, or evidence.
 
 Memory writes use the separate `memory_propose` update path during a runtime
 turn. The model submits `updates` with an explicit operation
 (`append_distinct`, `reinforce`, `replace`, `merge`, `correct`, or `retract`)
-and a memory type (`preference`, `constraint`, `procedure`, or `factual`).
+and a memory kind (`fact`, `preference`, `constraint`, `procedure`, `value`, or
+`relationship`).
 `target_belief_ids` are mutation targets for existing memories, while
 `reviewed_candidate_ids` records candidates reviewed before an
-`append_distinct` decision. Accepted updates emit `memory_proposed`, then the
-relevant belief lifecycle event, and apply immediately to `belief_view`;
-uncertain updates return candidates or pending confirmation instead of silently
-overwriting active beliefs. Tool results include `next_action`:
-`review_candidates` asks the LLM to review candidates and choose an explicit
-operation, while `ask_user_confirmation` asks it to request user approval before
-a later LLM-directed write.
+`append_distinct` decision. Accepted updates write directly to `atomic_beliefs`;
+pending confirmations are stored as atomic beliefs with
+`lifecycle=pending_confirmation` when the proposed belief is valid. The
+`memory_proposed` event is an audit record, not the canonical belief state.
+Tool results include `next_action`: `review_candidates` asks the LLM to review
+candidates and choose an explicit operation, while `ask_user_confirmation` asks
+it to request user approval before a later confirmed write.
 
-Beliefs are materialized in SQLite and recallable across sessions through a
-deterministic projection over cognition events. Foreground context is stored in
-`context_window_view` as session-scoped perception IDs, anchors, and rebuildable
-window state. Model-facing dynamic lookup goes through `memory_recall`, while
-stable profile context and compact session context are assembled before the
-provider call. Concrete audit findings are materialized into `reflection_view`.
+Beliefs are stored directly in SQLite as `atomic_beliefs` and `summary_beliefs`
+with lookup and FTS indexes. Model-facing dynamic lookup goes through
+`memory_recall`, while stable profile context and compact session context are
+assembled before the provider call. Runtime handover compression remains the
+only prompt-continuity compression mechanism.
 
-Deterministic consolidation is available through a synchronous `run_once`: it
-merges equivalent beliefs, archives expired beliefs, learns minimal procedures,
-compresses foreground context into background summaries, maintains counterpart
-digest beliefs, resolves queued conflicts, learns conservative ValueLens
-sensitivity shifts, expires strategies, and can run the deterministic L3
-self-model worker. Subject lenses persist in SQLite; queued conflicts resolve
-through lens-shaped scoring, ties are kept for human review, and a conservative
-consolidation worker can nudge lens sensitivity from repeated resolved
-tradeoffs.
-
-Temporary strategy overrides are stored in `strategy_view`: L2 rules can emit
-`strategy_changed`, expired strategies are cleared by consolidation, and the
-prompt renderer surfaces implemented strategy reminders to the foreground
-runtime. The Drive Loop stores event-sourced goals in `goal_view` and exposes a
-disabled-by-default synchronous manual loop that can enqueue one eligible active
-goal as a self-signal. The L3 reflector deterministically aggregates long-window
-cognition history into `Subject.self_model` and materializes it in
-`subject_view`.
+Manual consolidation currently retains only direct archival of expired beliefs.
+Deleted deterministic value, procedure, context-window, and self-model
+subsystems are not compatibility-shimmed. The Drive Loop stores event-sourced
+goals in `goal_view` and exposes a disabled-by-default synchronous manual loop
+that can enqueue one eligible active goal as a self-signal.
 
 ## Install
 
@@ -187,26 +174,13 @@ uv run alpha debug prompt "summarize this channel" --session <session-id> --trac
 Inspect cognition renderer outputs:
 
 ```bash
-uv run alpha cognition graph --format mermaid
-uv run alpha cognition diff <tick-id-a> <tick-id-b>
-uv run alpha cognition evidence <belief-id>
 uv run alpha cognition consolidate --now --dry-run
-uv run alpha cognition lens show
-uv run alpha cognition lens set --priority safety,honesty,efficiency
-uv run alpha cognition strategies --active
-uv run alpha cognition strategies --all
-uv run alpha cognition strategy-expire <strategy-id>
-uv run alpha cognition reflections --last 20
-uv run alpha cognition reflections --severity warning
 uv run alpha cognition goals set --description "answer pending question" --priority 5
 uv run alpha cognition goals set --description "answer pending question" --target-outcome "accepted answer"
 uv run alpha cognition goals list --active
 uv run alpha cognition goals satisfy <goal-id> --evidence "accepted"
 uv run alpha cognition goals abandon <goal-id> --reason "obsolete"
 uv run alpha cognition drive --once
-uv run alpha cognition self-model
-uv run alpha cognition self-model history --last 5
-uv run alpha cognition reflect-l3 --once
 ```
 
 Inspect raw LLM request/response traces from CLI runs:
@@ -308,11 +282,6 @@ env_passthrough = []
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300
-context_foreground_max = 8
-context_absorb_batch = 4
-context_summary_chars = 480
-counterpart_digest_min_beliefs = 5
-counterpart_digest_min_new_beliefs = 3
 
 [cognition.drive]
 enabled = false
@@ -394,22 +363,6 @@ Useful environment overrides:
   Defaults to `true`.
 - `ALPHA_COGNITION_CONSOLIDATION_INTERVAL_SECONDS`: Worker schedule interval
   setting; manual `--now` runs force a pass immediately.
-- `ALPHA_COGNITION_CONSOLIDATION_JUDGMENT_REPEAT_WINDOW`: Recent judgment
-  window inspected by repeat-detection workers.
-- `ALPHA_COGNITION_CONSOLIDATION_JUDGMENT_REPEAT_THRESHOLD`: Repetition count
-  needed before judgment promotion.
-- `ALPHA_COGNITION_CONSOLIDATION_PROCEDURE_SUCCESS_THRESHOLD`: Success count
-  needed before procedure learning.
-- `ALPHA_COGNITION_CONSOLIDATION_CONTEXT_FOREGROUND_MAX`: Foreground context
-  count before background compression is eligible.
-- `ALPHA_COGNITION_CONSOLIDATION_CONTEXT_ABSORB_BATCH`: Number of foreground
-  perceptions absorbed per compression worker pass.
-- `ALPHA_COGNITION_CONSOLIDATION_CONTEXT_SUMMARY_CHARS`: Deterministic
-  background summary length.
-- `ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_BELIEFS`: Minimum
-  active beliefs before counterpart digest summarization.
-- `ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_NEW_BELIEFS`: Minimum
-  new beliefs before refreshing a counterpart digest.
 - `ALPHA_COGNITION_DRIVE_ENABLED`: Enables scheduled Drive Loop use when a
   caller wires it in. Defaults to `false`.
 - `ALPHA_COGNITION_DRIVE_INTERVAL_SECONDS`: Global Drive Loop interval setting.
@@ -486,63 +439,44 @@ The current SQLite state baseline is deliberately narrow:
 - `gateway_dedup`: inbound gateway deduplication state.
 - `cognitive_events`: append-only cognition event log.
 - `counterpart_view`: materialized view for counterpart projection queries.
-- `belief_view`: materialized view for active, superseded, and retracted
-  beliefs, with deterministic recall across sessions.
+- `atomic_beliefs`: direct store for current first-order belief entities.
+- `summary_beliefs`: direct store for current profile and summary belief
+  entities.
 - `belief_entity_index` and `belief_about_index`: lookup indexes for belief
   entity/about references.
-- `context_window_view`: materialized view for session-scoped foreground
-  ContextWindow state, including perception IDs and anchors.
-- `context_window_background`: deterministic background summaries for compressed
-  foreground context.
-- `reflection_view`: materialized view for L1 reflection findings.
-- `procedure_view`: minimal learned procedure projection.
-- `strategy_view`: temporary strategy overrides emitted by L2 or manual expiry.
 - `goal_view`: active/satisfied/abandoned goal materialization for the Drive
   Loop.
-- `subject_view`: current Subject materialization, including `SelfModel`.
+- `subject_view`: current Subject identity materialization.
 - `cognition_worker_checkpoint`: consolidation worker progress.
-- `subject_value_lens`: current subject ValueLens priority and sensitivity.
 
 Successful user turns now run through the foreground LLM/tool loop before
-cognition audit records and projections are finalized. BeliefProjection,
-ContextWindowProjection with background compression, ReflectionProjection,
-ProcedureProjection, and renderer-driven prompt assembly are now in place.
-Subject ValueLens persistence, deterministic conflict resolution, queued
-conflict consumption, and temporary strategy overrides are also in place.
-GoalProjection and manual DriveLoop self-signals are in place. SubjectProjection
-now persists the L3 SelfModel from `self_model_updated`. The explicit tool
-execution subsystem is also in place, with `memory_propose` and `memory_recall`
-always registered, `web_search` registered when Tavily credentials are
-configured, and `bash` registered only when `tools.bash.enabled=true`.
-Semantic strategy/lens diff remains pending.
+cognition audit records are finalized. BeliefProjection is the direct entity
+store, CounterpartProjection and GoalProjection remain materialized views, and
+manual DriveLoop self-signals are in place. The explicit tool execution
+subsystem is also in place, with `memory_propose` and `memory_recall` always
+registered, `web_search` registered when Tavily credentials are configured, and
+`bash` registered only when `tools.bash.enabled=true`.
 
 ## Current Limitations
 
 - Consolidation is deterministic v1 only: it runs through manual synchronous
   CLI passes, not a daemon-owned cadence, and it has no LLM summarization
   policy.
-- ValueLens v1 is deterministic: it uses explicit `ValueKind` weights and
-  sensitivity, not semantic moral reasoning or full adaptive learning.
-- Reflector L2 v1 is deterministic: no strategy DSL, no semantic clustering,
-  and no daemon-owned L2 scheduler. It provides scheduler-compatible work units
-  and CLI inspection/expiry.
+- Background memory integration is not implemented yet; removed deterministic
+  cognition workers are not compatibility-shimmed.
 - Drive Loop v1 is synchronous and disabled by default: no daemon-owned drive
   cadence, no autonomous goal generation, and one self-signal per manual pass.
-- Reflector L3 v1 is deterministic: it can run manually or through a manual
-  consolidation pass, but has no LLM self-narration, no direct
-  belief/strategy/lens writes, and no daemon-owned L3 cadence.
-- Semantic strategy/lens diff is still pending.
+- Background profile summarization is not implemented yet.
 - No web UI.
 - No multi-agent system.
 - No real Feishu or WeChat adapter yet.
 
 ## Roadmap
 
-1. Semantic strategy/lens diff.
-2. Local files / notes ingestion.
-3. API server.
-4. Web UI.
-5. Channel integrations.
+1. Local files / notes ingestion.
+2. API server.
+3. Web UI.
+4. Channel integrations.
 
 ## Development
 

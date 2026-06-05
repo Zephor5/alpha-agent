@@ -57,11 +57,6 @@ env_passthrough = []
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300
-context_foreground_max = 8
-context_absorb_batch = 4
-context_summary_chars = 480
-counterpart_digest_min_beliefs = 5
-counterpart_digest_min_new_beliefs = 3
 
 [cognition.drive]
 enabled = false
@@ -214,11 +209,6 @@ class AlphaConfig:
     compatible_api_key: str | None = None
     cognition_consolidation_enabled: bool = True
     cognition_consolidation_interval_seconds: int = 300
-    cognition_consolidation_context_foreground_max: int = 8
-    cognition_consolidation_context_absorb_batch: int = 4
-    cognition_consolidation_context_summary_chars: int = 480
-    cognition_consolidation_counterpart_digest_min_beliefs: int = 5
-    cognition_consolidation_counterpart_digest_min_new_beliefs: int = 3
     cognition_drive_enabled: bool = False
     cognition_drive_interval_seconds: int = 300
     cognition_drive_goal_cooldown_seconds: int = 3600
@@ -432,26 +422,6 @@ def load_config(
             "ALPHA_COGNITION_CONSOLIDATION_INTERVAL_SECONDS",
             _int_value(consolidation.get("interval_seconds"), 300),
         ),
-        cognition_consolidation_context_foreground_max=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_CONTEXT_FOREGROUND_MAX",
-            _int_value(consolidation.get("context_foreground_max"), 8),
-        ),
-        cognition_consolidation_context_absorb_batch=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_CONTEXT_ABSORB_BATCH",
-            _int_value(consolidation.get("context_absorb_batch"), 4),
-        ),
-        cognition_consolidation_context_summary_chars=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_CONTEXT_SUMMARY_CHARS",
-            _int_value(consolidation.get("context_summary_chars"), 480),
-        ),
-        cognition_consolidation_counterpart_digest_min_beliefs=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_BELIEFS",
-            _int_value(consolidation.get("counterpart_digest_min_beliefs"), 5),
-        ),
-        cognition_consolidation_counterpart_digest_min_new_beliefs=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_COUNTERPART_DIGEST_MIN_NEW_BELIEFS",
-            _int_value(consolidation.get("counterpart_digest_min_new_beliefs"), 3),
-        ),
         cognition_drive_enabled=_bool_env(
             "ALPHA_COGNITION_DRIVE_ENABLED",
             _bool_value(drive.get("enabled"), False),
@@ -599,26 +569,9 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
             config.cognition_consolidation_interval_seconds,
         ),
         (
-            "cognition.consolidation.context_foreground_max",
-            config.cognition_consolidation_context_foreground_max,
+            "cognition.drive.interval_seconds",
+            config.cognition_drive_interval_seconds,
         ),
-        (
-            "cognition.consolidation.context_absorb_batch",
-            config.cognition_consolidation_context_absorb_batch,
-        ),
-        (
-            "cognition.consolidation.context_summary_chars",
-            config.cognition_consolidation_context_summary_chars,
-        ),
-        (
-            "cognition.consolidation.counterpart_digest_min_beliefs",
-            config.cognition_consolidation_counterpart_digest_min_beliefs,
-        ),
-        (
-            "cognition.consolidation.counterpart_digest_min_new_beliefs",
-            config.cognition_consolidation_counterpart_digest_min_new_beliefs,
-        ),
-        ("cognition.drive.interval_seconds", config.cognition_drive_interval_seconds),
         (
             "cognition.drive.goal_cooldown_seconds",
             config.cognition_drive_goal_cooldown_seconds,

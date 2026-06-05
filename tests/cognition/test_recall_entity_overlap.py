@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
-from alpha_agent.cognition.models import CognitiveEventKind, CognitiveType, entity_ref
+from alpha_agent.cognition.models import MemoryKind, entity_ref
 from alpha_agent.cognition.projections.belief import (
     BeliefProjection,
     BeliefRecallParams,
     BeliefSearchParams,
 )
 from alpha_agent.state.store import StateStore
-from tests.cognition.helpers import clock_factory, emit, id_factory
 from tests.cognition.test_belief_projection_apply import (
     belief,
     counterpart_a,
@@ -17,13 +15,14 @@ from tests.cognition.test_belief_projection_apply import (
 )
 
 
-def test_recall_with_focus_entities_requires_entity_overlap(tmp_path) -> None:
+def _projection(tmp_path) -> BeliefProjection:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
+    return BeliefProjection(store)
+
+
+def test_recall_with_focus_entities_requires_entity_overlap(tmp_path) -> None:
+    projection = _projection(tmp_path)
     for item in [
         belief("belief:python", "User A prefers Python.", about=[counterpart_a()]),
         belief("belief:rust", "User A prefers Rust.", about=[counterpart_a()], object_="rust"),
@@ -32,17 +31,10 @@ def test_recall_with_focus_entities_requires_entity_overlap(tmp_path) -> None:
             "Python uses indentation.",
             about=[],
             object_="python",
+            memory_kind=MemoryKind.FACT,
         ),
     ]:
-        projection.apply(
-            emit(
-                log,
-                CognitiveEventKind.BELIEF_FORMED,
-                payload={"belief": item.to_record()},
-                event_ids=event_ids,
-                clock=clock,
-            )
-        )
+        projection.upsert_atomic(item)
 
     recalled = projection.recall(
         BeliefRecallParams(
@@ -55,25 +47,12 @@ def test_recall_with_focus_entities_requires_entity_overlap(tmp_path) -> None:
 
 
 def test_recall_candidates_requires_actual_match_signal_not_scope_only(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
+    projection = _projection(tmp_path)
     for item in [
         belief("belief:python", "User A prefers Python.", about=[counterpart_a()]),
         belief("belief:rust", "User A prefers Rust.", about=[counterpart_a()], object_="rust"),
     ]:
-        projection.apply(
-            emit(
-                log,
-                CognitiveEventKind.BELIEF_FORMED,
-                payload={"belief": item.to_record()},
-                event_ids=event_ids,
-                clock=clock,
-            )
-        )
+        projection.upsert_atomic(item)
 
     candidates = projection.recall_candidates(
         BeliefSearchParams(
@@ -89,12 +68,7 @@ def test_recall_candidates_requires_actual_match_signal_not_scope_only(tmp_path)
 def test_recall_candidates_retrieves_natural_language_query_through_terms_fts(
     tmp_path,
 ) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
+    projection = _projection(tmp_path)
     for item in [
         belief(
             "belief:examples",
@@ -113,25 +87,17 @@ def test_recall_candidates_retrieves_natural_language_query_through_terms_fts(
             "Python examples use indentation.",
             about=[counterpart_a()],
             object_="Python examples",
-            cognitive_type=CognitiveType.FACTUAL,
+            memory_kind=MemoryKind.FACT,
         ),
     ]:
-        projection.apply(
-            emit(
-                log,
-                CognitiveEventKind.BELIEF_FORMED,
-                payload={"belief": item.to_record()},
-                event_ids=event_ids,
-                clock=clock,
-            )
-        )
+        projection.upsert_atomic(item)
 
     candidates = projection.recall_candidates(
         BeliefSearchParams(
             query="what examples do I prefer?",
             counterpart=counterpart_a(),
             include_global=False,
-            types=frozenset({CognitiveType.PREFERENCE}),
+            memory_kinds=frozenset({MemoryKind.PREFERENCE}),
         )
     )
 
@@ -141,12 +107,7 @@ def test_recall_candidates_retrieves_natural_language_query_through_terms_fts(
 
 
 def test_recall_candidates_entity_exact_uses_query_and_keyword_probes(tmp_path) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
+    projection = _projection(tmp_path)
     for item in [
         belief(
             "belief:python",
@@ -159,17 +120,10 @@ def test_recall_candidates_entity_exact_uses_query_and_keyword_probes(tmp_path) 
             "User A uses OpenAI API.",
             about=[counterpart_a(), entity_ref("OpenAI API")],
             object_="api preference",
+            memory_kind=MemoryKind.FACT,
         ),
     ]:
-        projection.apply(
-            emit(
-                log,
-                CognitiveEventKind.BELIEF_FORMED,
-                payload={"belief": item.to_record()},
-                event_ids=event_ids,
-                clock=clock,
-            )
-        )
+        projection.upsert_atomic(item)
 
     query_candidates = projection.recall_candidates(
         BeliefSearchParams(
@@ -200,43 +154,23 @@ def test_recall_candidates_entity_exact_uses_query_and_keyword_probes(tmp_path) 
 def test_recall_candidates_merges_entity_object_fts_and_substring_reasons(
     tmp_path,
 ) -> None:
-    store = StateStore(tmp_path / "alpha.db")
-    store.initialize()
-    log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
-    event_ids = id_factory()
-    clock = clock_factory()
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={
-                "belief": belief(
-                    "belief:tech",
-                    "User uses OpenAI API v3.0.1 at src/alpha_agent/runtime/agent.py "
-                    "for C++ examples.",
-                    about=[counterpart_a(), entity_ref("OpenAI API")],
-                    object_="OpenAI API client",
-                ).to_record()
-            },
-            event_ids=event_ids,
-            clock=clock,
+    projection = _projection(tmp_path)
+    projection.upsert_atomic(
+        belief(
+            "belief:tech",
+            "User uses OpenAI API v3.0.1 at src/alpha_agent/runtime/agent.py "
+            "for C++ examples.",
+            about=[counterpart_a(), entity_ref("OpenAI API")],
+            object_="OpenAI API client",
         )
     )
-    projection.apply(
-        emit(
-            log,
-            CognitiveEventKind.BELIEF_FORMED,
-            payload={
-                "belief": belief(
-                    "belief:global-tech",
-                    "OpenAI API v3.0.1 has a migration guide.",
-                    about=[],
-                    object_="OpenAI API",
-                ).to_record()
-            },
-            event_ids=event_ids,
-            clock=clock,
+    projection.upsert_atomic(
+        belief(
+            "belief:global-tech",
+            "OpenAI API v3.0.1 has a migration guide.",
+            about=[],
+            object_="OpenAI API",
+            memory_kind=MemoryKind.FACT,
         )
     )
 

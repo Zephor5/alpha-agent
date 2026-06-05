@@ -35,28 +35,13 @@ from alpha_agent.cognition.loops import (
 from alpha_agent.cognition.models import (
     CognitiveEvent,
     CognitiveEventKind,
-    Situation,
-    SituationId,
-    ValueKind,
 )
-from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.goal import GoalProjection
-from alpha_agent.cognition.projections.reflection import ReflectionProjection, target_to_parts
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
-from alpha_agent.cognition.projections.strategy import StrategyProjection
-from alpha_agent.cognition.projections.subject import SubjectProjection
-from alpha_agent.cognition.reflectors.l3 import ReflectorL3
 from alpha_agent.cognition.render import (
-    CognitionView,
-    DiffRenderer,
-    EvidenceRenderer,
-    GraphSnapshotRenderer,
-    RenderBudget,
     render_counterpart_profile,
     wrap_system_reminder,
 )
-from alpha_agent.cognition.render.build_view import build_view
-from alpha_agent.cognition.value.lens import default_value_lens, load_lens, save_lens
 from alpha_agent.config import (
     AlphaConfig,
     default_config_path,
@@ -111,18 +96,14 @@ gateway_app = typer.Typer(help="Gateway operational commands.")
 config_app = typer.Typer(help="Configuration commands.")
 daemon_app = typer.Typer(help="Daemon runtime commands.")
 cognition_app = typer.Typer(help="Cognition inspection commands.")
-lens_app = typer.Typer(help="Subject value lens commands.")
 goals_app = typer.Typer(help="Drive Loop goal commands.")
-self_model_app = typer.Typer(help="Subject self-model commands.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(debug_app, name="debug")
 app.add_typer(gateway_app, name="gateway")
 app.add_typer(config_app, name="config")
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(cognition_app, name="cognition")
-cognition_app.add_typer(lens_app, name="lens")
 cognition_app.add_typer(goals_app, name="goals")
-cognition_app.add_typer(self_model_app, name="self-model")
 
 DAEMON_START_TIMEOUT_SECONDS = 5.0
 DAEMON_STOP_TIMEOUT_SECONDS = 5.0
@@ -1101,72 +1082,6 @@ def _debug_profile_context_messages(store: StateStore, session_id: str) -> list[
     ]
 
 
-@cognition_app.command("graph")
-def cognition_graph(
-    format: Annotated[
-        str,
-        typer.Option("--format", help="Graph format: mermaid or dot."),
-    ] = "mermaid",
-    subject: Annotated[
-        str | None,
-        typer.Option("--subject", help="Reserved for future multi-subject inspection."),
-    ] = None,
-) -> None:
-    """Render a minimal active-belief cognition graph."""
-
-    del subject
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    projections = default_projection_registry(log)
-    view = build_view(
-        session_id="inspection",
-        situation=Situation(id=SituationId("situation:cognition-graph")),
-        projections=projections,
-    )
-    rendered = GraphSnapshotRenderer(format=format).render(
-        view,
-        RenderBudget(max_tokens=128),
-        beliefs=projections.get_typed(BeliefProjection).list_active(),
-    )
-    console.print(str(rendered.payload), markup=False)
-
-
-@cognition_app.command("diff")
-def cognition_diff(
-    turn_id_a: Annotated[str, typer.Argument(help="Earlier turn id.")],
-    turn_id_b: Annotated[str, typer.Argument(help="Later turn id.")],
-) -> None:
-    """Render event-kind changes between two turns."""
-
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    view = _inspection_view(store)
-    rendered = DiffRenderer(log, turn_id_a=turn_id_a, turn_id_b=turn_id_b).render(
-        view,
-        RenderBudget(max_tokens=256),
-    )
-    console.print(str(rendered.payload), markup=False)
-
-
-@cognition_app.command("evidence")
-def cognition_evidence(
-    belief_id: Annotated[str, typer.Argument(help="Belief id to trace.")],
-) -> None:
-    """Render evidence events for one belief id."""
-
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    view = _inspection_view(store)
-    rendered = EvidenceRenderer(log, belief_id=belief_id).render(
-        view,
-        RenderBudget(max_tokens=256),
-    )
-    console.print(str(rendered.payload), markup=False)
-
-
 @cognition_app.command("consolidate")
 def cognition_consolidate(
     now: Annotated[
@@ -1186,13 +1101,6 @@ def cognition_consolidate(
     consolidation_config = ConsolidationConfig(
         enabled=config.cognition_consolidation_enabled,
         interval_seconds=config.cognition_consolidation_interval_seconds,
-        context_foreground_max=config.cognition_consolidation_context_foreground_max,
-        context_absorb_batch=config.cognition_consolidation_context_absorb_batch,
-        context_summary_chars=config.cognition_consolidation_context_summary_chars,
-        counterpart_digest_min_beliefs=config.cognition_consolidation_counterpart_digest_min_beliefs,
-        counterpart_digest_min_new_beliefs=(
-            config.cognition_consolidation_counterpart_digest_min_new_beliefs
-        ),
         dry_run=dry_run,
     )
     if dry_run:
@@ -1247,16 +1155,6 @@ def _dry_run_store(config: AlphaConfig, tmp_dir: Path) -> StateStore:
     store = StateStore(dry_db)
     store.initialize()
     return store
-
-
-def _inspection_view(store: StateStore) -> CognitionView:
-    log = SQLiteEventLog(store)
-    projections = default_projection_registry(log)
-    return build_view(
-        session_id="inspection",
-        situation=Situation(id=SituationId("situation:cognition-inspection")),
-        projections=projections,
-    )
 
 
 @goals_app.command("list")
@@ -1437,292 +1335,6 @@ def _goal_registry_from_config() -> tuple[GoalProjection, GoalRegistry]:
             active_limit=config.cognition_drive_active_goal_limit,
         ),
     )
-
-
-@self_model_app.callback(invoke_without_command=True)
-def cognition_self_model(
-    ctx: typer.Context,
-    subject: Annotated[
-        str | None,
-        typer.Option("--subject", help="Reserved for the single agent subject."),
-    ] = None,
-) -> None:
-    """Show the current subject self-model."""
-
-    if ctx.invoked_subcommand is not None:
-        return
-    del subject
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    subject_value = SubjectProjection(log, store).current()
-    record = subject_value.self_model.to_record()
-    table = Table(title="Subject SelfModel")
-    table.add_column("Field")
-    table.add_column("Value")
-    for key in sorted(record):
-        value = record[key]
-        table.add_row(key, _compact_record(value))
-    console.print(table)
-    for key in sorted(record):
-        typer.echo(f"{key}={_compact_record(record[key])}")
-
-
-@self_model_app.command("history")
-def cognition_self_model_history(
-    subject: Annotated[
-        str | None,
-        typer.Option("--subject", help="Reserved for the single agent subject."),
-    ] = None,
-    last: Annotated[int, typer.Option("--last", min=1, help="Number of updates.")] = 10,
-) -> None:
-    """List recent self-model updates."""
-
-    del subject
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    events = list(log.iter(kinds=[CognitiveEventKind.SELF_MODEL_UPDATED]))[-last:]
-    table = Table(title="SelfModel History")
-    table.add_column("Timestamp")
-    table.add_column("Event")
-    table.add_column("Changed Fields")
-    for event in events:
-        diff = event.payload.get("diff")
-        changed = ",".join(sorted(diff)) if isinstance(diff, dict) else ""
-        table.add_row(str(event.timestamp), str(event.id), changed)
-    console.print(table)
-    for event in events:
-        diff = event.payload.get("diff")
-        changed = ",".join(sorted(diff)) if isinstance(diff, dict) else ""
-        typer.echo(f"self_model_updated event_id={event.id} changed={changed}")
-    if not events:
-        typer.echo("self_model_history=0")
-
-
-@cognition_app.command("reflect-l3")
-def cognition_reflect_l3(
-    once: Annotated[
-        bool,
-        typer.Option("--once", help="Run one manual Reflector L3 pass."),
-    ] = False,
-    subject: Annotated[
-        str | None,
-        typer.Option("--subject", help="Reserved for the single agent subject."),
-    ] = None,
-) -> None:
-    """Run the Phase 11 L3 self-model reflector once."""
-
-    del subject
-    if not once:
-        raise typer.BadParameter("Only --once is supported by the v1 Reflector L3 CLI.")
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    projections = default_projection_registry(log)
-    report = ReflectorL3().run_once(log=log, projections=projections)
-    typer.echo(
-        "reflect_l3 "
-        f"emitted={report.emitted} "
-        f"status={report.new_checkpoint.last_status} "
-        f"notes={','.join(report.notes)}"
-    )
-
-
-def _compact_record(value: object) -> str:
-    if isinstance(value, dict):
-        if not value:
-            return "{}"
-        return ",".join(f"{key}:{value[key]}" for key in sorted(value))
-    if isinstance(value, list):
-        if not value:
-            return "[]"
-        return ",".join(str(item) for item in value)
-    return str(value)
-
-
-@lens_app.command("show")
-def cognition_lens_show(
-    subject: Annotated[
-        str | None,
-        typer.Argument(help="Subject id. Defaults to the single agent subject."),
-    ] = None,
-) -> None:
-    """Show the current subject value lens."""
-
-    config = load_config()
-    store = _store(config)
-    lens = load_lens(store, subject or "agent:self")
-    table = Table(title="Subject Value Lens")
-    table.add_column("Field")
-    table.add_column("Value")
-    table.add_row("Subject", subject or "agent:self")
-    table.add_row("Priority", ", ".join(value.value for value in lens.priorities))
-    table.add_row(
-        "Sensitivity",
-        ", ".join(
-            f"{value.value}={lens.sensitivity.get(value, 1.0):.3f}"
-            for value in lens.priorities
-        ),
-    )
-    console.print(table)
-    typer.echo("priority=" + ",".join(value.value for value in lens.priorities))
-
-
-@lens_app.command("set")
-def cognition_lens_set(
-    subject: Annotated[
-        str | None,
-        typer.Argument(help="Subject id. Defaults to the single agent subject."),
-    ] = None,
-    priority: Annotated[
-        str,
-        typer.Option(
-            "--priority",
-            help="Comma-separated ValueKind priority, e.g. safety,honesty,efficiency.",
-        ),
-    ] = "",
-) -> None:
-    """Set the subject value lens priority order."""
-
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    emitter = EventEmitter(log)
-    current = load_lens(store, subject or "agent:self")
-    priorities = _parse_lens_priority(priority) if priority else default_value_lens().priorities
-    updated = current.__class__(
-        priorities=priorities,
-        weights=current.weights,
-        sensitivity=current.sensitivity,
-    )
-    event = save_lens(
-        store,
-        emitter,
-        updated,
-        subject_id=subject or "agent:self",
-        trigger="cli lens set",
-        before=current,
-    )
-    typer.echo(f"value_lens_shifted event_id={event.id}")
-    saved = load_lens(store, subject or "agent:self")
-    typer.echo("priority=" + ",".join(value.value for value in saved.priorities))
-
-
-def _parse_lens_priority(raw: str) -> list[ValueKind]:
-    values = [item.strip() for item in raw.split(",") if item.strip()]
-    if not values:
-        raise typer.BadParameter("--priority must contain at least one ValueKind")
-    try:
-        return [ValueKind(value) for value in values]
-    except ValueError as exc:
-        allowed = ", ".join(value.value for value in ValueKind)
-        raise typer.BadParameter(f"unknown ValueKind; allowed: {allowed}") from exc
-
-
-@cognition_app.command("strategies")
-def cognition_strategies(
-    active: Annotated[
-        bool,
-        typer.Option("--active", help="Show active strategies."),
-    ] = True,
-    all_: Annotated[
-        bool,
-        typer.Option("--all", help="Show all strategies."),
-    ] = False,
-) -> None:
-    """List strategy overrides."""
-
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    projection = StrategyProjection(store, event_log=log, auto_rebuild=True)
-    rows = projection.list_all() if all_ else projection.active()
-    table = Table(title="Cognition Strategies")
-    table.add_column("ID")
-    table.add_column("Name")
-    table.add_column("Domains")
-    table.add_column("Counterpart")
-    table.add_column("Valid Until")
-    for strategy in rows:
-        table.add_row(
-            str(strategy.id),
-            strategy.name,
-            ",".join(strategy.target_domains),
-            strategy.for_counterpart.id if strategy.for_counterpart else "global",
-            str(strategy.valid_until),
-        )
-    console.print(table)
-    for strategy in rows:
-        typer.echo(
-            f"strategy={strategy.id} name={strategy.name} "
-            f"domains={','.join(strategy.target_domains)}"
-        )
-    if not rows:
-        typer.echo("strategies=0 active=" + str(active and not all_).lower())
-
-
-@cognition_app.command("strategy-expire")
-def cognition_strategy_expire(
-    strategy_id: Annotated[str, typer.Argument(help="Strategy id to expire.")],
-) -> None:
-    """Manually expire a strategy override."""
-
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    projection = StrategyProjection(store, event_log=log, auto_rebuild=True)
-    emitter = EventEmitter(log)
-    event = emitter.emit(
-        CognitiveEventKind.STRATEGY_EXPIRED,
-        payload={"strategy_id": strategy_id, "reason": "manual"},
-    )
-    projection.apply(event)
-    typer.echo(f"strategy_expired event_id={event.id} strategy={strategy_id}")
-
-
-@cognition_app.command("reflections")
-def cognition_reflections(
-    severity: Annotated[
-        str | None,
-        typer.Option("--severity", help="Filter by severity, e.g. info, warning, blocker."),
-    ] = None,
-    last: Annotated[
-        int,
-        typer.Option("--last", min=1, help="Maximum number of recent reflections to show."),
-    ] = 20,
-) -> None:
-    """List recent L1 reflection findings."""
-
-    config = load_config()
-    store = _store(config)
-    log = SQLiteEventLog(store)
-    projection = ReflectionProjection(store, event_log=log, auto_rebuild=True)
-    rows = projection.list_recent(last=last, severity=severity)
-    table = Table(title="Cognition Reflections")
-    table.add_column("Created")
-    table.add_column("Severity")
-    table.add_column("Kind")
-    table.add_column("Target")
-    table.add_column("Finding")
-    for item in rows:
-        target_kind, target_id = target_to_parts(item.target)
-        table.add_row(
-            str(item.created_at),
-            str(item.severity),
-            str(item.kind),
-            f"{target_kind}:{target_id}",
-            str(item.finding),
-        )
-    console.print(table)
-    for item in rows:
-        target_kind, target_id = target_to_parts(item.target)
-        typer.echo(
-            f"{item.created_at} severity={item.severity} kind={item.kind} "
-            f"target={target_kind}:{target_id} finding={item.finding}"
-        )
-    if not rows:
-        console.print("(none)", markup=False)
 
 
 def main() -> None:
