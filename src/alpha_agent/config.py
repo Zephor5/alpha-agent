@@ -54,6 +54,15 @@ max_timeout_seconds = 600
 max_output_chars = 30000
 env_passthrough = []
 
+[tools.files]
+enabled = true
+allowed_roots = ["."]
+max_read_chars = 20000
+max_file_bytes = 1000000
+max_search_matches = 100
+max_list_entries = 500
+max_output_chars = 30000
+
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300
@@ -130,6 +139,13 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "tools.bash.max_timeout_seconds": int,
     "tools.bash.max_output_chars": int,
     "tools.bash.env_passthrough": list,
+    "tools.files.enabled": bool,
+    "tools.files.allowed_roots": list,
+    "tools.files.max_read_chars": int,
+    "tools.files.max_file_bytes": int,
+    "tools.files.max_search_matches": int,
+    "tools.files.max_list_entries": int,
+    "tools.files.max_output_chars": int,
     "cognition.background.enabled": bool,
     "cognition.background.startup_delay_seconds": int,
     "cognition.background.interval_seconds": int,
@@ -198,6 +214,11 @@ POSITIVE_INT_CONFIG_KEYS = {
     "tools.bash.default_timeout_seconds",
     "tools.bash.max_timeout_seconds",
     "tools.bash.max_output_chars",
+    "tools.files.max_read_chars",
+    "tools.files.max_file_bytes",
+    "tools.files.max_search_matches",
+    "tools.files.max_list_entries",
+    "tools.files.max_output_chars",
 }
 
 NON_NEGATIVE_INT_CONFIG_KEYS = {
@@ -248,6 +269,19 @@ class BashToolConfig:
     max_timeout_seconds: int = 600
     max_output_chars: int = 30000
     env_passthrough: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class FileToolConfig:
+    """Configuration for local read-only file tools."""
+
+    enabled: bool = True
+    allowed_roots: tuple[Path, ...] = (Path("."),)
+    max_read_chars: int = 20000
+    max_file_bytes: int = 1000000
+    max_search_matches: int = 100
+    max_list_entries: int = 500
+    max_output_chars: int = 30000
 
 
 @dataclass(frozen=True)
@@ -323,6 +357,7 @@ class AlphaConfig:
     llm_debug_logging: bool = False
     llm_context: LLMContextConfig = field(default_factory=LLMContextConfig)
     bash_tool: BashToolConfig = field(default_factory=BashToolConfig)
+    file_tool: FileToolConfig = field(default_factory=FileToolConfig)
     llm_provider_max_context_tokens: dict[str, int] = field(
         default_factory=lambda: dict(DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS)
     )
@@ -430,6 +465,8 @@ def load_config(
     tools = _section(config_data, "tools")
     bash_tool = tools.get("bash")
     bash_tool = bash_tool if isinstance(bash_tool, dict) else {}
+    file_tool = tools.get("files")
+    file_tool = file_tool if isinstance(file_tool, dict) else {}
     cognition = _section(config_data, "cognition")
     consolidation = cognition.get("consolidation")
     consolidation = consolidation if isinstance(consolidation, dict) else {}
@@ -527,6 +564,7 @@ def load_config(
             ),
         ),
         bash_tool=_bash_tool_config(bash_tool),
+        file_tool=_file_tool_config(file_tool),
         llm_provider_max_context_tokens=_provider_max_context_tokens(llm_providers),
         compatible_base_url=_env_or_config(
             "ALPHA_COMPATIBLE_BASE_URL",
@@ -637,7 +675,11 @@ def _validate_config_value(key: str, value: Any) -> Any:
         raise ValueError(f"{key} must be greater than 0")
     if key in NON_NEGATIVE_INT_CONFIG_KEYS and isinstance(value, int) and value < 0:
         raise ValueError(f"{key} must be greater than or equal to 0")
-    if key in {"tools.bash.allowed_workdirs", "tools.bash.env_passthrough"}:
+    if key in {
+        "tools.bash.allowed_workdirs",
+        "tools.bash.env_passthrough",
+        "tools.files.allowed_roots",
+    }:
         return _validate_string_list_config_value(key, value)
     if key in {"tools.bash.default_workdir"}:
         text = str(value)
@@ -670,6 +712,12 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         "tools.bash.default_timeout_seconds": config.bash_tool.default_timeout_seconds,
         "tools.bash.max_timeout_seconds": config.bash_tool.max_timeout_seconds,
         "tools.bash.max_output_chars": config.bash_tool.max_output_chars,
+        "tools.files.enabled": config.file_tool.enabled,
+        "tools.files.max_read_chars": config.file_tool.max_read_chars,
+        "tools.files.max_file_bytes": config.file_tool.max_file_bytes,
+        "tools.files.max_search_matches": config.file_tool.max_search_matches,
+        "tools.files.max_list_entries": config.file_tool.max_list_entries,
+        "tools.files.max_output_chars": config.file_tool.max_output_chars,
         "cognition.background.enabled": config.cognition_background.enabled,
         "cognition.background.startup_delay_seconds": (
             config.cognition_background.startup_delay_seconds
@@ -738,6 +786,8 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         config.bash_tool.allowed_workdirs,
     ):
         raise ValueError("tools.bash.default_workdir must be within tools.bash.allowed_workdirs")
+    if not config.file_tool.allowed_roots:
+        raise ValueError("tools.files.allowed_roots must not be empty")
     positive_values = (
         (
             "cognition.consolidation.interval_seconds",
@@ -811,6 +861,11 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         ("tools.bash.default_timeout_seconds", config.bash_tool.default_timeout_seconds),
         ("tools.bash.max_timeout_seconds", config.bash_tool.max_timeout_seconds),
         ("tools.bash.max_output_chars", config.bash_tool.max_output_chars),
+        ("tools.files.max_read_chars", config.file_tool.max_read_chars),
+        ("tools.files.max_file_bytes", config.file_tool.max_file_bytes),
+        ("tools.files.max_search_matches", config.file_tool.max_search_matches),
+        ("tools.files.max_list_entries", config.file_tool.max_list_entries),
+        ("tools.files.max_output_chars", config.file_tool.max_output_chars),
     )
     for key, value in positive_values:
         if value <= 0:
@@ -826,29 +881,49 @@ def _validate_config_data(config_data: dict[str, Any]) -> None:
     tools = _section(config_data, "tools")
     bash = tools.get("bash")
     bash = bash if isinstance(bash, dict) else {}
-    if not bash:
-        return
-    default_timeout = _int_value(bash.get("default_timeout_seconds"), 120)
-    max_timeout = _int_value(bash.get("max_timeout_seconds"), 600)
-    if default_timeout <= 0:
-        raise ValueError("tools.bash.default_timeout_seconds must be greater than 0")
-    if max_timeout <= 0:
-        raise ValueError("tools.bash.max_timeout_seconds must be greater than 0")
-    if default_timeout > max_timeout:
-        raise ValueError(
-            "tools.bash.default_timeout_seconds must be at most "
-            "tools.bash.max_timeout_seconds"
+    if bash:
+        default_timeout = _int_value(bash.get("default_timeout_seconds"), 120)
+        max_timeout = _int_value(bash.get("max_timeout_seconds"), 600)
+        if default_timeout <= 0:
+            raise ValueError("tools.bash.default_timeout_seconds must be greater than 0")
+        if max_timeout <= 0:
+            raise ValueError("tools.bash.max_timeout_seconds must be greater than 0")
+        if default_timeout > max_timeout:
+            raise ValueError(
+                "tools.bash.default_timeout_seconds must be at most "
+                "tools.bash.max_timeout_seconds"
+            )
+        max_output_chars = _int_value(bash.get("max_output_chars"), 30000)
+        if max_output_chars <= 0:
+            raise ValueError("tools.bash.max_output_chars must be greater than 0")
+        allowed_workdirs = _list_value(bash.get("allowed_workdirs"), (".",))
+        if not allowed_workdirs:
+            raise ValueError("tools.bash.allowed_workdirs must not be empty")
+        default_workdir = _path_setting(
+            _string_from_mapping(bash, "default_workdir", "."),
+            "tools.bash.default_workdir",
         )
-    max_output_chars = _int_value(bash.get("max_output_chars"), 30000)
-    if max_output_chars <= 0:
-        raise ValueError("tools.bash.max_output_chars must be greater than 0")
-    allowed_workdirs = _list_value(bash.get("allowed_workdirs"), (".",))
-    if not allowed_workdirs:
-        raise ValueError("tools.bash.allowed_workdirs must not be empty")
-    default_workdir = _path_setting(_string_from_mapping(bash, "default_workdir", "."))
-    allowed_paths = _path_tuple(allowed_workdirs)
-    if not _path_is_inside_allowed(default_workdir, allowed_paths):
-        raise ValueError("tools.bash.default_workdir must be within tools.bash.allowed_workdirs")
+        allowed_paths = _path_tuple(allowed_workdirs, "tools.bash.allowed_workdirs")
+        if not _path_is_inside_allowed(default_workdir, allowed_paths):
+            raise ValueError(
+                "tools.bash.default_workdir must be within tools.bash.allowed_workdirs"
+            )
+    files = tools.get("files")
+    files = files if isinstance(files, dict) else {}
+    if files:
+        allowed_roots = _list_value(files.get("allowed_roots"), (".",))
+        if not allowed_roots:
+            raise ValueError("tools.files.allowed_roots must not be empty")
+        _path_tuple(allowed_roots, "tools.files.allowed_roots")
+        for key, default in (
+            ("max_read_chars", 20000),
+            ("max_file_bytes", 1000000),
+            ("max_search_matches", 100),
+            ("max_list_entries", 500),
+            ("max_output_chars", 30000),
+        ):
+            if _int_value(files.get(key), default) <= 0:
+                raise ValueError(f"tools.files.{key} must be greater than 0")
 
 
 def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
@@ -860,6 +935,7 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         "llm.providers.deepseek",
         "compatible",
         "tools.bash",
+        "tools.files",
         "cognition.consolidation",
         "cognition.background",
         "cognition.background.intake",
@@ -1039,13 +1115,15 @@ def _mapping_section(mapping: dict[str, Any], name: str) -> dict[str, Any]:
 def _bash_tool_config(section: dict[str, Any]) -> BashToolConfig:
     default_workdir = _path_setting(
         os.getenv("ALPHA_BASH_TOOL_DEFAULT_WORKDIR")
-        or _string_from_mapping(section, "default_workdir", ".")
+        or _string_from_mapping(section, "default_workdir", "."),
+        "tools.bash.default_workdir",
     )
     allowed_workdirs = _path_tuple(
         _list_env(
             "ALPHA_BASH_TOOL_ALLOWED_WORKDIRS",
             _list_value(section.get("allowed_workdirs"), (".",)),
-        )
+        ),
+        "tools.bash.allowed_workdirs",
     )
     return BashToolConfig(
         enabled=_bool_env("ALPHA_BASH_TOOL_ENABLED", _bool_value(section.get("enabled"), False)),
@@ -1068,6 +1146,40 @@ def _bash_tool_config(section: dict[str, Any]) -> BashToolConfig:
                 "ALPHA_BASH_TOOL_ENV_PASSTHROUGH",
                 _list_value(section.get("env_passthrough"), ()),
             )
+        ),
+    )
+
+
+def _file_tool_config(section: dict[str, Any]) -> FileToolConfig:
+    allowed_roots = _path_tuple(
+        _list_env(
+            "ALPHA_FILE_TOOL_ALLOWED_ROOTS",
+            _list_value(section.get("allowed_roots"), (".",)),
+        ),
+        "tools.files.allowed_roots",
+    )
+    return FileToolConfig(
+        enabled=_bool_env("ALPHA_FILE_TOOL_ENABLED", _bool_value(section.get("enabled"), True)),
+        allowed_roots=allowed_roots,
+        max_read_chars=_int_env(
+            "ALPHA_FILE_TOOL_MAX_READ_CHARS",
+            _int_value(section.get("max_read_chars"), 20000),
+        ),
+        max_file_bytes=_int_env(
+            "ALPHA_FILE_TOOL_MAX_FILE_BYTES",
+            _int_value(section.get("max_file_bytes"), 1000000),
+        ),
+        max_search_matches=_int_env(
+            "ALPHA_FILE_TOOL_MAX_SEARCH_MATCHES",
+            _int_value(section.get("max_search_matches"), 100),
+        ),
+        max_list_entries=_int_env(
+            "ALPHA_FILE_TOOL_MAX_LIST_ENTRIES",
+            _int_value(section.get("max_list_entries"), 500),
+        ),
+        max_output_chars=_int_env(
+            "ALPHA_FILE_TOOL_MAX_OUTPUT_CHARS",
+            _int_value(section.get("max_output_chars"), 30000),
         ),
     )
 
@@ -1133,18 +1245,18 @@ def _string_from_mapping(mapping: dict[str, Any], key: str, default: str) -> str
     return text
 
 
-def _path_setting(value: str) -> Path:
+def _path_setting(value: str, label: str) -> Path:
     if "\x00" in value:
-        raise ValueError("tools.bash.default_workdir must not contain NUL characters")
+        raise ValueError(f"{label} must not contain NUL characters")
     return Path(value).expanduser().resolve()
 
 
-def _path_tuple(values: tuple[str, ...]) -> tuple[Path, ...]:
+def _path_tuple(values: tuple[str, ...], label: str) -> tuple[Path, ...]:
     resolved: list[Path] = []
     seen: set[Path] = set()
     for value in values:
         if "\x00" in value:
-            raise ValueError("tools.bash.allowed_workdirs must not contain NUL characters")
+            raise ValueError(f"{label} must not contain NUL characters")
         path = Path(value).expanduser().resolve()
         if path not in seen:
             resolved.append(path)

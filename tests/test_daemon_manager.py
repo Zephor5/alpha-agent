@@ -112,6 +112,9 @@ def test_agent_factory_registers_configured_default_tools(tmp_path: Path) -> Non
     assert agent.tool_registry.names() == [
         "memory_propose",
         "memory_recall",
+        "file_list",
+        "file_read",
+        "file_search",
         "bash",
         "web_search",
     ]

@@ -101,8 +101,8 @@ Run `uv run alpha --help` (or `--help` on any subcommand) for the full list.
 
 ## Built-in tools
 
-Memory recall and proposal are always available to the model. Two more tools are
-opt-in:
+Memory recall, memory proposal, and local file inspection are available to the
+model by default. Other tools are opt-in:
 
 - **Web search** — enabled automatically once a Tavily key is set:
 
@@ -122,6 +122,20 @@ opt-in:
   The tool runs with a cleaned environment, timeouts, dangerous-command
   blocking, and output truncation — but it is **not a security sandbox**. Don't
   expose it to untrusted gateway users without a stronger approval layer.
+
+- **Local file tools** — enabled by default for the current working tree. Configure
+  the allowed roots, or disable them if you do not want the model to inspect local
+  files:
+
+  ```bash
+  uv run alpha config set tools.files.allowed_roots .
+  uv run alpha config set tools.files.enabled false
+  uv run alpha daemon restart
+  ```
+
+  `file_list`, `file_read`, and `file_search` are read-only, reject paths outside
+  `tools.files.allowed_roots`, skip common large internal directories, reject
+  binary content, and apply configured output limits.
 
 Each registered tool declares one `ToolSpec`: provider-facing name,
 description, parameters, and strict mode plus internal governance fields such as

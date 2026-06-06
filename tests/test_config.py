@@ -52,6 +52,15 @@ max_timeout_seconds = 90
 max_output_chars = 12000
 env_passthrough = ["ALPHA_VISIBLE_ENV"]
 
+[tools.files]
+enabled = true
+allowed_roots = [".", "~/custom-alpha/files"]
+max_read_chars = 111
+max_file_bytes = 222
+max_search_matches = 3
+max_list_entries = 4
+max_output_chars = 555
+
 [cognition.background]
 enabled = false
 startup_delay_seconds = 2
@@ -119,6 +128,16 @@ api_key = "tvly-file-key"
     assert config.bash_tool.max_timeout_seconds == 90
     assert config.bash_tool.max_output_chars == 12000
     assert config.bash_tool.env_passthrough == ("ALPHA_VISIBLE_ENV",)
+    assert config.file_tool.enabled is True
+    assert config.file_tool.allowed_roots == (
+        Path(".").resolve(),
+        Path("~/custom-alpha/files").expanduser().resolve(),
+    )
+    assert config.file_tool.max_read_chars == 111
+    assert config.file_tool.max_file_bytes == 222
+    assert config.file_tool.max_search_matches == 3
+    assert config.file_tool.max_list_entries == 4
+    assert config.file_tool.max_output_chars == 555
     assert config.deepseek_api_key == "deepseek-key"
     assert config.llm_model == "deepseek-v4-pro"
     assert config.compatible_base_url == "https://compatible.example/v1"
@@ -200,6 +219,13 @@ allowed_workdirs = ["."]
     monkeypatch.setenv("ALPHA_BASH_TOOL_MAX_TIMEOUT_SECONDS", "120")
     monkeypatch.setenv("ALPHA_BASH_TOOL_MAX_OUTPUT_CHARS", "4096")
     monkeypatch.setenv("ALPHA_BASH_TOOL_ENV_PASSTHROUGH", "ALPHA_VISIBLE_ENV,CI")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_ENABLED", "true")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_ALLOWED_ROOTS", ".,~/alpha-files")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_READ_CHARS", "123")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_FILE_BYTES", "456")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_SEARCH_MATCHES", "7")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_LIST_ENTRIES", "8")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_OUTPUT_CHARS", "900")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_ENABLED", "false")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_STARTUP_DELAY_SECONDS", "1")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_INTERVAL_SECONDS", "2")
@@ -235,6 +261,16 @@ allowed_workdirs = ["."]
     assert config.bash_tool.max_timeout_seconds == 120
     assert config.bash_tool.max_output_chars == 4096
     assert config.bash_tool.env_passthrough == ("ALPHA_VISIBLE_ENV", "CI")
+    assert config.file_tool.enabled is True
+    assert config.file_tool.allowed_roots == (
+        Path(".").resolve(),
+        Path("~/alpha-files").expanduser().resolve(),
+    )
+    assert config.file_tool.max_read_chars == 123
+    assert config.file_tool.max_file_bytes == 456
+    assert config.file_tool.max_search_matches == 7
+    assert config.file_tool.max_list_entries == 8
+    assert config.file_tool.max_output_chars == 900
     assert config.cognition_background.enabled is False
     assert config.cognition_background.startup_delay_seconds == 1
     assert config.cognition_background.interval_seconds == 2
@@ -333,12 +369,18 @@ def test_config_cli_set_and_get(
         app,
         ["config", "set", "tools.bash.allowed_workdirs", ".,~/alpha-work"],
     )
+    set_files_enabled = runner.invoke(app, ["config", "set", "tools.files.enabled", "true"])
+    set_files_roots = runner.invoke(
+        app,
+        ["config", "set", "tools.files.allowed_roots", ".,~/alpha-files"],
+    )
     set_provider_limit = runner.invoke(
         app,
         ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
     )
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
     get_bash_enabled = runner.invoke(app, ["config", "get", "tools.bash.enabled"])
+    get_files_enabled = runner.invoke(app, ["config", "get", "tools.files.enabled"])
 
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
@@ -346,11 +388,15 @@ def test_config_cli_set_and_get(
     assert set_tavily.exit_code == 0
     assert set_bash_enabled.exit_code == 0
     assert set_bash_workdirs.exit_code == 0
+    assert set_files_enabled.exit_code == 0
+    assert set_files_roots.exit_code == 0
     assert set_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
     assert get_bash_enabled.exit_code == 0
+    assert get_files_enabled.exit_code == 0
     assert "codex" in get_provider.output
     assert "true" in get_bash_enabled.output
+    assert "true" in get_files_enabled.output
     config = load_config(env_file=None, config_file=config_path)
     assert config.llm_provider == "codex"
     assert config.llm_debug_logging is True
@@ -361,6 +407,11 @@ def test_config_cli_set_and_get(
     assert config.bash_tool.allowed_workdirs == (
         Path(".").resolve(),
         Path("~/alpha-work").expanduser().resolve(),
+    )
+    assert config.file_tool.enabled is True
+    assert config.file_tool.allowed_roots == (
+        Path(".").resolve(),
+        Path("~/alpha-files").expanduser().resolve(),
     )
 
 

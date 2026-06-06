@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from alpha_agent.config import AlphaConfig
 from alpha_agent.tools.bash import BashTool
+from alpha_agent.tools.files import FileListTool, FileReadTool, FileSearchTool
 from alpha_agent.tools.memory_propose import MemoryProposeTool
 from alpha_agent.tools.memory_recall import MemoryRecallTool
 from alpha_agent.tools.registry import ToolRegistry
@@ -18,6 +19,10 @@ def build_tool_registry(config: AlphaConfig | None = None) -> ToolRegistry:
     registry.register(MemoryRecallTool())
     if config is None:
         return registry
+    if config.file_tool.enabled:
+        registry.register(FileListTool(config=config.file_tool))
+        registry.register(FileReadTool(config=config.file_tool))
+        registry.register(FileSearchTool(config=config.file_tool))
     if config.bash_tool.enabled:
         registry.register(BashTool(config=config.bash_tool, secret_values=_config_secrets(config)))
     if config.tavily_api_key:
