@@ -47,7 +47,11 @@ from alpha_agent.llm.base import (
 )
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.runtime.agent import AlphaAgent, ContextWindowExceededError
-from alpha_agent.runtime.context_handover import DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION
+from alpha_agent.runtime.context_handover import (
+    DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
+    HandoverExtractionJob,
+    handover_prompt_prefix_hash,
+)
 from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import Tool, ToolExecutionContext, ToolResult
@@ -843,6 +847,54 @@ def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path)
         DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in message.raw_content
         for message in persisted
     )
+
+
+def test_pre_user_compression_submits_direct_compact_extraction_job(tmp_path) -> None:
+    store = _store(tmp_path)
+    old_user = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="old source one two three four",
+    )
+    old_assistant = store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="old answer five six seven eight",
+    )
+    submitted: list[
+        tuple[HandoverExtractionJob, Sequence[LLMToolDefinitionInput] | None]
+    ] = []
+
+    def submit(
+        job: HandoverExtractionJob,
+        tools: Sequence[LLMToolDefinitionInput] | None,
+    ) -> None:
+        submitted.append((job, tools))
+
+    provider = _QueuedRecordingProvider(["pre-user handover", "final answer"])
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        llm_context_config=_compression_context(),
+        max_context_tokens=340,
+        compact_extraction_submitter=submit,
+    )
+
+    result = agent.respond("pending user must stay out of compression", session_id="s1")
+
+    assert result.response == "final answer"
+    assert len(submitted) == 1
+    job, tools = submitted[0]
+    assert tools is not None
+    assert job.session_id == "s1"
+    assert job.compressed_message_id == store.list_session_messages("s1")[2].id
+    assert handover_prompt_prefix_hash(job.prompt_prefix_messages) == job.prompt_prefix_hash
+    assert [item["source_id"] for item in job.covered_source_message_refs] == [
+        old_user.id,
+        old_assistant.id,
+    ]
 
 
 def test_failed_pre_user_compression_does_not_persist_pending_user(tmp_path) -> None:

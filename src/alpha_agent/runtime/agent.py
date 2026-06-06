@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import timedelta
@@ -57,7 +57,11 @@ from alpha_agent.llm.base import (
     LLMToolDefinitionInput,
 )
 from alpha_agent.runtime.context_budget import ContextBudgetEstimate, estimate_context_budget
-from alpha_agent.runtime.context_handover import compress_session_context
+from alpha_agent.runtime.context_handover import (
+    HandoverCompressionResult,
+    HandoverExtractionJob,
+    compress_session_context,
+)
 from alpha_agent.runtime.counterpart_router import CounterpartRouter
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.runtime.prompt_builder import (
@@ -133,6 +137,12 @@ class ToolProtocolError(RuntimeError):
 
 class ContextWindowExceededError(RuntimeError):
     """Raised when a pending user message cannot fit in the configured context."""
+
+
+CompactExtractionSubmitter = Callable[
+    [HandoverExtractionJob, Sequence[LLMToolDefinitionInput] | None],
+    object,
+]
 
 
 _SESSION_TURN_LOCKS: dict[str, RLock] = {}
@@ -247,6 +257,7 @@ class AlphaAgent:
         max_context_tokens: int | None = None,
         event_log: EventLog | None = None,
         coordinator: LoopCoordinator | None = None,
+        compact_extraction_submitter: CompactExtractionSubmitter | None = None,
     ):
         self.store = store
         self.llm_provider = llm_provider
@@ -285,6 +296,7 @@ class AlphaAgent:
             counterpart_projection=self.counterpart_projection,
         )
         self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
+        self.compact_extraction_submitter = compact_extraction_submitter
         self._canceled_sessions: set[str] = set()
 
     def cancel(self, session_id: str) -> None:
@@ -544,6 +556,12 @@ class AlphaAgent:
             )
             debug["pre_user_compressed_message_id"] = result.message.id
             debug["pre_user_compression_point_ordinal"] = result.compression_point_ordinal
+            self._submit_compact_extraction(
+                result,
+                tools=model_tools,
+                debug=debug,
+                debug_prefix="pre_user",
+            )
             projected_messages = self._source_prompt_messages(
                 session_id=session_id,
                 extra_source_messages=[pending_message],
@@ -606,11 +624,50 @@ class AlphaAgent:
             )
             debug["tool_loop_compressed_message_id"] = result.message.id
             debug["tool_loop_compression_point_ordinal"] = result.compression_point_ordinal
+            self._submit_compact_extraction(
+                result,
+                tools=model_tools,
+                debug=debug,
+                debug_prefix="tool_loop",
+            )
             llm_messages = self._rebuild_runtime_llm_messages(
                 session_id=session_id,
                 prompt_frame=prompt_frame,
             )
         return llm_messages
+
+    def _submit_compact_extraction(
+        self,
+        result: HandoverCompressionResult,
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None,
+        debug: dict[str, Any],
+        debug_prefix: str,
+    ) -> None:
+        submitter = self.compact_extraction_submitter
+        if submitter is None:
+            return
+        try:
+            submitted = submitter(result.extraction_job, tuple(tools or ()))
+            debug[f"{debug_prefix}_compact_extraction_submitted"] = (
+                submitted if isinstance(submitted, bool) else True
+            )
+        except Exception as exc:
+            debug[f"{debug_prefix}_compact_extraction_submitted"] = False
+            debug[f"{debug_prefix}_compact_extraction_submit_error"] = str(exc)
+            try:
+                self.store.append_runtime_trace(
+                    session_id=result.message.session_id,
+                    event_type="direct_compact_extraction.submit_failed",
+                    content="Direct compact extraction submit failed.",
+                    metadata={
+                        "compressed_message_id": result.message.id,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+            except Exception:
+                return
 
     def _source_prompt_messages(
         self,

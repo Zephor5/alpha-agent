@@ -5,6 +5,7 @@ from alpha_agent.cognition.loops.background_service import (
     BackgroundCognitionStatus,
     SourceIntakeWorker,
 )
+from alpha_agent.cognition.loops.compact_extraction import DirectCompactExtractionService
 from alpha_agent.cognition.loops.consolidation import ConsolidationConfig, ConsolidationLoop
 from alpha_agent.cognition.loops.drive import DriveConfig, DriveLoop, DriveReport
 from alpha_agent.cognition.loops.scheduler import (
@@ -22,6 +23,7 @@ __all__ = [
     "BackgroundCognitionStatus",
     "ConsolidationConfig",
     "ConsolidationLoop",
+    "DirectCompactExtractionService",
     "DriveConfig",
     "DriveLoop",
     "DriveReport",

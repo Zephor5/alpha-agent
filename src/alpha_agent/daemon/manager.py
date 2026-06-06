@@ -16,7 +16,7 @@ from alpha_agent.llm.codex import CodexResponsesProvider
 from alpha_agent.llm.deepseek import DeepSeekProvider
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
-from alpha_agent.runtime.agent import AlphaAgent
+from alpha_agent.runtime.agent import AlphaAgent, CompactExtractionSubmitter
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.default import build_tool_registry
 
@@ -60,10 +60,12 @@ class AgentFactory:
         store: StateStore,
         *,
         coordinator: LoopCoordinator | None = None,
+        compact_extraction_submitter: CompactExtractionSubmitter | None = None,
     ):
         self.config = config
         self.store = store
         self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
+        self.compact_extraction_submitter = compact_extraction_submitter
         self._lock = Lock()
 
     def create(self) -> AlphaAgent:
@@ -83,6 +85,7 @@ class AgentFactory:
                 self.config.llm_provider
             ),
             coordinator=self.coordinator,
+            compact_extraction_submitter=self.compact_extraction_submitter,
         )
 
 

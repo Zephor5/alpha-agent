@@ -54,7 +54,7 @@ from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import CognitionBackgroundConfig
 from alpha_agent.llm.base import LLMProvider, LLMToolDefinitionInput
-from alpha_agent.state.models import SessionMessage
+from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.utils.time import utc_now, utc_now_iso
 
@@ -63,6 +63,7 @@ _ACTIVE_SOURCE_STATUSES = {
     BackgroundProgressStatus.PENDING,
     BackgroundProgressStatus.CLAIMED,
 }
+_INTAKE_TRACE_EVENT_TYPES = frozenset({"tool.completed", "tool.failed"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -571,12 +572,17 @@ def _raw_sources(store: StateStore) -> list[tuple[BackgroundSourceRef, str]]:
                     )
                 )
         for trace in store.list_runtime_traces(session_id):
-            sources.append((BackgroundSourceRef("runtime_trace", trace.id), target_unit))
+            if _intake_trace(trace):
+                sources.append((BackgroundSourceRef("runtime_trace", trace.id), target_unit))
     return sources
 
 
 def _intake_message(message: SessionMessage) -> bool:
     return message.kind != "compressed_message"
+
+
+def _intake_trace(trace: RuntimeTrace) -> bool:
+    return trace.event_type in _INTAKE_TRACE_EVENT_TYPES
 
 
 def _source_status(

@@ -20,7 +20,7 @@ from alpha_agent.runtime.session_context import (
     SessionContextProjection,
     wrap_system_reminder,
 )
-from alpha_agent.state.models import SessionMessage
+from alpha_agent.state.models import RuntimeTrace, SessionMessage
 
 DEFAULT_HANDOVER_COMPRESSION_VERSION = "handover-compression-v1"
 DEFAULT_MEMORY_EXTRACTION_VERSION = "memory-extraction-v1"
@@ -43,12 +43,53 @@ class HandoverCompressionPrompt:
 
 
 @dataclass(frozen=True)
+class HandoverExtractionJob:
+    """Explicit background extraction input produced by a compact handover."""
+
+    session_id: str
+    compression_point_ordinal: int
+    compression_version: str
+    extraction_version: str
+    compressed_message_id: str
+    compressed_message_ordinal: int
+    compression_trace_id: str | None
+    prompt_prefix_messages: Sequence[ChatMessage]
+    prompt_prefix_hash: str
+    tools_schema_hash: str
+    covered_source_message_refs: Sequence[Mapping[str, Any]]
+    provider: str
+    model: str | None
+
+    def to_record(self) -> dict[str, Any]:
+        """Return a JSON-shaped record for tests, logs, and async handoff."""
+
+        return {
+            "session_id": self.session_id,
+            "compression_point_ordinal": self.compression_point_ordinal,
+            "compression_version": self.compression_version,
+            "extraction_version": self.extraction_version,
+            "compressed_message_id": self.compressed_message_id,
+            "compressed_message_ordinal": self.compressed_message_ordinal,
+            "compression_trace_id": self.compression_trace_id,
+            "prompt_prefix_messages": list(self.prompt_prefix_messages),
+            "prompt_prefix_hash": self.prompt_prefix_hash,
+            "tools_schema_hash": self.tools_schema_hash,
+            "covered_source_message_refs": [
+                dict(item) for item in self.covered_source_message_refs
+            ],
+            "provider": self.provider,
+            "model": self.model,
+        }
+
+
+@dataclass(frozen=True)
 class HandoverCompressionResult:
     """Successful compression append result."""
 
     message: SessionMessage
     response: LLMResponse
     compression_point_ordinal: int
+    extraction_job: HandoverExtractionJob
 
 
 def build_handover_compression_prompt(
@@ -190,26 +231,47 @@ def compress_session_context(
         )
         raise
 
-    _append_compression_trace(
+    completed_metadata = {
+        **compression_trace_metadata,
+        "provider": response.provider,
+        "model": response.model,
+        "response_provider": response.provider,
+        "response_model": response.model,
+        "finish_reason": response.finish_reason,
+        "compressed_message_id": compressed.id,
+        "compressed_message_ordinal": compressed.ordinal,
+    }
+    completed_trace = _append_compression_trace(
         assembler,
         session_id=session_id,
         event_type="handover_compression.completed",
         content="Handover compression completed.",
-        metadata={
-            **compression_trace_metadata,
-            "provider": response.provider,
-            "model": response.model,
-            "response_provider": response.provider,
-            "response_model": response.model,
-            "finish_reason": response.finish_reason,
-            "compressed_message_id": compressed.id,
-            "compressed_message_ordinal": compressed.ordinal,
-        },
+        metadata=completed_metadata,
+    )
+    extraction_job = HandoverExtractionJob(
+        session_id=session_id,
+        compression_point_ordinal=prompt.compression_point_ordinal,
+        compression_version=compression_version,
+        extraction_version=extraction_version,
+        compressed_message_id=compressed.id,
+        compressed_message_ordinal=compressed.ordinal,
+        compression_trace_id=completed_trace.id if completed_trace is not None else None,
+        prompt_prefix_messages=tuple(llm_messages),
+        prompt_prefix_hash=str(completed_metadata["prompt_prefix_hash"]),
+        tools_schema_hash=str(completed_metadata["tools_schema_hash"]),
+        covered_source_message_refs=tuple(
+            dict(item)
+            for item in completed_metadata.get("covered_source_message_refs", [])
+            if isinstance(item, Mapping)
+        ),
+        provider=response.provider,
+        model=response.model,
     )
     return HandoverCompressionResult(
         message=compressed,
         response=response,
         compression_point_ordinal=prompt.compression_point_ordinal,
+        extraction_job=extraction_job,
     )
 
 
@@ -267,22 +329,23 @@ def _append_compression_trace(
     event_type: str,
     content: str,
     metadata: dict[str, Any],
-) -> None:
+) -> RuntimeTrace | None:
     try:
-        assembler.store.append_runtime_trace(
+        return assembler.store.append_runtime_trace(
             session_id=session_id,
             event_type=event_type,
             content=content,
             metadata=metadata,
         )
     except Exception:
-        return
+        return None
 
 
 __all__ = [
     "DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION",
     "DEFAULT_HANDOVER_COMPRESSION_VERSION",
     "DEFAULT_MEMORY_EXTRACTION_VERSION",
+    "HandoverExtractionJob",
     "HandoverCompressionPrompt",
     "HandoverCompressionResult",
     "build_handover_compression_prompt",

@@ -73,6 +73,7 @@ from alpha_agent.llm.base import (
 )
 from alpha_agent.runtime.context_handover import (
     DEFAULT_MEMORY_EXTRACTION_VERSION,
+    HandoverExtractionJob,
     compress_session_context,
     handover_prompt_prefix_hash,
 )
@@ -266,6 +267,42 @@ def test_background_service_tick_runs_bounded_intake_chunk(tmp_path) -> None:
     statuses = [intake_status(message.id) for message in messages]
     assert statuses == [BackgroundProgressStatus.PROCESSED, None, None]
     assert background.status().last_success is not None
+
+
+def test_background_service_ignores_handover_traces_as_scheduling_sources(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.append_runtime_trace(
+        session_id="s1",
+        event_type="handover_compression.completed",
+        content="Handover compression completed.",
+        metadata={"covered_source_message_ids": ["msg:missing"]},
+    )
+    service = CognitionStateStore(store)
+    intake = _RecordingScheduledWorker("source_intake")
+    extraction = _RecordingScheduledWorker("memory_extraction")
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=1,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
+            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=1),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+        workers=[intake, extraction],
+    )
+
+    reports = background.tick_once()
+
+    assert reports == []
+    assert intake.calls == 0
+    assert extraction.calls == 0
 
 
 def test_background_service_does_not_start_worker_without_remaining_tick_budget(
@@ -1391,7 +1428,7 @@ def test_project_scoped_draft_rejects_unresolvable_descriptor(
         )
 
 
-def test_memory_extraction_worker_processes_compact_fast_path_with_program_provenance(
+def test_memory_extraction_worker_processes_direct_compact_job_with_program_provenance(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -1428,14 +1465,15 @@ def test_memory_extraction_worker_processes_compact_fast_path_with_program_prove
         )
     ]
     compression_provider = _RecordingLLMProvider("Operational handover.", model="compact-model")
-    compressed = compress_session_context(
+    compression_result = compress_session_context(
         session_id="s1",
         assembler=SessionContextAssembler(store),
         llm_provider=compression_provider,
         llm_messages=_runtime_prefix(store, "s1"),
         tools=tools,
         tool_choice="none",
-    ).message
+    )
+    compressed = compression_result.message
     completed_trace = store.list_runtime_traces(
         "s1",
         event_type="handover_compression.completed",
@@ -1455,7 +1493,9 @@ def test_memory_extraction_worker_processes_compact_fast_path_with_program_prove
         model="extract-model",
     )
 
-    report = MemoryExtractionWorker(service, extraction_provider, tools=tools).run_once()
+    report = MemoryExtractionWorker(service, extraction_provider, tools=tools).run_compact_job(
+        compression_result.extraction_job
+    )
 
     assert report.emitted == 1
     assert len(extraction_provider.calls) == 1
@@ -1477,7 +1517,7 @@ def test_memory_extraction_worker_processes_compact_fast_path_with_program_prove
         BackgroundSourceRef("session_message", user.id),
         BackgroundSourceRef("session_message", assistant.id),
     )
-    assert window.metadata["source_path"] == "compact_fast_path"
+    assert window.metadata["source_path"] == "compact_direct"
     assert window.metadata["compression_trace_id"] == completed_trace.id
     assert window.metadata["compressed_message_id"] == compressed.id
     assert window.metadata["prompt_prefix_hash"] == completed_trace.metadata["prompt_prefix_hash"]
@@ -1495,6 +1535,109 @@ def test_memory_extraction_worker_processes_compact_fast_path_with_program_prove
     assert ("session_message", prior_compressed.id) not in evidence
     assert ("session_message", compressed.id) not in evidence
     assert ("runtime_trace", completed_trace.id) not in evidence
+
+
+def test_memory_extraction_worker_processes_direct_compact_job_without_trace_queue(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    user = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv for package management.",
+    )
+    assistant = store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="Noted that Alpha Agent uses uv for package management.",
+    )
+    compression_provider = _RecordingLLMProvider("Operational handover.")
+    compression_result = compress_session_context(
+        session_id="s1",
+        assembler=SessionContextAssembler(store),
+        llm_provider=compression_provider,
+        llm_messages=_runtime_prefix(store, "s1"),
+    )
+    extraction_provider = _RecordingLLMProvider(
+        _llm_json(
+            payload={
+                "atomic_belief_draft": {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "object": "Alpha Agent package management",
+                    "content": "Alpha Agent uses uv for package management.",
+                }
+            }
+        )
+    )
+
+    report = MemoryExtractionWorker(service, extraction_provider).run_compact_job(
+        compression_result.extraction_job
+    )
+
+    assert report.emitted == 1
+    assert len(extraction_provider.calls) == 1
+    windows = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    assert len(windows) == 1
+    window = windows[0]
+    assert window.source_refs == (
+        BackgroundSourceRef("session_message", user.id),
+        BackgroundSourceRef("session_message", assistant.id),
+    )
+    assert window.metadata["source_path"] == "compact_direct"
+    assert window.metadata["compressed_message_id"] == compression_result.message.id
+    assert "compression_trace_id" in window.metadata
+    assert service.beliefs.list_active()[0].derivation_stage == (
+        DerivationStage.BACKGROUND_EXTRACTED
+    )
+
+
+def test_direct_compact_job_rejects_unstable_prompt_prefix_without_llm_call(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    compression_provider = _RecordingLLMProvider("Operational handover.")
+    compression_result = compress_session_context(
+        session_id="s1",
+        assembler=SessionContextAssembler(store),
+        llm_provider=compression_provider,
+        llm_messages=_runtime_prefix(store, "s1"),
+    )
+    job = HandoverExtractionJob(
+        **{
+            **compression_result.extraction_job.to_record(),
+            "prompt_prefix_hash": "not-the-recorded-prefix",
+        }
+    )
+    extraction_provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(service, extraction_provider).run_compact_job(job)
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "error"
+    assert "prompt prefix hash mismatch" in report.notes
+    assert extraction_provider.calls == []
+    assert (
+        service.ledger.list_source_windows(
+            stage=BackgroundStage.EXTRACTION,
+            target_unit="session:s1",
+        )
+        == []
+    )
 
 
 def test_memory_extraction_worker_rejects_malformed_output_without_processed_marks(
@@ -1748,7 +1891,7 @@ def test_memory_extraction_worker_skips_compact_range_already_processed_by_backl
         inactive_session_ids={"s1"},
     ).run_once()
     compression_provider = _RecordingLLMProvider("Operational handover.")
-    compress_session_context(
+    compression_result = compress_session_context(
         session_id="s1",
         assembler=SessionContextAssembler(store),
         llm_provider=compression_provider,
@@ -1756,7 +1899,9 @@ def test_memory_extraction_worker_skips_compact_range_already_processed_by_backl
     )
     compact_provider = _RecordingLLMProvider(_llm_json())
 
-    second_report = MemoryExtractionWorker(service, compact_provider).run_once()
+    second_report = MemoryExtractionWorker(service, compact_provider).run_compact_job(
+        compression_result.extraction_job
+    )
 
     assert first_report.emitted == 1
     assert second_report.emitted == 0

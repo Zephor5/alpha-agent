@@ -47,22 +47,17 @@ from alpha_agent.llm.base import (
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.runtime.context_handover import (
     DEFAULT_MEMORY_EXTRACTION_VERSION,
+    HandoverExtractionJob,
     handover_prompt_prefix_hash,
     handover_tools_schema_hash,
 )
-from alpha_agent.runtime.prompt_builder import (
-    build_answer_prompt_messages,
-    default_runtime_system_message,
-)
-from alpha_agent.runtime.session_context import (
-    SessionContextAssembler,
-    source_message_to_chat,
-)
+from alpha_agent.runtime.prompt_builder import default_runtime_system_message
+from alpha_agent.runtime.session_context import source_message_to_chat
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.utils.time import utc_now_iso
 
-_COMPACT_SOURCE_PATH = "compact_fast_path"
+_COMPACT_SOURCE_PATH = "compact_direct"
 _BACKLOG_SOURCE_PATH = "inactive_backlog"
 _RETRYABLE_SOURCE_STATUSES = {
     None,
@@ -176,6 +171,56 @@ class MemoryExtractionWorker:
             source_batch_size=self.source_batch_size,
         )
 
+    def run_compact_job(
+        self,
+        job: HandoverExtractionJob,
+        *,
+        checkpoint: WorkerCheckpoint | None = None,
+        coordinator: YieldingCoordinator | None = None,
+    ) -> WorkerReport:
+        """Process one explicit handover compact extraction job."""
+
+        if self.state_service is None:
+            raise ValueError("MemoryExtractionWorker.run_compact_job requires state_service")
+        if self.llm_provider is None:
+            raise ValueError("MemoryExtractionWorker.run_compact_job requires llm_provider")
+        checkpoint = checkpoint or WorkerCheckpoint(worker_name=self.name)
+        try:
+            candidate = _compact_job_candidate(
+                self.state_service,
+                job,
+                tools=self.tools,
+                source_batch_size=self.source_batch_size,
+                extraction_version=self.extraction_version,
+            )
+        except ValueError as exc:
+            return _worker_report(
+                self.name,
+                checkpoint,
+                inspected=0,
+                emitted=0,
+                status="error",
+                notes=[str(exc)],
+            )
+        if candidate is None:
+            return _worker_report(
+                self.name,
+                checkpoint,
+                inspected=0,
+                emitted=0,
+                status="skipped_no_backlog",
+            )
+        return _run_candidate(
+            worker_name=self.name,
+            worker_id=self.worker_id,
+            state_service=self.state_service,
+            llm_provider=self.llm_provider,
+            tools=self.tools,
+            checkpoint=checkpoint,
+            coordinator=coordinator or _NeverYieldCoordinator(),
+            candidate=candidate,
+        )
+
     def run(
         self,
         log: EventLog,
@@ -245,110 +290,133 @@ class MemoryExtractionWorker:
                 emitted=0,
                 status="skipped_no_backlog",
             )
-        if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
-            return _worker_report(
-                self.name,
-                checkpoint,
-                inspected=len(candidate.source_refs),
-                emitted=0,
-                status="yielded",
-                yielded=True,
-                metadata={"last_session_id": candidate.session_id},
-            )
-
-        window = state_service.ledger.create_source_window(
-            stage=BackgroundStage.EXTRACTION,
-            target_unit=candidate.target_unit,
-            source_refs=candidate.source_refs,
-            idempotency_key=_window_idempotency_key(candidate),
-            metadata=candidate.metadata,
-        )
-        if window.status == BackgroundProgressStatus.PROCESSED:
-            return _worker_report(
-                self.name,
-                checkpoint,
-                inspected=len(candidate.source_refs),
-                emitted=0,
-                status="skipped_no_backlog",
-                metadata={"last_window_id": window.window_id},
-            )
-
-        window = _claim_window_and_sources(
-            state_service,
-            window,
-            claimed_by=self.worker_id,
-        )
-        run = state_service.ledger.start_stage_run(
+        return _run_candidate(
+            worker_name=self.name,
             worker_id=self.worker_id,
-            stage=BackgroundStage.EXTRACTION,
-            target_unit=candidate.target_unit,
-            window_id=window.window_id,
-            input_refs=candidate.source_refs,
+            state_service=state_service,
+            llm_provider=llm_provider,
+            tools=tools,
+            checkpoint=checkpoint,
+            coordinator=coordinator,
+            candidate=candidate,
         )
-        if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
-            message = "memory extraction yielded before LLM call"
-            _mark_failed_if_needed(
-                state_service,
-                window=window,
-                run_id=run.run_id,
-                error=message,
-            )
-            return _worker_report(
-                self.name,
-                checkpoint,
-                inspected=len(candidate.source_refs),
-                emitted=0,
-                status="yielded",
-                yielded=True,
-                notes=[message],
-                metadata={"last_window_id": window.window_id},
-            )
-        try:
-            response = llm_provider.complete(
-                [
-                    *candidate.prompt_prefix_messages,
-                    _extraction_instruction_message(candidate.source_text),
-                ],
-                tools=list(tools) if tools else None,
-                tool_choice=_tool_choice_for_extraction(tools),
-            )
-            context = _validation_context(
-                state_service.store,
-                window=window,
-                candidate=candidate,
-            )
-            written = state_service.accept_background_llm_json(
-                response.content,
-                context,
-                window_id=window.window_id,
-                run_id=run.run_id,
-                checkpoint_id=f"checkpoint:{self.name}:{window.window_id}",
-            )
-        except Exception as exc:
-            _mark_failed_if_needed(
-                state_service,
-                window=window,
-                run_id=run.run_id,
-                error=str(exc),
-            )
-            return _worker_report(
-                self.name,
-                checkpoint,
-                inspected=len(candidate.source_refs),
-                emitted=0,
-                status="error",
-                notes=[str(exc)],
-                metadata={"last_window_id": window.window_id},
-            )
 
+
+def _run_candidate(
+    *,
+    worker_name: str,
+    worker_id: str,
+    state_service: CognitionStateStore,
+    llm_provider: LLMProvider,
+    tools: Sequence[LLMToolDefinitionInput],
+    checkpoint: WorkerCheckpoint,
+    coordinator: YieldingCoordinator,
+    candidate: _SourceWindowCandidate,
+) -> WorkerReport:
+    if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
         return _worker_report(
-            self.name,
+            worker_name,
             checkpoint,
             inspected=len(candidate.source_refs),
-            emitted=len(written),
-            status="ok",
+            emitted=0,
+            status="yielded",
+            yielded=True,
+            metadata={"last_session_id": candidate.session_id},
+        )
+
+    window = state_service.ledger.create_source_window(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit=candidate.target_unit,
+        source_refs=candidate.source_refs,
+        idempotency_key=_window_idempotency_key(candidate),
+        metadata=candidate.metadata,
+    )
+    if window.status == BackgroundProgressStatus.PROCESSED:
+        return _worker_report(
+            worker_name,
+            checkpoint,
+            inspected=len(candidate.source_refs),
+            emitted=0,
+            status="skipped_no_backlog",
             metadata={"last_window_id": window.window_id},
         )
+
+    window = _claim_window_and_sources(
+        state_service,
+        window,
+        claimed_by=worker_id,
+    )
+    run = state_service.ledger.start_stage_run(
+        worker_id=worker_id,
+        stage=BackgroundStage.EXTRACTION,
+        target_unit=candidate.target_unit,
+        window_id=window.window_id,
+        input_refs=candidate.source_refs,
+    )
+    if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
+        message = "memory extraction yielded before LLM call"
+        _mark_failed_if_needed(
+            state_service,
+            window=window,
+            run_id=run.run_id,
+            error=message,
+        )
+        return _worker_report(
+            worker_name,
+            checkpoint,
+            inspected=len(candidate.source_refs),
+            emitted=0,
+            status="yielded",
+            yielded=True,
+            notes=[message],
+            metadata={"last_window_id": window.window_id},
+        )
+    try:
+        response = llm_provider.complete(
+            [
+                *candidate.prompt_prefix_messages,
+                _extraction_instruction_message(candidate.source_text),
+            ],
+            tools=list(tools) if tools else None,
+            tool_choice=_tool_choice_for_extraction(tools),
+        )
+        context = _validation_context(
+            state_service.store,
+            window=window,
+            candidate=candidate,
+        )
+        written = state_service.accept_background_llm_json(
+            response.content,
+            context,
+            window_id=window.window_id,
+            run_id=run.run_id,
+            checkpoint_id=f"checkpoint:{worker_name}:{window.window_id}",
+        )
+    except Exception as exc:
+        _mark_failed_if_needed(
+            state_service,
+            window=window,
+            run_id=run.run_id,
+            error=str(exc),
+        )
+        return _worker_report(
+            worker_name,
+            checkpoint,
+            inspected=len(candidate.source_refs),
+            emitted=0,
+            status="error",
+            notes=[str(exc)],
+            metadata={"last_window_id": window.window_id},
+        )
+
+    return _worker_report(
+        worker_name,
+        checkpoint,
+        inspected=len(candidate.source_refs),
+        emitted=len(written),
+        status="ok",
+        metadata={"last_window_id": window.window_id},
+    )
 
 
 def _next_source_window_candidate(
@@ -360,14 +428,6 @@ def _next_source_window_candidate(
     source_batch_size: int,
     extraction_version: str,
 ) -> _SourceWindowCandidate | None:
-    compact = _compact_fast_path_candidate(
-        state_service,
-        tools=tools,
-        source_batch_size=source_batch_size,
-        extraction_version=extraction_version,
-    )
-    if compact is not None:
-        return compact
     return _inactive_backlog_candidate(
         state_service,
         active_session_ids=active_session_ids,
@@ -378,74 +438,79 @@ def _next_source_window_candidate(
     )
 
 
-def _compact_fast_path_candidate(
+def _compact_job_candidate(
     state_service: CognitionStateStore,
+    job: HandoverExtractionJob,
     *,
     tools: Sequence[LLMToolDefinitionInput],
     source_batch_size: int,
     extraction_version: str,
 ) -> _SourceWindowCandidate | None:
     store = state_service.store
-    for trace in store.list_runtime_traces(event_type="handover_compression.completed"):
-        metadata = dict(trace.metadata)
-        if str(metadata.get("extraction_version") or extraction_version) != extraction_version:
-            continue
-        source_records = _covered_source_records(metadata)
-        source_refs = tuple(
-            BackgroundSourceRef("session_message", record["source_id"])
-            for record in source_records
-        )
-        selected_refs = _retryable_refs(
-            state_service,
-            source_refs,
-            target_unit=f"session:{trace.session_id}",
-        )[:source_batch_size]
-        if not selected_refs:
-            continue
-        selected_ids = {ref.source_id for ref in selected_refs}
-        selected_records = [
-            record for record in source_records if record["source_id"] in selected_ids
-        ]
-        source_messages = store.list_session_messages_by_ids(
-            [ref.source_id for ref in selected_refs if ref.source_type == "session_message"]
-        )
-        source_text = _render_source_text(messages=source_messages, traces=())
-        prefix_messages = _reconstruct_compact_prefix(store, trace)
-        prompt_hash = handover_prompt_prefix_hash(prefix_messages)
-        tools_hash = handover_tools_schema_hash(tools)
-        ordinals = [int(record["ordinal"]) for record in selected_records]
-        return _SourceWindowCandidate(
-            source_path=_COMPACT_SOURCE_PATH,
-            session_id=trace.session_id,
-            target_unit=f"session:{trace.session_id}",
-            source_refs=tuple(selected_refs),
-            source_message_ids=tuple(ref.source_id for ref in selected_refs),
-            source_trace_ids=(),
-            ordinal_start=min(ordinals) if ordinals else None,
-            ordinal_end=max(ordinals) if ordinals else None,
-            prompt_prefix_messages=tuple(prefix_messages),
-            source_text=source_text,
-            metadata={
-                "source_path": _COMPACT_SOURCE_PATH,
-                "session_id": trace.session_id,
-                "ordinal_start": min(ordinals) if ordinals else None,
-                "ordinal_end": max(ordinals) if ordinals else None,
-                "source_message_ids": [ref.source_id for ref in selected_refs],
-                "source_trace_ids": [],
-                "provider": metadata.get("provider"),
-                "model": metadata.get("model") or metadata.get("response_model"),
-                "prompt_prefix_hash": metadata.get("prompt_prefix_hash"),
-                "reconstructed_prompt_prefix_hash": prompt_hash,
-                "prompt_prefix_hash_matches": metadata.get("prompt_prefix_hash") == prompt_hash,
-                "tools_schema_hash": metadata.get("tools_schema_hash"),
-                "reconstructed_tools_schema_hash": tools_hash,
-                "tools_schema_hash_matches": metadata.get("tools_schema_hash") == tools_hash,
-                "compression_trace_id": trace.id,
-                "compressed_message_id": metadata.get("compressed_message_id"),
-                "extraction_version": extraction_version,
-            },
-        )
-    return None
+    if job.extraction_version != extraction_version:
+        raise ValueError("extraction version mismatch")
+    prefix_messages = tuple(job.prompt_prefix_messages)
+    prompt_hash = handover_prompt_prefix_hash(prefix_messages)
+    if job.prompt_prefix_hash != prompt_hash:
+        raise ValueError("prompt prefix hash mismatch")
+    tools_hash = handover_tools_schema_hash(tools)
+    if job.tools_schema_hash != tools_hash:
+        raise ValueError("tools schema hash mismatch")
+
+    source_records = _covered_source_records(
+        {"covered_source_message_refs": list(job.covered_source_message_refs)}
+    )
+    source_refs = tuple(
+        BackgroundSourceRef("session_message", record["source_id"])
+        for record in source_records
+    )
+    selected_refs = _retryable_refs(
+        state_service,
+        source_refs,
+        target_unit=f"session:{job.session_id}",
+    )[:source_batch_size]
+    if not selected_refs:
+        return None
+    selected_ids = {ref.source_id for ref in selected_refs}
+    selected_records = [
+        record for record in source_records if record["source_id"] in selected_ids
+    ]
+    source_messages = store.list_session_messages_by_ids(
+        [ref.source_id for ref in selected_refs if ref.source_type == "session_message"]
+    )
+    source_text = _render_source_text(messages=source_messages, traces=())
+    ordinals = [int(record["ordinal"]) for record in selected_records]
+    return _SourceWindowCandidate(
+        source_path=_COMPACT_SOURCE_PATH,
+        session_id=job.session_id,
+        target_unit=f"session:{job.session_id}",
+        source_refs=tuple(selected_refs),
+        source_message_ids=tuple(ref.source_id for ref in selected_refs),
+        source_trace_ids=(),
+        ordinal_start=min(ordinals) if ordinals else None,
+        ordinal_end=max(ordinals) if ordinals else None,
+        prompt_prefix_messages=prefix_messages,
+        source_text=source_text,
+        metadata={
+            "source_path": _COMPACT_SOURCE_PATH,
+            "session_id": job.session_id,
+            "ordinal_start": min(ordinals) if ordinals else None,
+            "ordinal_end": max(ordinals) if ordinals else None,
+            "source_message_ids": [ref.source_id for ref in selected_refs],
+            "source_trace_ids": [],
+            "provider": job.provider,
+            "model": job.model,
+            "prompt_prefix_hash": job.prompt_prefix_hash,
+            "direct_prompt_prefix_hash": prompt_hash,
+            "prompt_prefix_hash_matches": True,
+            "tools_schema_hash": job.tools_schema_hash,
+            "direct_tools_schema_hash": tools_hash,
+            "tools_schema_hash_matches": True,
+            "compression_trace_id": job.compression_trace_id,
+            "compressed_message_id": job.compressed_message_id,
+            "extraction_version": extraction_version,
+        },
+    )
 
 
 def _inactive_backlog_candidate(
@@ -585,19 +650,6 @@ def _source_status(
         ).status
     except KeyError:
         return None
-
-
-def _reconstruct_compact_prefix(store: StateStore, trace: RuntimeTrace) -> list[ChatMessage]:
-    before_ordinal = _optional_int(trace.metadata.get("compressed_message_ordinal"))
-    session_history = SessionContextAssembler(store).load(
-        trace.session_id,
-        before_ordinal=before_ordinal,
-    ).chat_messages
-    return build_answer_prompt_messages(
-        profile_snapshot=store.get_session_profile_snapshot(trace.session_id),
-        session_history=session_history,
-        system_message=default_runtime_system_message(),
-    )
 
 
 def _backlog_runtime_trace_sources(

@@ -11,7 +11,10 @@ from types import FrameType
 from typing import Any
 
 from alpha_agent.cognition.coordinator import LoopCoordinator
-from alpha_agent.cognition.loops import BackgroundCognitionService
+from alpha_agent.cognition.loops import (
+    BackgroundCognitionService,
+    DirectCompactExtractionService,
+)
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.config import AlphaConfig
 from alpha_agent.daemon.manager import (
@@ -84,16 +87,30 @@ class AlphaDaemon:
         self.runtime = runtime or daemon_runtime_config(config)
         self.store = store or initialize_store(config)
         self.loop_coordinator = LoopCoordinator(SUBJECT_SELF)
+        background_provider = build_provider(config)
+        background_tools = build_tool_registry(config).to_llm_tool_definitions()
+        self.direct_compact_extraction = DirectCompactExtractionService(
+            store=self.store,
+            llm_provider=background_provider,
+            tools=background_tools,
+            source_batch_size=config.cognition_background.extraction.batch_size,
+            enabled=config.cognition_background.enabled,
+        )
         self.agent_manager = agent_manager or AgentManager(
-            AgentFactory(config, self.store, coordinator=self.loop_coordinator)
+            AgentFactory(
+                config,
+                self.store,
+                coordinator=self.loop_coordinator,
+                compact_extraction_submitter=self.direct_compact_extraction.submit,
+            )
         )
         self.turn_guard = turn_guard or ActiveTurnGuard(bypass_commands=set())
         self.background_service = BackgroundCognitionService(
             store=self.store,
             config=config.cognition_background,
             coordinator=self.loop_coordinator,
-            llm_provider=build_provider(config),
-            tools=build_tool_registry(config).to_llm_tool_definitions(),
+            llm_provider=background_provider,
+            tools=background_tools,
             active_session_ids=getattr(self.agent_manager, "session_ids", lambda: ()),
         )
         self._server: JsonLineDaemonServer | None = None
@@ -177,6 +194,10 @@ class AlphaDaemon:
                 wait=True,
                 timeout=self.config.cognition_background.tick_timeout_seconds + 1,
             )
+            self.direct_compact_extraction.shutdown(
+                wait=self._stop_policy is not StopPolicy.IMMEDIATE,
+                timeout=self.config.cognition_background.tick_timeout_seconds + 1,
+            )
             gateway_runtime = gateway_runtime_config(self.config)
             self._disconnect_adapters(connected_adapters, gateway_runtime.log_paths["errors.log"])
             self.agent_manager.evict_all()
@@ -210,6 +231,7 @@ class AlphaDaemon:
             immediate=self._stop_policy is StopPolicy.IMMEDIATE,
             wait=False,
         )
+        self.direct_compact_extraction.shutdown(wait=False)
         write_daemon_status(
             self.runtime.status_path,
             self._set_status(
