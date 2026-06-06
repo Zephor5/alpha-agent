@@ -144,8 +144,10 @@ explicit while making it useful for real channels and longer tasks.
   - keep tool registry small.
   - no hidden agent framework.
   - include `tool.started`, `tool.completed`, `tool.failed`.
-  - return only tool raw output in transcript tool messages; keep tool name and
-    diagnostic metadata in trace/session metadata.
+  - keep provider-visible tool schemas free of ToolSpec governance fields.
+  - return bounded tool output in transcript tool messages; keep tool name,
+    ToolSpec governance fields, availability, and diagnostic metadata in runtime
+    traces or session metadata wrappers.
 - [x] Add interrupt/cancel support:
   - cancellation flag by session_id.
   - gateway `/stop` command.
@@ -176,6 +178,12 @@ P1 Agent Loop implementation notes:
   a best-effort answer with the same tool schema and `tool_choice="none"` so
   provider prefix caches are not invalidated by dropping tool definitions; if
   that still requests tools, the turn fails observably.
+- The tool registry reads each tool's single `ToolSpec` plus dynamic
+  `check_available()` result before exposing available tools to the model.
+  Provider-visible schemas are projected only from `name`, `description`,
+  `parameters`, and `strict`; governance fields stay in runtime introspection
+  and traces under `tool_spec`. `ToolResult.metadata` remains owned by the tool
+  implementation, and tool specs do not use a `group` field.
 - DeepSeek and OpenAI-compatible providers share the same tool-call wire model:
   `tools`, `tool_choice`, assistant `tool_calls`, and `role=tool` messages with
   `tool_call_id`. Missing provider tool ids and `finish_reason=tool_calls`

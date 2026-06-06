@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from alpha_agent.config import BashToolConfig
-from alpha_agent.tools.base import JSONValue, ToolExecutionContext, ToolResult
+from alpha_agent.tools.base import (
+    JSONValue,
+    ToolAvailability,
+    ToolExecutionContext,
+    ToolResult,
+    ToolSpec,
+)
 from alpha_agent.tools.shell.backend import ShellBackend
 from alpha_agent.tools.shell.local import LocalShellBackend
 from alpha_agent.tools.shell.output import govern_output
@@ -16,6 +22,36 @@ from alpha_agent.tools.shell.policy import BashExecutionPolicy, BashPolicyError,
 from alpha_agent.tools.shell.semantics import interpret_return_code
 
 TRACE_COMMAND_CHARS = 240
+BASH_TOOL_NAME = "bash"
+BASH_TOOL_DESCRIPTION = (
+    "Run a foreground local shell command for builds, tests, package management, Git, "
+    "diagnostic scripts, or system inspection. Prefer specialized file/search/patch tools "
+    "for file editing when available."
+)
+BASH_TOOL_PARAMETERS: Mapping[str, Any] = {
+    "type": "object",
+    "properties": {
+        "command": {
+            "type": "string",
+            "description": "Shell command to execute.",
+        },
+        "description": {
+            "type": "string",
+            "description": "Brief purpose for trace and readable logs.",
+        },
+        "workdir": {
+            "type": "string",
+            "description": "Working directory, which must be inside an allowed workspace.",
+        },
+        "timeout_seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Foreground command timeout, capped by max_timeout_seconds.",
+        },
+    },
+    "required": ["command"],
+    "additionalProperties": False,
+}
 SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*=\s*)"
     r"([\"']?)[^ \n\"';&|]+"
@@ -24,38 +60,6 @@ SECRET_ASSIGNMENT_RE = re.compile(
 
 class BashTool:
     """Execute local foreground shell commands through an explicit policy boundary."""
-
-    name = "bash"
-    description = (
-        "Run a foreground local shell command for builds, tests, package management, Git, "
-        "diagnostic scripts, or system inspection. Prefer specialized file/search/patch tools "
-        "for file editing when available."
-    )
-    strict = True
-    parameters: Mapping[str, Any] = {
-        "type": "object",
-        "properties": {
-            "command": {
-                "type": "string",
-                "description": "Shell command to execute.",
-            },
-            "description": {
-                "type": "string",
-                "description": "Brief purpose for trace and readable logs.",
-            },
-            "workdir": {
-                "type": "string",
-                "description": "Working directory, which must be inside an allowed workspace.",
-            },
-            "timeout_seconds": {
-                "type": "integer",
-                "minimum": 1,
-                "description": "Foreground command timeout, capped by max_timeout_seconds.",
-            },
-        },
-        "required": ["command"],
-        "additionalProperties": False,
-    }
 
     def __init__(
         self,
@@ -67,6 +71,29 @@ class BashTool:
         self.config = config or BashToolConfig()
         self.backend = backend or LocalShellBackend()
         self.secret_values = tuple(str(value) for value in secret_values if str(value))
+
+    @property
+    def spec(self) -> ToolSpec:
+        """Return shell spec derived from current config."""
+
+        return ToolSpec(
+            name=BASH_TOOL_NAME,
+            description=BASH_TOOL_DESCRIPTION,
+            parameters=BASH_TOOL_PARAMETERS,
+            toolset="shell",
+            read_only=False,
+            concurrency_safe=False,
+            destructive=True,
+            requires_user_interaction=False,
+            max_result_size_chars=self.config.max_output_chars,
+        )
+
+    def check_available(self) -> ToolAvailability:
+        """Return whether local bash execution is enabled."""
+
+        if not self.config.enabled:
+            return ToolAvailability.unavailable("tools.bash.enabled is false")
+        return ToolAvailability()
 
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         """Run a policy-approved command and return a structured JSON result."""
@@ -175,7 +202,7 @@ class BashTool:
         if status == "error" and error:
             output["error"] = error
         return ToolResult(
-            name=self.name,
+            name=BASH_TOOL_NAME,
             output=output,
             metadata={
                 "failed": False,

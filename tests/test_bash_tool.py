@@ -58,11 +58,11 @@ def _context(tmp_path: Path, check_canceled=lambda _stage: None) -> ToolExecutio
 def test_bash_tool_exposes_strict_schema() -> None:
     tool = BashTool()
 
-    assert tool.name == "bash"
-    assert tool.strict is True
-    assert tool.parameters["required"] == ["command"]
-    assert "background" not in tool.parameters["properties"]
-    assert tool.parameters["additionalProperties"] is False
+    assert tool.spec.name == "bash"
+    assert tool.spec.strict is True
+    assert tool.spec.parameters["required"] == ["command"]
+    assert "background" not in tool.spec.parameters["properties"]
+    assert tool.spec.parameters["additionalProperties"] is False
 
 
 def test_bash_tool_echo_returns_structured_completed_result(tmp_path: Path) -> None:

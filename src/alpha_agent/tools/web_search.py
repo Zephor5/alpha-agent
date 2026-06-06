@@ -8,7 +8,12 @@ from typing import Any
 
 import httpx
 
-from alpha_agent.tools.base import ToolExecutionContext, ToolResult
+from alpha_agent.tools.base import (
+    ToolAvailability,
+    ToolExecutionContext,
+    ToolResult,
+    ToolSpec,
+)
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 SEARCH_DEPTH_VALUES = {"advanced", "basic", "fast", "ultra-fast"}
@@ -20,71 +25,77 @@ DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 class TavilyWebSearchTool:
     """Provider-specific implementation for the generic web_search tool."""
 
-    name = "web_search"
-    description = (
-        "Search the public web for current or factual information. Use this when the answer "
-        "depends on recent events, external sources, precise citations, or facts not already "
-        "available in the conversation."
-    )
-    strict = True
-    parameters: Mapping[str, Any] = {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "The natural-language search query.",
+    spec = ToolSpec(
+        name="web_search",
+        description=(
+            "Search the public web for current or factual information. Use this when the "
+            "answer depends on recent events, external sources, precise citations, or facts "
+            "not already available in the conversation."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The natural-language search query.",
+                },
+                "search_depth": {
+                    "type": "string",
+                    "enum": sorted(SEARCH_DEPTH_VALUES),
+                    "description": "Latency versus relevance tradeoff. Use basic by default.",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 20,
+                    "description": "Maximum number of search results to return.",
+                },
+                "topic": {
+                    "type": "string",
+                    "enum": sorted(TOPIC_VALUES),
+                    "description": "Optional broad result category.",
+                },
+                "time_range": {
+                    "type": "string",
+                    "enum": sorted(TIME_RANGE_VALUES),
+                    "description": "Optional recency filter such as day, week, month, or year.",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Optional inclusive lower date bound in YYYY-MM-DD format.",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "Optional inclusive upper date bound in YYYY-MM-DD format.",
+                },
+                "country": {
+                    "type": "string",
+                    "description": "Optional country name to boost local results.",
+                },
+                "include_domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional domains to include.",
+                },
+                "exclude_domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional domains to exclude.",
+                },
+                "include_answer": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to include a generated short answer from search results."
+                    ),
+                },
             },
-            "search_depth": {
-                "type": "string",
-                "enum": sorted(SEARCH_DEPTH_VALUES),
-                "description": "Latency versus relevance tradeoff. Use basic by default.",
-            },
-            "max_results": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 20,
-                "description": "Maximum number of search results to return.",
-            },
-            "topic": {
-                "type": "string",
-                "enum": sorted(TOPIC_VALUES),
-                "description": "Optional broad result category.",
-            },
-            "time_range": {
-                "type": "string",
-                "enum": sorted(TIME_RANGE_VALUES),
-                "description": "Optional recency filter such as day, week, month, or year.",
-            },
-            "start_date": {
-                "type": "string",
-                "description": "Optional inclusive lower date bound in YYYY-MM-DD format.",
-            },
-            "end_date": {
-                "type": "string",
-                "description": "Optional inclusive upper date bound in YYYY-MM-DD format.",
-            },
-            "country": {
-                "type": "string",
-                "description": "Optional country name to boost local results.",
-            },
-            "include_domains": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional domains to include.",
-            },
-            "exclude_domains": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Optional domains to exclude.",
-            },
-            "include_answer": {
-                "type": "boolean",
-                "description": "Whether to include a generated short answer from search results.",
-            },
+            "required": ["query"],
+            "additionalProperties": False,
         },
-        "required": ["query"],
-        "additionalProperties": False,
-    }
+        toolset="web",
+        read_only=True,
+        concurrency_safe=True,
+    )
 
     def __init__(
         self,
@@ -97,6 +108,13 @@ class TavilyWebSearchTool:
         self.client = client
         self.timeout = timeout
 
+    def check_available(self) -> ToolAvailability:
+        """Return whether Tavily-backed web search can currently run."""
+
+        if not self.api_key:
+            return ToolAvailability.unavailable("tavily.api_key is required")
+        return ToolAvailability()
+
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         """Run a web search and return compact JSON suitable for LLM follow-up."""
 
@@ -107,7 +125,7 @@ class TavilyWebSearchTool:
         response = self._post(payload)
         normalized = self._response_payload(response)
         return ToolResult(
-            name=self.name,
+            name=self.spec.name,
             output=normalized,
             metadata={
                 "provider": "tavily",

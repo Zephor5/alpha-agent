@@ -54,7 +54,13 @@ from alpha_agent.runtime.context_handover import (
 )
 from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.base import Tool, ToolExecutionContext, ToolResult
+from alpha_agent.tools.base import (
+    Tool,
+    ToolAvailability,
+    ToolExecutionContext,
+    ToolResult,
+    ToolSpec,
+)
 from alpha_agent.tools.default import build_tool_registry
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
 from alpha_agent.tools.registry import ToolRegistry
@@ -1356,13 +1362,23 @@ def _tool_name(tool: LLMToolDefinitionInput) -> str:
 
 
 class _EchoTool(Tool):
-    name = "echo"
-    description = "Echo input."
+    spec = ToolSpec(
+        name="echo",
+        description="Echo input.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
+
+    def check_available(self) -> ToolAvailability:
+        return ToolAvailability()
 
     def run(self, arguments, context: ToolExecutionContext):
         del context
         return ToolResult(
-            name=self.name,
+            name=self.spec.name,
             output=f"complete tool result: {arguments['text']}",
             metadata={},
         )
@@ -1373,13 +1389,23 @@ class _EchoTool(Tool):
 
 
 class _StructuredTool(Tool):
-    name = "structured"
-    description = "Return structured output."
+    spec = ToolSpec(
+        name="structured",
+        description="Return structured output.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    )
+
+    def check_available(self) -> ToolAvailability:
+        return ToolAvailability()
 
     def run(self, arguments, context: ToolExecutionContext):
         del arguments, context
         return ToolResult(
-            name=self.name,
+            name=self.spec.name,
             output={"ok": True, "items": [{"title": "Alpha"}]},
             metadata={"source": "test"},
         )

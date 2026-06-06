@@ -123,6 +123,14 @@ opt-in:
   blocking, and output truncation — but it is **not a security sandbox**. Don't
   expose it to untrusted gateway users without a stronger approval layer.
 
+Each registered tool declares one `ToolSpec`: provider-facing name,
+description, parameters, and strict mode plus internal governance fields such as
+toolset, read/write behavior, concurrency safety, destructive side effects, and
+maximum model-visible result size. Availability stays dynamic via
+`check_available()`. Runtime traces record the spec and availability; provider
+tool schemas are projected only from name, description, parameters, and strict
+mode. Tool specs do not use a `group` field.
+
 ## How it works
 
 - **Daemon-owned turns.** `alpha daemon start` runs the single process that owns

@@ -26,10 +26,10 @@ def _tool_context(tmp_path: Path | None = None) -> ToolExecutionContext:
 def test_tavily_web_search_tool_exposes_general_search_schema() -> None:
     tool = TavilyWebSearchTool(api_key="tvly-test")
 
-    assert tool.name == "web_search"
-    assert "Tavily" not in tool.description
-    assert tool.parameters["required"] == ["query"]
-    assert set(tool.parameters["properties"]) >= {
+    assert tool.spec.name == "web_search"
+    assert "Tavily" not in tool.spec.description
+    assert tool.spec.parameters["required"] == ["query"]
+    assert set(tool.spec.parameters["properties"]) >= {
         "query",
         "search_depth",
         "max_results",

@@ -34,7 +34,12 @@ from alpha_agent.cognition.models import (
 from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefSearchParams
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
 from alpha_agent.runtime.events import deterministic_json
-from alpha_agent.tools.base import ToolExecutionContext, ToolResult
+from alpha_agent.tools.base import (
+    ToolAvailability,
+    ToolExecutionContext,
+    ToolResult,
+    ToolSpec,
+)
 from alpha_agent.utils.ids import new_id
 
 MEMORY_PROPOSE_TOOL_NAME = "memory_propose"
@@ -214,86 +219,95 @@ class _UpdateResult:
 class MemoryProposeTool:
     """Accept model-proposed long-term memory updates."""
 
-    name = MEMORY_PROPOSE_TOOL_NAME
-    description = (
-        "Propose explicit long-term memories. append_distinct adds a new memory "
-        "after reviewed_candidate_ids; reinforce, replace, merge, and retract use "
-        "target_belief_ids; correct waits for confirmation. Not for transient facts, "
-        "guesses, or tool summaries. Returns status and next_action."
-    )
-    strict = True
-    parameters = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "updates": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 5,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "operation": {
-                            "type": "string",
-                            "enum": [
-                                "append_distinct",
-                                "reinforce",
-                                "replace",
-                                "merge",
-                                "correct",
-                                "retract",
-                            ],
-                        },
-                        "target_belief_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "maxItems": 5,
-                        },
-                        "reviewed_candidate_ids": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "maxItems": 5,
-                        },
-                        "target_hint": {"type": "string", "maxLength": 300},
-                        "memory": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "type": {
-                                    "type": "string",
-                                    "enum": [
-                                        "fact",
-                                        "preference",
-                                        "constraint",
-                                        "procedure",
-                                        "value",
-                                        "relationship",
-                                    ],
-                                },
-                                "content": {"type": "string", "maxLength": 500},
-                                "evidence": {"type": "string", "maxLength": 500},
-                                "scope": {
-                                    "type": "string",
-                                    "enum": ["counterpart", "global"],
-                                },
+    spec = ToolSpec(
+        name=MEMORY_PROPOSE_TOOL_NAME,
+        description=(
+            "Propose explicit long-term memories. append_distinct adds a new memory "
+            "after reviewed_candidate_ids; reinforce, replace, merge, and retract use "
+            "target_belief_ids; correct waits for confirmation. Not for transient facts, "
+            "guesses, or tool summaries. Returns status and next_action."
+        ),
+        parameters={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "updates": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "operation": {
+                                "type": "string",
+                                "enum": [
+                                    "append_distinct",
+                                    "reinforce",
+                                    "replace",
+                                    "merge",
+                                    "correct",
+                                    "retract",
+                                ],
                             },
-                            "required": ["type", "content", "evidence", "scope"],
+                            "target_belief_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "maxItems": 5,
+                            },
+                            "reviewed_candidate_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "maxItems": 5,
+                            },
+                            "target_hint": {"type": "string", "maxLength": 300},
+                            "memory": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "fact",
+                                            "preference",
+                                            "constraint",
+                                            "procedure",
+                                            "value",
+                                            "relationship",
+                                        ],
+                                    },
+                                    "content": {"type": "string", "maxLength": 500},
+                                    "evidence": {"type": "string", "maxLength": 500},
+                                    "scope": {
+                                        "type": "string",
+                                        "enum": ["counterpart", "global"],
+                                    },
+                                },
+                                "required": ["type", "content", "evidence", "scope"],
+                            },
+                            "reason": {"type": "string", "maxLength": 500},
                         },
-                        "reason": {"type": "string", "maxLength": 500},
+                        "required": [
+                            "operation",
+                            "target_belief_ids",
+                            "reviewed_candidate_ids",
+                            "target_hint",
+                            "reason",
+                        ],
                     },
-                    "required": [
-                        "operation",
-                        "target_belief_ids",
-                        "reviewed_candidate_ids",
-                        "target_hint",
-                        "reason",
-                    ],
-                },
-            }
+                }
+            },
+            "required": ["updates"],
         },
-        "required": ["updates"],
-    }
+        toolset="memory",
+        read_only=False,
+        concurrency_safe=False,
+        destructive=True,
+        requires_user_interaction=False,
+    )
+
+    def check_available(self) -> ToolAvailability:
+        return ToolAvailability()
 
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         raw_updates = arguments.get("updates")
@@ -302,24 +316,24 @@ class MemoryProposeTool:
 
         if memory_context is None:
             return ToolResult(
-                name=self.name,
+                name=self.spec.name,
                 output=_memory_output(
                     status="rejected",
                     next_action="explain_rejection",
                     results=[],
                 ),
-                metadata=_tool_metadata(cognitive_event_ids=[]),
+                metadata=_result_metadata(cognitive_event_ids=[]),
             )
 
         if not isinstance(raw_updates, list) or not update_items:
             return ToolResult(
-                name=self.name,
+                name=self.spec.name,
                 output=_memory_output(
                     status="rejected",
                     next_action="explain_rejection",
                     results=[],
                 ),
-                metadata=_tool_metadata(cognitive_event_ids=[]),
+                metadata=_result_metadata(cognitive_event_ids=[]),
             )
 
         cognitive_event_ids: list[str] = []
@@ -385,13 +399,13 @@ class MemoryProposeTool:
 
         status = _aggregate_status(results)
         return ToolResult(
-            name=self.name,
+            name=self.spec.name,
             output=_memory_output(
                 status=status,
                 next_action=_aggregate_next_action(results),
                 results=results,
             ),
-            metadata=_tool_metadata(cognitive_event_ids=cognitive_event_ids),
+            metadata=_result_metadata(cognitive_event_ids=cognitive_event_ids),
         )
 
 
@@ -1356,7 +1370,7 @@ def _memory_output(
     }
 
 
-def _tool_metadata(*, cognitive_event_ids: list[str]) -> dict[str, Any]:
+def _result_metadata(*, cognitive_event_ids: list[str]) -> dict[str, Any]:
     return {
         "cognitive_event_ids": list(cognitive_event_ids),
     }

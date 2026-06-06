@@ -31,6 +31,95 @@ class ToolResult:
 
 
 @dataclass(frozen=True)
+class ToolSpec:
+    """Single static contract for one tool implementation."""
+
+    name: str
+    description: str
+    parameters: Mapping[str, Any]
+    strict: bool = True
+    toolset: str = "default"
+    read_only: bool = False
+    concurrency_safe: bool = False
+    destructive: bool = False
+    requires_user_interaction: bool = False
+    max_result_size_chars: int = 100_000
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _required_text(self.name, "name"))
+        object.__setattr__(
+            self,
+            "description",
+            _required_text(self.description, "description"),
+        )
+        object.__setattr__(self, "toolset", _required_text(self.toolset, "toolset"))
+        if not isinstance(self.parameters, Mapping):
+            raise ValueError("parameters must be a JSON schema mapping")
+        object.__setattr__(self, "parameters", dict(self.parameters))
+        for field_name in (
+            "strict",
+            "read_only",
+            "concurrency_safe",
+            "destructive",
+            "requires_user_interaction",
+        ):
+            if not isinstance(getattr(self, field_name), bool):
+                raise ValueError(f"{field_name} must be a boolean")
+        if (
+            isinstance(self.max_result_size_chars, bool)
+            or not isinstance(self.max_result_size_chars, int)
+            or self.max_result_size_chars < 1
+        ):
+            raise ValueError("max_result_size_chars must be a positive integer")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a stable JSON-friendly representation."""
+
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": dict(self.parameters),
+            "strict": self.strict,
+            "toolset": self.toolset,
+            "read_only": self.read_only,
+            "concurrency_safe": self.concurrency_safe,
+            "destructive": self.destructive,
+            "requires_user_interaction": self.requires_user_interaction,
+            "max_result_size_chars": self.max_result_size_chars,
+        }
+
+
+@dataclass(frozen=True)
+class ToolAvailability:
+    """Current availability for a registered tool."""
+
+    available: bool = True
+    reason: str | None = None
+    details: Mapping[str, JSONValue] = field(default_factory=dict)
+
+    @classmethod
+    def unavailable(
+        cls,
+        reason: str,
+        *,
+        details: Mapping[str, JSONValue] | None = None,
+    ) -> ToolAvailability:
+        """Build a standard unavailable result."""
+
+        return cls(available=False, reason=reason, details=dict(details or {}))
+
+    def to_dict(self) -> dict[str, JSONValue]:
+        """Return a stable JSON-friendly representation."""
+
+        payload: dict[str, JSONValue] = {"available": self.available}
+        if self.reason is not None:
+            payload["reason"] = self.reason
+        if self.details:
+            payload["details"] = dict(self.details)
+        return payload
+
+
+@dataclass(frozen=True)
 class ToolExecutionContext:
     """Runtime context available to one concrete tool invocation."""
 
@@ -58,14 +147,18 @@ def tool_output_to_model_content(output: JSONValue) -> str:
 class Tool(Protocol):
     """Protocol for tool implementations.
 
-    Tools may also expose provider-neutral JSON schema metadata:
-    ``parameters`` as a JSON schema object and ``strict`` as an optional
-    structured-output strictness hint. The registry supplies an empty object
-    schema for tools that do not define parameters.
+    Static schema and governance data lives in ``spec``. Dynamic runtime
+    availability remains a method because it may depend on configuration,
+    credentials, or environment state.
     """
 
-    name: str
-    description: str
+    @property
+    def spec(self) -> ToolSpec:
+        """Return the static tool contract."""
+        ...
+
+    def check_available(self) -> ToolAvailability:
+        """Return whether the tool can currently run."""
 
     def run(
         self,
@@ -75,20 +168,41 @@ class Tool(Protocol):
         """Run the tool with validated arguments."""
 
 
-class ToolWithParameters(Tool, Protocol):
-    """Tool protocol extension for tools with an explicit parameter schema."""
-
-    parameters: Mapping[str, Any]
-
-
-class ToolWithStrict(Tool, Protocol):
-    """Tool protocol extension for tools that opt into strict schema handling."""
-
-    strict: bool | None
-
-
 class ToolWithTraceArguments(Tool, Protocol):
     """Tool protocol extension for custom tool.started argument summaries."""
 
     def trace_arguments(self, arguments: dict[str, Any]) -> Mapping[str, Any]:
         """Return trace-safe arguments for runtime trace metadata."""
+
+
+def tool_spec(tool: Tool) -> ToolSpec:
+    """Return the validated static tool contract."""
+
+    try:
+        spec = tool.spec
+    except AttributeError as exc:
+        raise TypeError("tool spec must be a ToolSpec") from exc
+    if not isinstance(spec, ToolSpec):
+        raise TypeError("tool spec must be a ToolSpec")
+    return spec
+
+
+def tool_availability(tool: Tool) -> ToolAvailability:
+    """Return current availability for a tool without leaking check failures."""
+
+    try:
+        availability = tool.check_available()
+        if not isinstance(availability, ToolAvailability):
+            raise TypeError("check_available must return ToolAvailability")
+        return availability
+    except Exception as exc:
+        return ToolAvailability.unavailable(
+            f"availability check failed: {exc}",
+            details={"error_type": type(exc).__name__},
+        )
+
+
+def _required_text(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be non-empty")
+    return value.strip()

@@ -20,7 +20,13 @@ from alpha_agent.cognition.projections.belief import (
     BeliefSearchCandidate,
     BeliefSearchParams,
 )
-from alpha_agent.tools.base import JSONValue, ToolExecutionContext, ToolResult
+from alpha_agent.tools.base import (
+    JSONValue,
+    ToolAvailability,
+    ToolExecutionContext,
+    ToolResult,
+    ToolSpec,
+)
 
 MEMORY_RECALL_TOOL_NAME = "memory_recall"
 MEMORY_RECALL_CONTEXT_KEY = "memory_recall"
@@ -90,72 +96,79 @@ class ScoredBeliefCandidate:
 class MemoryRecallTool:
     """Search active long-term atomic beliefs through the belief store."""
 
-    name = MEMORY_RECALL_TOOL_NAME
-    description = (
-        "Search stable long-term atomic beliefs when explicit memory lookup would help "
-        "answer the current turn. Returns compact belief handles with id, content, "
-        "memory_kind, scope, lifecycle, and held_since. Does not write memory; use "
-        "memory_propose for explicit long-term memory write proposals."
-    )
-    strict = True
-    parameters = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "query": {
-                "type": "string",
-                "maxLength": 300,
-            },
-            "keywords": {
-                "type": "array",
-                "maxItems": 12,
-                "items": {
+    spec = ToolSpec(
+        name=MEMORY_RECALL_TOOL_NAME,
+        description=(
+            "Search stable long-term atomic beliefs when explicit memory lookup would help "
+            "answer the current turn. Returns compact belief handles with id, content, "
+            "memory_kind, scope, lifecycle, and held_since. Does not write memory; use "
+            "memory_propose for explicit long-term memory write proposals."
+        ),
+        parameters={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "query": {
                     "type": "string",
-                    "maxLength": 80,
+                    "maxLength": 300,
+                },
+                "keywords": {
+                    "type": "array",
+                    "maxItems": 12,
+                    "items": {
+                        "type": "string",
+                        "maxLength": 80,
+                    },
+                },
+                "entities": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                        "type": "string",
+                        "maxLength": 120,
+                    },
+                },
+                "scope": {
+                    "type": "string",
+                    "enum": ["counterpart", "global", "both"],
+                },
+                "types": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "fact",
+                            "preference",
+                            "constraint",
+                            "procedure",
+                            "value",
+                            "relationship",
+                        ],
+                    },
+                },
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8,
                 },
             },
-            "entities": {
-                "type": "array",
-                "maxItems": 8,
-                "items": {
-                    "type": "string",
-                    "maxLength": 120,
-                },
-            },
-            "scope": {
-                "type": "string",
-                "enum": ["counterpart", "global", "both"],
-            },
-            "types": {
-                "type": "array",
-                "maxItems": 8,
-                "items": {
-                    "type": "string",
-                    "enum": [
-                        "fact",
-                        "preference",
-                        "constraint",
-                        "procedure",
-                        "value",
-                        "relationship",
-                    ],
-                },
-            },
-            "max_results": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 8,
-            },
+            "required": ["query"],
         },
-        "required": ["query"],
-    }
+        toolset="memory",
+        read_only=True,
+        concurrency_safe=True,
+    )
+
+    def check_available(self) -> ToolAvailability:
+        return ToolAvailability()
 
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         parsed = _parse_arguments(arguments)
         recall_context = _memory_recall_context(context.extensions, context.session_id)
 
         if parsed.scope == "counterpart" and recall_context.counterpart is None:
-            return ToolResult(name=self.name, output={"results": []})
+            return ToolResult(name=self.spec.name, output={"results": []})
 
         counterpart = (
             recall_context.counterpart if parsed.scope in {"counterpart", "both"} else None
@@ -199,7 +212,7 @@ class MemoryRecallTool:
             results.append(result)
             if len(results) >= parsed.max_results:
                 break
-        return ToolResult(name=self.name, output={"results": results})
+        return ToolResult(name=self.spec.name, output={"results": results})
 
 
 def score_belief_candidates(
