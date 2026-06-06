@@ -55,6 +55,8 @@ env_passthrough = ["ALPHA_VISIBLE_ENV"]
 [tools.files]
 enabled = true
 allowed_roots = [".", "~/custom-alpha/files"]
+patch_enabled = true
+write_roots = ["~/custom-alpha/write"]
 max_read_chars = 111
 max_file_bytes = 222
 max_search_matches = 3
@@ -133,6 +135,8 @@ api_key = "tvly-file-key"
         Path(".").resolve(),
         Path("~/custom-alpha/files").expanduser().resolve(),
     )
+    assert config.file_tool.patch_enabled is True
+    assert config.file_tool.write_roots == (Path("~/custom-alpha/write").expanduser().resolve(),)
     assert config.file_tool.max_read_chars == 111
     assert config.file_tool.max_file_bytes == 222
     assert config.file_tool.max_search_matches == 3
@@ -221,6 +225,8 @@ allowed_workdirs = ["."]
     monkeypatch.setenv("ALPHA_BASH_TOOL_ENV_PASSTHROUGH", "ALPHA_VISIBLE_ENV,CI")
     monkeypatch.setenv("ALPHA_FILE_TOOL_ENABLED", "true")
     monkeypatch.setenv("ALPHA_FILE_TOOL_ALLOWED_ROOTS", ".,~/alpha-files")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_PATCH_ENABLED", "true")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_WRITE_ROOTS", "~/alpha-write")
     monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_READ_CHARS", "123")
     monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_FILE_BYTES", "456")
     monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_SEARCH_MATCHES", "7")
@@ -266,6 +272,8 @@ allowed_workdirs = ["."]
         Path(".").resolve(),
         Path("~/alpha-files").expanduser().resolve(),
     )
+    assert config.file_tool.patch_enabled is True
+    assert config.file_tool.write_roots == (Path("~/alpha-write").expanduser().resolve(),)
     assert config.file_tool.max_read_chars == 123
     assert config.file_tool.max_file_bytes == 456
     assert config.file_tool.max_search_matches == 7
@@ -374,6 +382,14 @@ def test_config_cli_set_and_get(
         app,
         ["config", "set", "tools.files.allowed_roots", ".,~/alpha-files"],
     )
+    set_files_write_roots = runner.invoke(
+        app,
+        ["config", "set", "tools.files.write_roots", "~/alpha-write"],
+    )
+    set_files_patch_enabled = runner.invoke(
+        app,
+        ["config", "set", "tools.files.patch_enabled", "true"],
+    )
     set_provider_limit = runner.invoke(
         app,
         ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
@@ -381,6 +397,10 @@ def test_config_cli_set_and_get(
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
     get_bash_enabled = runner.invoke(app, ["config", "get", "tools.bash.enabled"])
     get_files_enabled = runner.invoke(app, ["config", "get", "tools.files.enabled"])
+    get_files_patch_enabled = runner.invoke(
+        app,
+        ["config", "get", "tools.files.patch_enabled"],
+    )
 
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
@@ -390,13 +410,17 @@ def test_config_cli_set_and_get(
     assert set_bash_workdirs.exit_code == 0
     assert set_files_enabled.exit_code == 0
     assert set_files_roots.exit_code == 0
+    assert set_files_patch_enabled.exit_code == 0
+    assert set_files_write_roots.exit_code == 0
     assert set_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
     assert get_bash_enabled.exit_code == 0
     assert get_files_enabled.exit_code == 0
+    assert get_files_patch_enabled.exit_code == 0
     assert "codex" in get_provider.output
     assert "true" in get_bash_enabled.output
     assert "true" in get_files_enabled.output
+    assert "true" in get_files_patch_enabled.output
     config = load_config(env_file=None, config_file=config_path)
     assert config.llm_provider == "codex"
     assert config.llm_debug_logging is True
@@ -413,6 +437,39 @@ def test_config_cli_set_and_get(
         Path(".").resolve(),
         Path("~/alpha-files").expanduser().resolve(),
     )
+    assert config.file_tool.patch_enabled is True
+    assert config.file_tool.write_roots == (Path("~/alpha-write").expanduser().resolve(),)
+
+
+def test_file_patch_config_defaults_to_disabled(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.file_tool.patch_enabled is False
+    assert config.file_tool.write_roots == ()
+
+
+def test_file_patch_config_allows_empty_write_roots_when_patch_enabled(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[tools.files]
+enabled = false
+patch_enabled = true
+write_roots = []
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.file_tool.enabled is False
+    assert config.file_tool.patch_enabled is True
+    assert config.file_tool.write_roots == ()
 
 
 def test_config_set_preserves_cognition_consolidation_section(

@@ -45,6 +45,19 @@ max_timeout_seconds = 600
 max_output_chars = 30000
 env_passthrough = []
 
+[tools.files]
+# Read-only file tools are enabled by default. file_patch stays disabled until
+# both patch_enabled is true and write_roots is non-empty.
+enabled = true
+allowed_roots = ["."]
+patch_enabled = false
+write_roots = []
+max_read_chars = 20000
+max_file_bytes = 1000000
+max_search_matches = 100
+max_list_entries = 500
+max_output_chars = 30000
+
 [cognition.consolidation]
 enabled = true
 interval_seconds = 300

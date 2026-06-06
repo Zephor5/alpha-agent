@@ -1,7 +1,8 @@
-"""Read-only local file tools."""
+"""Local file tools."""
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import hashlib
 from collections.abc import Iterator
@@ -19,6 +20,7 @@ from alpha_agent.tools.base import (
 )
 
 FILE_LIST_TOOL_NAME = "file_list"
+FILE_PATCH_TOOL_NAME = "file_patch"
 FILE_READ_TOOL_NAME = "file_read"
 FILE_SEARCH_TOOL_NAME = "file_search"
 
@@ -58,6 +60,11 @@ class _FileToolBase:
     def __init__(self, config: FileToolConfig | None = None):
         self.config = config or FileToolConfig()
         self.allowed_roots = _normalized_roots(self.config.allowed_roots)
+        self.write_roots = _normalized_roots(
+            self.config.write_roots,
+            required=False,
+            label="tools.files.write_roots",
+        )
 
     def check_available(self) -> ToolAvailability:
         """Return whether local file reading is enabled."""
@@ -472,7 +479,237 @@ class FileSearchTool(_FileToolBase):
                 files.append(child)
 
 
-def _normalized_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
+class FilePatchTool(_FileToolBase):
+    """Apply structured text edits inside configured write roots."""
+
+    @property
+    def spec(self) -> ToolSpec:
+        """Return the file patching spec derived from current config."""
+
+        return ToolSpec(
+            name=FILE_PATCH_TOOL_NAME,
+            description=(
+                "Apply small structured edits to a UTF-8 text file inside configured write "
+                "roots. Requires expected_sha256 for existing files to avoid overwriting "
+                "concurrent changes."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Text file path relative to a configured write root.",
+                    },
+                    "expected_sha256": {
+                        "type": "string",
+                        "description": (
+                            "Current file SHA-256 for existing files. Must be empty or "
+                            "omitted when creating a new file."
+                        ),
+                    },
+                    "create_if_missing": {
+                        "type": "boolean",
+                        "description": "Whether to create the file when it does not exist.",
+                    },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "start_line": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "1-based first original line to replace.",
+                                },
+                                "end_line": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": (
+                                        "1-based inclusive original line to replace. Use "
+                                        "start_line = end_line + 1 to insert."
+                                    ),
+                                },
+                                "replacement": {
+                                    "type": "string",
+                                    "description": "Replacement text for this edit.",
+                                },
+                            },
+                            "required": ["start_line", "end_line", "replacement"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["path", "edits"],
+                "additionalProperties": False,
+            },
+            max_result_size_chars=self.config.max_output_chars,
+            toolset="file",
+            read_only=False,
+            destructive=True,
+            concurrency_safe=False,
+            requires_user_interaction=False,
+        )
+
+    def check_available(self) -> ToolAvailability:
+        """Return whether local file patching is enabled."""
+
+        availability = super().check_available()
+        if not availability.available:
+            return availability
+        if not self.config.patch_enabled:
+            return ToolAvailability.unavailable("tools.files.patch_enabled is false")
+        if not self.write_roots:
+            return ToolAvailability.unavailable("tools.files.write_roots is empty")
+        return ToolAvailability()
+
+    def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        """Apply validated structured edits and return compact patch metadata."""
+
+        del context
+        resolved = self._resolve_patch_path(
+            arguments.get("path"),
+            create_if_missing=_optional_bool(
+                arguments.get("create_if_missing", False),
+                "create_if_missing",
+            ),
+        )
+        current_data: bytes | None
+        before_sha256: str | None
+        if resolved.path.exists():
+            if resolved.path.is_symlink():
+                raise FileToolError("symlink files are not patched")
+            if not resolved.path.is_file():
+                raise FileToolError("path must be a file")
+            current_data = _read_file_bytes(
+                resolved.path,
+                max_file_bytes=self.config.max_file_bytes,
+            )
+            before_sha256 = hashlib.sha256(current_data).hexdigest()
+            expected_sha256 = _required_sha256(arguments.get("expected_sha256"))
+            if expected_sha256 != before_sha256:
+                raise FileToolError("expected_sha256 does not match current file content")
+            before_text = _decode_text(current_data)
+        else:
+            new_file_expected_sha256 = _optional_text(arguments.get("expected_sha256"))
+            if new_file_expected_sha256:
+                raise FileToolError("expected_sha256 must be empty when creating a new file")
+            current_data = None
+            before_sha256 = None
+            before_text = ""
+
+        original_lines = before_text.splitlines(keepends=True)
+        edits = _parse_patch_edits(arguments.get("edits"), line_count=len(original_lines))
+        new_lines = list(original_lines)
+        for edit in reversed(edits):
+            start_index = edit.start_line - 1
+            end_index = edit.end_line
+            new_lines[start_index:end_index] = edit.replacement.splitlines(keepends=True)
+        after_text = "".join(new_lines)
+        after_data = after_text.encode("utf-8")
+        _decode_text(after_data)
+        if len(after_data) > self.config.max_file_bytes:
+            raise FileToolError("patched file is too large to write")
+
+        resolved.path.write_bytes(after_data)
+        after_sha256 = hashlib.sha256(after_data).hexdigest()
+        diff = _bounded_unified_diff(
+            before_text,
+            after_text,
+            path=resolved.display,
+            max_chars=self.config.max_output_chars,
+        )
+        output: dict[str, JSONValue] = {
+            "path": resolved.display,
+            "before_sha256": before_sha256,
+            "after_sha256": after_sha256,
+            "bytes_written": len(after_data),
+            "line_count": len(after_text.splitlines()),
+            "applied_edits": len(edits),
+            "diff": diff,
+        }
+        return ToolResult(
+            name=self.spec.name,
+            output=output,
+            metadata={
+                "path": resolved.display,
+                "created": current_data is None,
+                "bytes_written": len(after_data),
+                "applied_edits": len(edits),
+            },
+        )
+
+    def _resolve_patch_path(
+        self,
+        value: Any,
+        *,
+        create_if_missing: bool,
+    ) -> _ResolvedPath:
+        if not isinstance(value, str) or not value:
+            raise FileToolError("path must be a non-empty string")
+        if "\x00" in value:
+            raise FileToolError("path must not contain NUL characters")
+        if not self.write_roots:
+            raise FileToolError("tools.files.write_roots is empty")
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.write_roots[0] / candidate
+        if candidate.is_symlink():
+            raise FileToolError("symlink files are not patched")
+        self._reject_symlink_ancestors(candidate)
+        if candidate.exists():
+            resolved = candidate.resolve(strict=True)
+            if not _is_inside_allowed(resolved, self.write_roots):
+                raise FileToolError("path is outside tools.files.write_roots")
+            return _ResolvedPath(path=resolved, display=self._display_write_path(resolved))
+
+        if not create_if_missing:
+            raise FileToolError("create_if_missing must be true to create a new file")
+        parent = candidate.parent
+        if not parent.exists():
+            raise FileToolError("parent directory must exist")
+        if parent.is_symlink():
+            raise FileToolError("symlink directories are not patched")
+        parent_resolved = parent.resolve(strict=True)
+        if not parent_resolved.is_dir():
+            raise FileToolError("parent path must be a directory")
+        resolved = candidate.resolve(strict=False)
+        if not _is_inside_allowed(parent_resolved, self.write_roots) or not _is_inside_allowed(
+            resolved,
+            self.write_roots,
+        ):
+            raise FileToolError("path is outside tools.files.write_roots")
+        return _ResolvedPath(path=resolved, display=self._display_write_path(resolved))
+
+    def _reject_symlink_ancestors(self, candidate: Path) -> None:
+        for ancestor in reversed(candidate.parents):
+            if ancestor.is_symlink():
+                raise FileToolError("symlink ancestors are not patched")
+            if not ancestor.exists():
+                return
+
+    def _display_write_path(self, path: Path) -> str:
+        for root in self.write_roots:
+            if path == root:
+                return "."
+            if path.is_relative_to(root):
+                return path.relative_to(root).as_posix()
+        return self._display_path(path)
+
+
+@dataclass(frozen=True)
+class _PatchEdit:
+    start_line: int
+    end_line: int
+    replacement: str
+
+
+def _normalized_roots(
+    roots: tuple[Path, ...],
+    *,
+    required: bool = True,
+    label: str = "tools.files.allowed_roots",
+) -> tuple[Path, ...]:
     resolved: list[Path] = []
     seen: set[Path] = set()
     for root in roots:
@@ -480,8 +717,8 @@ def _normalized_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
         if path not in seen:
             resolved.append(path)
             seen.add(path)
-    if not resolved:
-        raise FileToolError("tools.files.allowed_roots must not be empty")
+    if required and not resolved:
+        raise FileToolError(f"{label} must not be empty")
     return tuple(resolved)
 
 
@@ -494,6 +731,14 @@ def _optional_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _optional_bool(value: Any, field_name: str) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        raise FileToolError(f"{field_name} must be a boolean")
+    return value
 
 
 def _bounded_int(
@@ -521,6 +766,89 @@ def _optional_positive_int(value: Any, field_name: str) -> int | None:
     if value < 1:
         raise FileToolError(f"{field_name} must be at least 1")
     return value
+
+
+def _required_sha256(value: Any) -> str:
+    text = _optional_text(value)
+    if text is None:
+        raise FileToolError("expected_sha256 is required for existing files")
+    normalized = text.lower()
+    if len(normalized) != 64 or any(char not in "0123456789abcdef" for char in normalized):
+        raise FileToolError("expected_sha256 must be a SHA-256 hex digest")
+    return normalized
+
+
+def _parse_patch_edits(value: Any, *, line_count: int) -> list[_PatchEdit]:
+    if not isinstance(value, list) or not value:
+        raise FileToolError("edits must be a non-empty array")
+    edits: list[_PatchEdit] = []
+    previous_start = 0
+    previous_covered_end = 0
+    for raw_edit in value:
+        if not isinstance(raw_edit, dict):
+            raise FileToolError("each edit must be an object")
+        start_line = _required_line_int(raw_edit.get("start_line"), "start_line", minimum=1)
+        end_line = _required_line_int(raw_edit.get("end_line"), "end_line", minimum=0)
+        replacement = raw_edit.get("replacement")
+        if not isinstance(replacement, str):
+            raise FileToolError("replacement must be a string")
+        if "\x00" in replacement:
+            raise FileToolError("binary files are not allowed")
+        if end_line < start_line - 1:
+            raise FileToolError("end_line must be at least start_line - 1")
+        is_insertion = start_line == end_line + 1
+        if is_insertion:
+            if start_line > line_count + 1:
+                raise FileToolError("insertion line must be at most line_count + 1")
+            covered_end = end_line
+        else:
+            if end_line > line_count:
+                raise FileToolError("end_line must be at most line_count")
+            covered_end = end_line
+        if start_line < previous_start:
+            raise FileToolError("edits must be in original file order")
+        if start_line == previous_start or start_line <= previous_covered_end:
+            raise FileToolError("edits must not overlap")
+        edits.append(
+            _PatchEdit(
+                start_line=start_line,
+                end_line=end_line,
+                replacement=replacement,
+            )
+        )
+        previous_start = start_line
+        previous_covered_end = covered_end
+    return edits
+
+
+def _required_line_int(value: Any, field_name: str, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise FileToolError(f"{field_name} must be an integer")
+    if value < minimum:
+        raise FileToolError(f"{field_name} must be at least {minimum}")
+    return value
+
+
+def _bounded_unified_diff(
+    before_text: str,
+    after_text: str,
+    *,
+    path: str,
+    max_chars: int,
+) -> str:
+    diff = "".join(
+        difflib.unified_diff(
+            before_text.splitlines(keepends=True),
+            after_text.splitlines(keepends=True),
+            fromfile=f"{path}\tbefore",
+            tofile=f"{path}\tafter",
+            n=3,
+        )
+    )
+    limit = max(200, max_chars - 1000)
+    if len(diff) <= limit:
+        return diff
+    return diff[:limit] + "\n... diff truncated ...\n"
 
 
 def _read_file_bytes(path: Path, *, max_file_bytes: int) -> bytes:

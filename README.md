@@ -137,6 +137,22 @@ model by default. Other tools are opt-in:
   `tools.files.allowed_roots`, skip common large internal directories, reject
   binary content, and apply configured output limits.
 
+  `file_patch` is a separate write tool and is disabled by default. It is only
+  registered when `tools.files.enabled = true`, `tools.files.patch_enabled = true`,
+  and `tools.files.write_roots` is non-empty:
+
+  ```bash
+  uv run alpha config set tools.files.write_roots .
+  uv run alpha config set tools.files.patch_enabled true
+  uv run alpha daemon restart
+  ```
+
+  `file_patch` validates paths against `tools.files.write_roots`, rejects symlink
+  targets, binary files, and files above `tools.files.max_file_bytes`, and requires
+  `expected_sha256` to match existing file content before edits are applied. New
+  files require `create_if_missing = true` and an empty or omitted
+  `expected_sha256`.
+
 Each registered tool declares one `ToolSpec`: provider-facing name,
 description, parameters, and strict mode plus internal governance fields such as
 toolset, read/write behavior, concurrency safety, destructive side effects, and

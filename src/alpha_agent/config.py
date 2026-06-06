@@ -57,6 +57,8 @@ env_passthrough = []
 [tools.files]
 enabled = true
 allowed_roots = ["."]
+patch_enabled = false
+write_roots = []
 max_read_chars = 20000
 max_file_bytes = 1000000
 max_search_matches = 100
@@ -141,6 +143,8 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "tools.bash.env_passthrough": list,
     "tools.files.enabled": bool,
     "tools.files.allowed_roots": list,
+    "tools.files.patch_enabled": bool,
+    "tools.files.write_roots": list,
     "tools.files.max_read_chars": int,
     "tools.files.max_file_bytes": int,
     "tools.files.max_search_matches": int,
@@ -273,10 +277,12 @@ class BashToolConfig:
 
 @dataclass(frozen=True)
 class FileToolConfig:
-    """Configuration for local read-only file tools."""
+    """Configuration for local file tools."""
 
     enabled: bool = True
     allowed_roots: tuple[Path, ...] = (Path("."),)
+    patch_enabled: bool = False
+    write_roots: tuple[Path, ...] = ()
     max_read_chars: int = 20000
     max_file_bytes: int = 1000000
     max_search_matches: int = 100
@@ -679,6 +685,7 @@ def _validate_config_value(key: str, value: Any) -> Any:
         "tools.bash.allowed_workdirs",
         "tools.bash.env_passthrough",
         "tools.files.allowed_roots",
+        "tools.files.write_roots",
     }:
         return _validate_string_list_config_value(key, value)
     if key in {"tools.bash.default_workdir"}:
@@ -713,6 +720,7 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         "tools.bash.max_timeout_seconds": config.bash_tool.max_timeout_seconds,
         "tools.bash.max_output_chars": config.bash_tool.max_output_chars,
         "tools.files.enabled": config.file_tool.enabled,
+        "tools.files.patch_enabled": config.file_tool.patch_enabled,
         "tools.files.max_read_chars": config.file_tool.max_read_chars,
         "tools.files.max_file_bytes": config.file_tool.max_file_bytes,
         "tools.files.max_search_matches": config.file_tool.max_search_matches,
@@ -915,6 +923,8 @@ def _validate_config_data(config_data: dict[str, Any]) -> None:
         if not allowed_roots:
             raise ValueError("tools.files.allowed_roots must not be empty")
         _path_tuple(allowed_roots, "tools.files.allowed_roots")
+        write_roots = _list_value(files.get("write_roots"), ())
+        _path_tuple(write_roots, "tools.files.write_roots")
         for key, default in (
             ("max_read_chars", 20000),
             ("max_file_bytes", 1000000),
@@ -1158,9 +1168,21 @@ def _file_tool_config(section: dict[str, Any]) -> FileToolConfig:
         ),
         "tools.files.allowed_roots",
     )
+    write_roots = _path_tuple(
+        _list_env(
+            "ALPHA_FILE_TOOL_WRITE_ROOTS",
+            _list_value(section.get("write_roots"), ()),
+        ),
+        "tools.files.write_roots",
+    )
     return FileToolConfig(
         enabled=_bool_env("ALPHA_FILE_TOOL_ENABLED", _bool_value(section.get("enabled"), True)),
         allowed_roots=allowed_roots,
+        patch_enabled=_bool_env(
+            "ALPHA_FILE_TOOL_PATCH_ENABLED",
+            _bool_value(section.get("patch_enabled"), False),
+        ),
+        write_roots=write_roots,
         max_read_chars=_int_env(
             "ALPHA_FILE_TOOL_MAX_READ_CHARS",
             _int_value(section.get("max_read_chars"), 20000),
