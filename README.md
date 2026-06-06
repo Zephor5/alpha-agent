@@ -289,7 +289,7 @@ interval_seconds = 300
 enabled = true
 startup_delay_seconds = 5
 interval_seconds = 300
-tick_timeout_seconds = 30
+tick_timeout_seconds = 60
 
 [cognition.background.intake]
 batch_size = 64
@@ -400,7 +400,7 @@ Useful environment overrides:
 - `ALPHA_COGNITION_BACKGROUND_INTERVAL_SECONDS`: Background gate-check cadence.
   Defaults to `300`.
 - `ALPHA_COGNITION_BACKGROUND_TICK_TIMEOUT_SECONDS`: Soft timeout for one
-  bounded background tick. Defaults to `30`.
+  bounded background tick. Defaults to `60`.
 - `ALPHA_COGNITION_BACKGROUND_INTAKE_BATCH_SIZE` /
   `ALPHA_COGNITION_BACKGROUND_INTAKE_MIN_SOURCES`: Raw source intake chunk and
   gate.

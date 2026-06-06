@@ -62,7 +62,7 @@ interval_seconds = 300
 enabled = true
 startup_delay_seconds = 5
 interval_seconds = 300
-tick_timeout_seconds = 30
+tick_timeout_seconds = 60
 
 [cognition.background.intake]
 batch_size = 64
@@ -299,7 +299,7 @@ class CognitionBackgroundConfig:
     enabled: bool = True
     startup_delay_seconds: int = 5
     interval_seconds: int = 300
-    tick_timeout_seconds: int = 30
+    tick_timeout_seconds: int = 60
     intake: BackgroundIntakeConfig = field(default_factory=BackgroundIntakeConfig)
     extraction: BackgroundExtractionConfig = field(default_factory=BackgroundExtractionConfig)
     consolidation: BackgroundConsolidationConfig = field(
@@ -968,7 +968,7 @@ def _background_config(section: dict[str, Any]) -> CognitionBackgroundConfig:
         ),
         tick_timeout_seconds=_int_env(
             "ALPHA_COGNITION_BACKGROUND_TICK_TIMEOUT_SECONDS",
-            _int_value(section.get("tick_timeout_seconds"), 30),
+            _int_value(section.get("tick_timeout_seconds"), 60),
         ),
         intake=BackgroundIntakeConfig(
             batch_size=_int_env(

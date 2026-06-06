@@ -53,7 +53,7 @@ interval_seconds = 300
 enabled = true
 startup_delay_seconds = 5
 interval_seconds = 300
-tick_timeout_seconds = 30
+tick_timeout_seconds = 60
 
 [cognition.background.intake]
 batch_size = 64

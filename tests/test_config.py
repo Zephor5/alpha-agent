@@ -149,6 +149,15 @@ api_key = "tvly-file-key"
     assert config.cognition_drive_active_goal_limit == 8
 
 
+def test_background_tick_timeout_default_is_sixty_seconds(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.cognition_background.tick_timeout_seconds == 60
+
+
 def test_environment_overrides_config_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
