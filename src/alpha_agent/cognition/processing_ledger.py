@@ -1,4 +1,4 @@
-"""Sidecar processing ledger for background cognition stages."""
+"""Sidecar ledger for background cognition maintenance stages."""
 
 from __future__ import annotations
 

@@ -26,7 +26,7 @@ messages, runtime traces, tool metadata, memory proposal events, and turn audit
 events.
 
 `session_id` is the transcript and context bucket. It owns prompt history,
-context-window foreground state, tool messages, runtime traces, and internal
+runtime handover continuity state, tool messages, runtime traces, and internal
 self-signal streams.
 
 ## Event Vocabulary
@@ -81,9 +81,12 @@ their lower-layer source material is eligible. The timer decides when to check
 for work; it does not refresh cognition by elapsed time alone.
 
 Background progress uses the sidecar processing ledger rather than mutating raw
-session messages or replaying audit logs. Summary-generation gates exist in
-configuration, but profile/domain/self summary synthesis is still deferred.
-Removed deterministic workers are not preserved as compatibility shims.
+session messages or replaying audit logs. Extraction, consolidation, and
+profile/domain/self summary outputs are cognition-maintenance artifacts. Only
+the explicit counterpart profile snapshot path can turn a profile summary into
+answer-path context; other background artifacts are not prompt context by
+default. Removed deterministic workers are not preserved as compatibility
+shims.
 
 ## Drive Loop
 

@@ -1,4 +1,4 @@
-"""LLM-mediated memory consolidation and conflict review."""
+"""LLM-mediated cognition-maintenance consolidation and conflict review."""
 
 from __future__ import annotations
 

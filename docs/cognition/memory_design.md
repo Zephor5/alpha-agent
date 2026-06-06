@@ -13,8 +13,9 @@ Alpha keeps three separate memory surfaces:
   continuity and handover compression.
 - `atomic_beliefs`: first-order long-term belief entities written by explicit
   memory tools or retained workers.
-- `summary_beliefs`: compact profile and summary entities used for stable
-  prompt context.
+- `summary_beliefs`: compact profile and maintenance summary entities. Only
+  `counterpart_profile` can become stable prompt context through the explicit
+  session profile snapshot path.
 
 `cognitive_events` remains append-only, but belief lifecycle is not rebuilt from
 belief events. Memory writes mutate the belief tables directly and may emit
@@ -136,8 +137,9 @@ lower-layer material:
 Processing state lives in the sidecar ledger tables
 `background_source_progress`, `background_source_window`, and
 `background_stage_run`; raw session messages and traces are not mutated to track
-background progress. Summary gate configuration exists for profile/domain/self
-summary phases, but summary belief generation is still deferred.
+background progress. Extraction, consolidation, and profile/domain/self summary
+outputs are cognition-maintenance artifacts, not answer-path prompt context by
+default.
 
 ## Prompt Use
 
@@ -148,4 +150,6 @@ The prompt builder uses:
 - explicit `memory_recall` calls for dynamic lookup.
 
 Runtime does not silently search long-term memory from the user message and does
-not inject dynamic recall results unless the model calls the tool.
+not inject dynamic recall results unless the model calls the tool. It also does
+not inject background source windows, stage runs, audit records, extraction
+outputs, consolidation outputs, or non-profile summary outputs by default.

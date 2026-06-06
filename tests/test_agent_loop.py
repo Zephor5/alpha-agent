@@ -21,7 +21,13 @@ from alpha_agent.cognition.models import (
     SummaryKind,
     counterpart_ref,
 )
+from alpha_agent.cognition.processing_ledger import (
+    BackgroundSourceRef,
+    BackgroundStage,
+    BackgroundStageRunStatus,
+)
 from alpha_agent.cognition.projections.belief import BeliefProjection
+from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import (
     BackgroundExtractionConfig,
     BackgroundIntakeConfig,
@@ -195,19 +201,19 @@ def test_background_profile_summary_feeds_new_sessions_without_mutating_existing
     )
     counterpart = counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))
     projection.upsert_atomic(
-        _background_consolidated_belief(
-            "belief:profile-source-python",
-            "User prefers Python examples.",
-            about=[counterpart],
-            object_="profile source python",
-        )
+            _background_memory_belief(
+                "belief:profile-source-python",
+                "User prefers Python examples.",
+                about=[counterpart],
+                object_="profile source python",
+            )
     )
     projection.upsert_atomic(
-        _background_consolidated_belief(
-            "belief:profile-source-concise",
-            "User likes concise answers.",
-            about=[counterpart],
-            object_="profile source concise",
+            _background_memory_belief(
+                "belief:profile-source-concise",
+                "User likes concise answers.",
+                about=[counterpart],
+                object_="profile source concise",
         )
     )
     answer_provider = _QueuedRecordingProvider(
@@ -267,17 +273,29 @@ def test_background_profile_summary_feeds_new_sessions_without_mutating_existing
     assert new_snapshot.source_belief_id == str(latest.id)
 
 
-def test_answer_prompt_excludes_internal_cognition_state_by_default(tmp_path) -> None:
+def test_answer_prompt_excludes_background_integration_artifacts_by_default(
+    tmp_path,
+) -> None:
     store = _store(tmp_path)
     log = SQLiteEventLog(store)
-    projection = BeliefProjection(store)
+    service = CognitionStateStore(store)
+    projection = service.beliefs
     counterpart = counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))
     projection.upsert_atomic(
-        belief(
-            "belief:context-window-background",
-            "CONTEXT_WINDOW_BACKGROUND_SENTINEL",
+        _background_memory_belief(
+            "belief:background-extracted",
+            "BACKGROUND_EXTRACTION_OUTPUT_SENTINEL",
             about=[counterpart],
-            object_="context-window background",
+            object_="background extraction output",
+            derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+        )
+    )
+    projection.upsert_atomic(
+        _background_memory_belief(
+            "belief:background-consolidated",
+            "BACKGROUND_CONSOLIDATION_OUTPUT_SENTINEL",
+            about=[counterpart],
+            object_="background consolidation output",
         )
     )
     projection.upsert_summary(
@@ -304,6 +322,44 @@ def test_answer_prompt_excludes_internal_cognition_state_by_default(tmp_path) ->
         content="AUDIT_LOG_SENTINEL RUNTIME_TRACE_SENTINEL",
         metadata={"internal_entity_dump": "INTERNAL_ENTITY_DUMP_SENTINEL"},
     )
+    background_source = store.append_session_message(
+        session_id="background-maintenance",
+        kind="user_message",
+        llm_role="user",
+        raw_content="raw source selected by background maintenance",
+    )
+    source_ref = BackgroundSourceRef("session_message", background_source.id)
+    trace_ref = BackgroundSourceRef(
+        "runtime_trace",
+        store.append_runtime_trace(
+            session_id="s1",
+            event_type="background.maintenance",
+            content="BACKGROUND_INTEGRATION_TRACE_SENTINEL",
+        ).id,
+    )
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        source_refs=(source_ref, trace_ref),
+        idempotency_key="phase9:respond:window",
+        metadata={"source_window_text": "SOURCE_WINDOW_SENTINEL"},
+    )
+    run = service.ledger.start_stage_run(
+        worker_id="phase9-worker",
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        window_id=window.window_id,
+        input_refs=(source_ref, trace_ref),
+    )
+    service.ledger.finish_stage_run(
+        run.run_id,
+        status=BackgroundStageRunStatus.FAILED,
+        error="STAGE_RUN_SENTINEL",
+    )
+    service.write_audit_record(
+        "phase9_guard",
+        payload={"audit_payload": "COGNITION_STATE_AUDIT_SENTINEL"},
+    )
     provider = _RecordingProvider("answer")
     agent = AlphaAgent(store=store, llm_provider=provider, event_log=log)
 
@@ -312,13 +368,19 @@ def test_answer_prompt_excludes_internal_cognition_state_by_default(tmp_path) ->
     rendered_prompt = json.dumps(provider.calls[0], sort_keys=True)
     assert "visible user question" in rendered_prompt
     for hidden_text in [
-        "CONTEXT_WINDOW_BACKGROUND_SENTINEL",
+        "BACKGROUND_EXTRACTION_OUTPUT_SENTINEL",
+        "BACKGROUND_CONSOLIDATION_OUTPUT_SENTINEL",
         "DOMAIN_GUIDANCE_SUMMARY_SENTINEL",
         "SELF_MEMORY_SUMMARY_SENTINEL",
         "AUDIT_LOG_SENTINEL",
         "RUNTIME_TRACE_SENTINEL",
         "INTERNAL_ENTITY_DUMP_SENTINEL",
-        "belief:context-window-background",
+        "BACKGROUND_INTEGRATION_TRACE_SENTINEL",
+        "SOURCE_WINDOW_SENTINEL",
+        "STAGE_RUN_SENTINEL",
+        "COGNITION_STATE_AUDIT_SENTINEL",
+        "belief:background-extracted",
+        "belief:background-consolidated",
         "belief:domain-guidance",
         "belief:self-memory",
     ]:
@@ -961,12 +1023,13 @@ def _seed_active_belief(
     return projection
 
 
-def _background_consolidated_belief(
+def _background_memory_belief(
     belief_id: str,
     content: str,
     *,
     about: list[object],
     object_: str,
+    derivation_stage: DerivationStage = DerivationStage.BACKGROUND_CONSOLIDATED,
 ) -> AtomicBelief:
     record = belief(
         belief_id,
@@ -974,7 +1037,7 @@ def _background_consolidated_belief(
         about=about,  # type: ignore[arg-type]
         object_=object_,
     ).to_record()
-    record["derivation_stage"] = DerivationStage.BACKGROUND_CONSOLIDATED.value
+    record["derivation_stage"] = derivation_stage.value
     record["authority"] = "background_synthesized"
     return AtomicBelief.from_record(record)
 

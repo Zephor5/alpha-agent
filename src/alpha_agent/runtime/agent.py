@@ -715,8 +715,8 @@ class AlphaAgent:
     ) -> SessionProfileSnapshot | None:
         snapshot = self.store.get_session_profile_snapshot(session_id)
         # Counterpart profile context is intentionally session-stable: once a
-        # session has a snapshot, later digest refreshes do not rewrite this
-        # prompt prefix mid-conversation.
+        # session has a snapshot, later background summary updates do not
+        # rewrite this prompt prefix mid-conversation.
         if snapshot is not None or counterpart is None:
             return snapshot
         profile = BeliefProjection(self.store).latest_summary(

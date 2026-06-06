@@ -2,6 +2,12 @@ from __future__ import annotations
 
 import json
 
+from alpha_agent.cognition.processing_ledger import (
+    BackgroundSourceRef,
+    BackgroundStage,
+    BackgroundStageRunStatus,
+)
+from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import LLMContextConfig
 from alpha_agent.runtime.session_context import SessionContextAssembler, wrap_system_reminder
 from alpha_agent.state.store import StateStore
@@ -223,6 +229,77 @@ def test_assembler_after_compressed_message_uses_compressed_ordinal_boundary(tmp
         {"role": "user", "content": wrap_system_reminder("handover through tool result")},
         {"role": "user", "content": "continue"},
     ]
+
+
+def test_session_context_keeps_runtime_handover_visible_and_background_artifacts_hidden(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    covered = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="covered source before handover",
+    )
+    compressed = store.append_compressed_message(
+        session_id="s1",
+        raw_content="RUNTIME_HANDOVER_CONTINUITY_SENTINEL",
+        compression_point_ordinal=covered.ordinal,
+        compression_version="test-v1",
+    )
+    fresh = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="fresh visible source",
+    )
+    trace = store.append_runtime_trace(
+        session_id="s1",
+        event_type="background.debug",
+        content="BACKGROUND_RUNTIME_TRACE_SENTINEL",
+    )
+    service = CognitionStateStore(store)
+    source_ref = BackgroundSourceRef("session_message", covered.id)
+    trace_ref = BackgroundSourceRef("runtime_trace", trace.id)
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        source_refs=(source_ref, trace_ref),
+        idempotency_key="phase9:session-context:window",
+        metadata={"source_window_text": "BACKGROUND_SOURCE_WINDOW_SENTINEL"},
+    )
+    run = service.ledger.start_stage_run(
+        worker_id="phase9-worker",
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        window_id=window.window_id,
+        input_refs=(source_ref, trace_ref),
+    )
+    service.ledger.finish_stage_run(
+        run.run_id,
+        status=BackgroundStageRunStatus.FAILED,
+        error="BACKGROUND_STAGE_RUN_SENTINEL",
+    )
+    service.write_audit_record(
+        "phase9_guard",
+        payload={"audit_payload": "COGNITION_STATE_AUDIT_SENTINEL"},
+    )
+
+    projection = SessionContextAssembler(store).load("s1")
+
+    assert projection.compressed_message == compressed
+    assert [message.id for message in projection.source_messages] == [compressed.id, fresh.id]
+    rendered_context = json.dumps(projection.chat_messages, sort_keys=True)
+    assert "RUNTIME_HANDOVER_CONTINUITY_SENTINEL" in rendered_context
+    assert "fresh visible source" in rendered_context
+    assert "covered source before handover" not in rendered_context
+    for hidden_text in [
+        "BACKGROUND_RUNTIME_TRACE_SENTINEL",
+        "BACKGROUND_SOURCE_WINDOW_SENTINEL",
+        "BACKGROUND_STAGE_RUN_SENTINEL",
+        "COGNITION_STATE_AUDIT_SENTINEL",
+    ]:
+        assert hidden_text not in rendered_context
 
 
 def test_truncate_tool_context_if_needed_truncates_unchecked_tool_replay_payloads(

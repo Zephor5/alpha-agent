@@ -1,4 +1,4 @@
-"""LLM-mediated summary belief generation from consolidated atomic memories."""
+"""LLM-mediated cognition-maintenance summaries from consolidated memories."""
 
 from __future__ import annotations
 

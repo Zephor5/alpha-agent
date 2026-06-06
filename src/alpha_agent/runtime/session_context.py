@@ -1,4 +1,4 @@
-"""Session context projection built from append-only source messages."""
+"""Answer-path session context projection built from source messages."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ TOOL_TRUNCATION_MARKER = "<system-reminder>truncated</system-reminder>"
 
 @dataclass(frozen=True)
 class SessionContextProjection:
-    """LLM-visible source context projected from the session message stream."""
+    """LLM-visible answer context projected from the session message stream."""
 
     source_messages: list[SessionMessage]
     chat_messages: list[ChatMessage]
@@ -57,7 +57,7 @@ class _ReplayPayloadUpdate:
 
 
 class SessionContextAssembler:
-    """Assemble source-aware LLM context without mutating the message stream."""
+    """Assemble answer-path LLM context without mutating the message stream."""
 
     def __init__(self, store: StateStore):
         self.store = store
@@ -68,7 +68,11 @@ class SessionContextAssembler:
         *,
         before_ordinal: int | None = None,
     ) -> SessionContextProjection:
-        """Load the latest compressed handover plus later source messages."""
+        """Load runtime handover continuity plus later source messages.
+
+        Background cognition ledgers, stage runs, and audit rows are maintenance
+        artifacts; they are not part of this answer-path projection.
+        """
 
         compressed = self.store.find_latest_compressed_message(
             session_id,

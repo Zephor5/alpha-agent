@@ -1,4 +1,4 @@
-"""LLM handover compression over projected session context."""
+"""Answer-path handover compression over projected session context."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ Do not describe or include this compression instruction as session content."""
 
 @dataclass(frozen=True)
 class HandoverCompressionPrompt:
-    """Transient provider prompt plus the source ordinal it covers."""
+    """Transient continuity prompt plus the source ordinal it covers."""
 
     messages: list[ChatMessage]
     compression_point_ordinal: int

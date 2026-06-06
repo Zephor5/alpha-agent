@@ -1,4 +1,4 @@
-"""LLM-mediated extraction of atomic belief drafts from raw runtime sources."""
+"""LLM-mediated cognition-maintenance extraction from raw runtime sources."""
 
 from __future__ import annotations
 

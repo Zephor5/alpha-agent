@@ -13,13 +13,13 @@ The real LLM request for an answer may include:
 The real LLM request must not include:
 
 - Raw `CognitionView` dumps.
-- `context_window_background` summaries.
+- Deleted legacy cognition context-window summaries.
 - Domain-guidance summary beliefs by default.
 - Self-memory summary beliefs by default.
 - Hidden pre-turn memory recall results.
 - Per-turn background summaries that were not requested through a tool.
 
-`respond()` already excludes all of these today: it builds system message, profile-snapshot context, session history, and current user message, and `CognitionView` / `build_view` are reached only from CLI inspection commands. So this section largely codifies current behavior, and `CognitionView` itself is removed (see [Legacy Removal Inventory](07-legacy-removal.md), R6). The real risk is drift between two prompt-construction paths: `cli prompt` assembles the preview by hand, and `respond()` assembles through `PromptFrame` / `_rebuild_runtime_llm_messages`, with a duplicated profile-context builder on each side. Phase 1 must unify both on one shared prompt builder so they cannot diverge, rather than only asserting that two parallel implementations currently match.
+`respond()` excludes these artifacts: it builds the runtime system message, optional session profile snapshot, session history, and current user message through the shared runtime prompt builder. `CognitionView` itself is removed (see [Legacy Removal Inventory](07-legacy-removal.md), R6). The real risk this contract guards against is drift between debug/preview prompt construction and the real runtime prompt path, so both paths must use the same shared builder rather than parallel implementations.
 
 ## Memory Write Paths
 
