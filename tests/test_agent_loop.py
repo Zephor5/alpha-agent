@@ -10,16 +10,25 @@ import pytest
 
 from alpha_agent.cognition.coordinator import LockBusy, LoopAcquireRequest, LoopCoordinator
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
+from alpha_agent.cognition.loops import BackgroundCognitionService
 from alpha_agent.cognition.models import (
     SUBJECT_SELF,
+    AtomicBelief,
     CognitiveEventKind,
     CounterpartId,
+    DerivationStage,
     Instant,
     SummaryKind,
     counterpart_ref,
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
-from alpha_agent.config import LLMContextConfig
+from alpha_agent.config import (
+    BackgroundExtractionConfig,
+    BackgroundIntakeConfig,
+    BackgroundSummaryConfig,
+    CognitionBackgroundConfig,
+    LLMContextConfig,
+)
 from alpha_agent.llm.base import (
     AssistantChatMessage,
     ChatMessage,
@@ -171,6 +180,91 @@ def test_agent_reuses_session_profile_snapshot_before_history(tmp_path) -> None:
     snapshot = store.get_session_profile_snapshot("s1")
     assert snapshot is not None
     assert snapshot.content == "Stable profile v1."
+
+
+def test_background_profile_summary_feeds_new_sessions_without_mutating_existing_snapshot(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    projection = _seed_active_digest(
+        store,
+        log,
+        "belief:digest:old",
+        "Original stable profile.",
+    )
+    counterpart = counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))
+    projection.upsert_atomic(
+        _background_consolidated_belief(
+            "belief:profile-source-python",
+            "User prefers Python examples.",
+            about=[counterpart],
+            object_="profile source python",
+        )
+    )
+    projection.upsert_atomic(
+        _background_consolidated_belief(
+            "belief:profile-source-concise",
+            "User likes concise answers.",
+            about=[counterpart],
+            object_="profile source concise",
+        )
+    )
+    answer_provider = _QueuedRecordingProvider(
+        ["old first answer", "old second answer", "new first answer"]
+    )
+    agent = AlphaAgent(store=store, llm_provider=answer_provider, event_log=log)
+
+    agent.respond("old first turn", session_id="existing")
+
+    summary_provider = _RecordingProvider(
+        _summary_json(
+            summary_kind=SummaryKind.COUNTERPART_PROFILE,
+            scope="counterpart",
+            about=[{"kind": "counterpart", "id": str(DEFAULT_COUNTERPART_ID)}],
+            object_="counterpart profile",
+            content="User prefers Python examples and concise answers.",
+        )
+    )
+    reports = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            intake=BackgroundIntakeConfig(min_sources=999),
+            extraction=BackgroundExtractionConfig(min_sources=999),
+            summary=BackgroundSummaryConfig(
+                batch_size=2,
+                initial_min_beliefs=2,
+                changed_source_min=2,
+                invalidated_source_min=1,
+            ),
+        ),
+        llm_provider=summary_provider,
+    ).tick_once()
+
+    assert any(report.worker == "memory_summary" and report.emitted == 1 for report in reports)
+    latest = projection.latest_summary(
+        summary_kind=SummaryKind.COUNTERPART_PROFILE,
+        about=counterpart,
+    )
+    assert latest is not None
+    assert latest.content == "User prefers Python examples and concise answers."
+    assert latest.derivation_stage == DerivationStage.BACKGROUND_SUMMARIZED
+
+    agent.respond("old second turn", session_id="existing")
+    agent.respond("new first turn", session_id="new-session")
+
+    assert "Counterpart profile: Original stable profile." in str(answer_provider.calls[1])
+    assert "concise answers" not in str(answer_provider.calls[1])
+    assert "Counterpart profile: User prefers Python examples and concise answers." in str(
+        answer_provider.calls[2]
+    )
+    existing_snapshot = store.get_session_profile_snapshot("existing")
+    new_snapshot = store.get_session_profile_snapshot("new-session")
+    assert existing_snapshot is not None
+    assert existing_snapshot.content == "Original stable profile."
+    assert new_snapshot is not None
+    assert new_snapshot.source_belief_id == str(latest.id)
 
 
 def test_answer_prompt_excludes_internal_cognition_state_by_default(tmp_path) -> None:
@@ -865,6 +959,55 @@ def _seed_active_belief(
         )
     )
     return projection
+
+
+def _background_consolidated_belief(
+    belief_id: str,
+    content: str,
+    *,
+    about: list[object],
+    object_: str,
+) -> AtomicBelief:
+    record = belief(
+        belief_id,
+        content,
+        about=about,  # type: ignore[arg-type]
+        object_=object_,
+    ).to_record()
+    record["derivation_stage"] = DerivationStage.BACKGROUND_CONSOLIDATED.value
+    record["authority"] = "background_synthesized"
+    return AtomicBelief.from_record(record)
+
+
+def _summary_json(
+    *,
+    summary_kind: SummaryKind,
+    scope: str,
+    about: list[dict[str, str]],
+    object_: str,
+    content: str,
+    structure: dict[str, object] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "operation": "create_summary_belief",
+            "authority": "background_synthesized",
+            "rationale": "Fixture summary synthesis.",
+            "requires_confirmation": False,
+            "source_span_note": "from selected summary sources",
+            "payload": {
+                "summary_belief_draft": {
+                    "summary_kind": summary_kind.value,
+                    "scope": scope,
+                    "about": about,
+                    "object": object_,
+                    "content": content,
+                    "structure": structure or {},
+                }
+            },
+        },
+        sort_keys=True,
+    )
 
 
 class _QueuedRecordingProvider:

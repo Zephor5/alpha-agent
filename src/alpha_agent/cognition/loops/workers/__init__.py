@@ -7,6 +7,7 @@ from alpha_agent.cognition.loops.workers.memory_consolidation import (
     MemoryConsolidationWorker,
 )
 from alpha_agent.cognition.loops.workers.memory_extraction import MemoryExtractionWorker
+from alpha_agent.cognition.loops.workers.memory_summary import MemorySummaryWorker
 
 
 def default_workers() -> list[ScheduledWorker]:
@@ -18,5 +19,6 @@ __all__ = [
     "MemoryConflictReviewWorker",
     "MemoryConsolidationWorker",
     "MemoryExtractionWorker",
+    "MemorySummaryWorker",
     "default_workers",
 ]

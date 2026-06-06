@@ -540,6 +540,47 @@ class BeliefProjection(Projection):
             ).fetchall()
         return [self._from_atomic_row(row) for row in rows]
 
+    def list_active_summaries(
+        self,
+        *,
+        summary_kind: SummaryKind | None = None,
+        scope: BeliefScope | None = None,
+        about: Reference | None = None,
+    ) -> list[SummaryBelief]:
+        conditions = ["summary_beliefs.lifecycle = ?"]
+        params: list[Any] = [BeliefLifecycle.ACTIVE.value]
+        if summary_kind is not None:
+            conditions.append("summary_beliefs.summary_kind = ?")
+            params.append(SummaryKind(summary_kind).value)
+        if scope is not None:
+            conditions.append("summary_beliefs.scope = ?")
+            params.append(BeliefScope(scope).value)
+        if about is not None:
+            conditions.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM belief_about_index
+                    WHERE belief_about_index.belief_table = ?
+                      AND belief_about_index.belief_id = summary_beliefs.id
+                      AND belief_about_index.about_kind = ?
+                      AND belief_about_index.about_id = ?
+                )
+                """
+            )
+            params.extend([_SUMMARY_TABLE, about.kind, about.id])
+        with self.store.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM summary_beliefs
+                WHERE {' AND '.join(conditions)}
+                ORDER BY held_since ASC, id ASC
+                """,
+                params,
+            ).fetchall()
+        return [self._from_summary_row(row) for row in rows]
+
     def reset(self) -> None:
         self._ensure_schema()
         with self.store.transaction() as conn:

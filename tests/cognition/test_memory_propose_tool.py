@@ -4,16 +4,24 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
+import pytest
+
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import (
     AtomicBelief,
     Authority,
+    BeliefId,
     BeliefLifecycle,
     BeliefScope,
     CognitiveEventKind,
     DerivationStage,
+    Instant,
     MemoryKind,
+    NLStatement,
     Reference,
+    SummaryBelief,
+    SummaryKind,
+    ValidityWindow,
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.state_service import CognitionStateStore
@@ -317,6 +325,62 @@ def test_memory_propose_rejects_summary_belief_targets_cleanly(tmp_path) -> None
     assert BeliefProjection(store).get_by_id(profile.id) == profile
 
 
+@pytest.mark.parametrize(
+    ("target_domain", "valid_until", "expected_status", "expected_reason"),
+    [
+        ("memory_propose", None, "pending_confirmation", "domain_guidance_requires_confirmation"),
+        ("memory_propose", "2020-01-01T00:00:00+00:00", "accepted", "accepted_append_distinct"),
+        ("memory_recall", None, "accepted", "accepted_append_distinct"),
+    ],
+)
+def test_memory_propose_applies_only_active_matching_domain_summary_guidance(
+    tmp_path,
+    target_domain: str,
+    valid_until: str | None,
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    store = _store(tmp_path)
+    projection = BeliefProjection(store)
+    projection.upsert_summary(
+        _domain_summary(
+            "belief:memory-propose-guidance",
+            target_domain=target_domain,
+            valid_until=valid_until,
+        )
+    )
+
+    _run_updates(
+        store,
+        session_id="s1",
+        message="Remember that I prefer Rust examples.",
+        updates=[
+            _update(
+                "append_distinct",
+                memory={
+                    "type": "preference",
+                    "content": "User prefers Rust examples.",
+                    "evidence": "User explicitly asked to remember Rust examples.",
+                    "scope": "counterpart",
+                },
+                reason="User explicitly stated a stable example-language preference.",
+            )
+        ],
+    )
+
+    tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
+    assert tool_output["status"] == expected_status
+    assert tool_output["results"][0]["reason"] == expected_reason
+    written = projection.get_by_id(tool_output["results"][0]["new_belief_id"])
+    assert isinstance(written, AtomicBelief)
+    expected_lifecycle = (
+        BeliefLifecycle.PENDING_CONFIRMATION
+        if expected_status == "pending_confirmation"
+        else BeliefLifecycle.ACTIVE
+    )
+    assert written.lifecycle == expected_lifecycle
+
+
 def test_memory_propose_noops_without_reactive_write_context(tmp_path) -> None:
     store = _store(tmp_path)
     registry = build_tool_registry()
@@ -394,6 +458,35 @@ def _append_memory(
         ],
     )
     return BeliefProjection(store).list_active()[-1]
+
+
+def _domain_summary(
+    belief_id: str,
+    *,
+    target_domain: str,
+    valid_until: str | None,
+) -> SummaryBelief:
+    return SummaryBelief(
+        id=BeliefId(belief_id),
+        subject=Reference("subject", "subject:self"),
+        about=[],
+        object="memory proposal domain guidance",
+        content=NLStatement("Memory proposal guidance requires confirmation."),
+        summary_kind=SummaryKind.DOMAIN_SUMMARY,
+        derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
+        scope=BeliefScope.GLOBAL,
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        structure={
+            "target_domain": target_domain,
+            "memory_propose": {"requires_confirmation": True},
+        },
+        validity=ValidityWindow(
+            observed_at=Instant("2026-01-01T00:00:00+00:00"),
+            valid_until=Instant(valid_until) if valid_until is not None else None,
+        ),
+        lifecycle=BeliefLifecycle.ACTIVE,
+        held_since=Instant("2026-01-01T00:00:00+00:00"),
+    )
 
 
 def _run_updates(

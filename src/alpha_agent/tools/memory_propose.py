@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+from alpha_agent.cognition.domain_guidance import memory_propose_requires_confirmation
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.models import (
     AtomicBelief,
@@ -339,6 +340,7 @@ class MemoryProposeTool:
                     errors=[*parsed.errors, "too_many_updates"],
                 )
             plan = _plan_update(parsed, memory_context)
+            plan = _apply_domain_guidance(parsed, memory_context, plan)
             result = _UpdateResult(
                 proposal_id=proposal_id,
                 update_index=index,
@@ -819,6 +821,26 @@ def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _Oper
         operation=parsed.operation,
         reason="invalid_operation",
         memory=parsed.memory,
+    )
+
+
+def _apply_domain_guidance(
+    parsed: _ParsedUpdate,
+    context: MemoryProposalContext,
+    plan: _OperationPlan,
+) -> _OperationPlan:
+    del parsed
+    if plan.decision != "accepted" or context.belief_projection is None:
+        return plan
+    if not memory_propose_requires_confirmation(
+        context.belief_projection,
+        counterpart=context.counterpart,
+    ):
+        return plan
+    return replace(
+        plan,
+        decision="pending_confirmation",
+        reason="domain_guidance_requires_confirmation",
     )
 
 

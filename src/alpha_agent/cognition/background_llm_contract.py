@@ -149,6 +149,10 @@ class BackgroundLLMValidationContext:
     allowed_target_belief_ids: frozenset[str] = frozenset()
     input_belief_ids: frozenset[str] = frozenset()
     allowed_about_refs: frozenset[tuple[str, str]] | None = None
+    allowed_summary_kinds: frozenset[SummaryKind] | None = None
+    required_summary_scope: BeliefScope | None = None
+    required_summary_about_refs: frozenset[tuple[str, str]] | None = None
+    required_summary_target_domain: str | None = None
     derivation_stage: DerivationStage = DerivationStage.BACKGROUND_EXTRACTED
 
 
@@ -304,6 +308,9 @@ def _validate_stage_output_shape(
     if stage in _CONSOLIDATION_STAGES:
         _validate_consolidation_stage_output_shape(operation=operation, payload=payload)
         return
+    if stage == BackgroundStage.SUMMARY:
+        _validate_summary_stage_output_shape(operation=operation, payload=payload)
+        return
     if stage != BackgroundStage.EXTRACTION:
         return
     if operation != _EXTRACTION_OPERATION:
@@ -336,6 +343,27 @@ def _validate_consolidation_stage_output_shape(
         expected = {"belief_update"}
     else:
         expected = {"belief_update", "atomic_belief_draft"}
+    if keys != expected:
+        expected_text = ", ".join(sorted(expected))
+        raise BackgroundLLMValidationError(
+            f"{operation} payload must contain exactly: {expected_text}"
+        )
+
+
+def _validate_summary_stage_output_shape(
+    *,
+    operation: str,
+    payload: Mapping[str, Any],
+) -> None:
+    if operation == "create_summary_belief":
+        expected = {"summary_belief_draft"}
+    elif operation == "profile_summary_candidate":
+        expected = {"profile_summary_candidate"}
+    else:
+        raise BackgroundLLMValidationError(
+            "summary stage accepts only create_summary_belief outputs"
+        )
+    keys = {str(key) for key in payload}
     if keys != expected:
         expected_text = ", ".join(sorted(expected))
         raise BackgroundLLMValidationError(
@@ -385,16 +413,42 @@ def _validate_summary_draft(
         raise BackgroundLLMValidationError(
             f"unsupported summary_kind: {raw.get('summary_kind')}"
         ) from exc
+    if (
+        context.allowed_summary_kinds is not None
+        and summary_kind not in context.allowed_summary_kinds
+    ):
+        allowed = ", ".join(sorted(item.value for item in context.allowed_summary_kinds))
+        raise BackgroundLLMValidationError(
+            f"summary_kind {summary_kind.value!r} is outside allowed summary target: {allowed}"
+        )
     scope, about, project_descriptor = _validate_scope_about(raw, context)
+    if context.required_summary_scope is not None and scope != context.required_summary_scope:
+        raise BackgroundLLMValidationError(
+            "summary scope does not match selected summary target: "
+            f"{scope.value} != {context.required_summary_scope.value}"
+        )
+    if context.required_summary_about_refs is not None:
+        actual_about = frozenset((ref.kind, ref.id) for ref in about)
+        if actual_about != context.required_summary_about_refs:
+            raise BackgroundLLMValidationError(
+                "summary about refs do not match selected summary target"
+            )
     content = _required_str(raw, "content")
     _validate_source_window_content(content, context)
+    structure = _optional_dict(raw.get("structure"))
+    if context.required_summary_target_domain is not None:
+        target_domain = (structure or {}).get("target_domain")
+        if target_domain != context.required_summary_target_domain:
+            raise BackgroundLLMValidationError(
+                "summary target_domain does not match selected summary target"
+            )
     return ValidatedSummaryBeliefDraft(
         summary_kind=summary_kind,
         scope=scope,
         about=about,
         content=content,
         object=_optional_str(raw.get("object")) or content,
-        structure=_optional_dict(raw.get("structure")),
+        structure=structure,
         validity=_validity(raw.get("validity")),
         update_policy=_optional_dict(raw.get("update_policy")) or {},
         project_descriptor=project_descriptor,

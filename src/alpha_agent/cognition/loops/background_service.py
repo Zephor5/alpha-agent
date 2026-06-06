@@ -31,6 +31,10 @@ from alpha_agent.cognition.loops.workers.memory_consolidation import (
     MemoryConsolidationWorker,
 )
 from alpha_agent.cognition.loops.workers.memory_extraction import MemoryExtractionWorker
+from alpha_agent.cognition.loops.workers.memory_summary import (
+    MemorySummaryWorker,
+    pending_summary_target_count,
+)
 from alpha_agent.cognition.models import (
     AtomicBelief,
     BeliefLifecycle,
@@ -390,6 +394,9 @@ class BackgroundCognitionService:
             consolidation_batch_size=self.config.consolidation.batch_size,
             conflict_batch_size=self.config.conflict.batch_size,
             summary_batch_size=self.config.summary.batch_size,
+            summary_initial_min_beliefs=self.config.summary.initial_min_beliefs,
+            summary_changed_source_min=self.config.summary.changed_source_min,
+            summary_invalidated_source_min=self.config.summary.invalidated_source_min,
         )
 
     def _eligible_workers(self) -> list[ScheduledWorker]:
@@ -409,6 +416,16 @@ class BackgroundCognitionService:
             _append_if_present(eligible, workers_by_name, MemoryConsolidationWorker.name)
         if _pending_conflict_count(self.state_service) >= self.config.conflict.min_conflicts:
             _append_if_present(eligible, workers_by_name, MemoryConflictReviewWorker.name)
+        if (
+            pending_summary_target_count(
+                self.state_service,
+                initial_min_beliefs=self.config.summary.initial_min_beliefs,
+                changed_source_min=self.config.summary.changed_source_min,
+                invalidated_source_min=self.config.summary.invalidated_source_min,
+            )
+            > 0
+        ):
+            _append_if_present(eligible, workers_by_name, MemorySummaryWorker.name)
         if _expired_belief_count(self.state_service) > 0:
             _append_if_present(eligible, workers_by_name, ArchiveExpiredWorker.name)
         return eligible
@@ -440,6 +457,7 @@ class BackgroundCognitionService:
             MemoryExtractionWorker(),
             MemoryConsolidationWorker(),
             MemoryConflictReviewWorker(),
+            MemorySummaryWorker(),
             ArchiveExpiredWorker(),
         )
 
