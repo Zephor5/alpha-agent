@@ -47,7 +47,11 @@ from alpha_agent.cognition.render import (
     wrap_system_reminder,
 )
 from alpha_agent.cognition.state_service import CognitionStateStore
-from alpha_agent.config import DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS, LLMContextConfig
+from alpha_agent.config import (
+    DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS,
+    AlphaConfig,
+    LLMContextConfig,
+)
 from alpha_agent.llm.base import (
     ChatCompletionToolCall,
     ChatMessage,
@@ -75,7 +79,7 @@ from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
 from alpha_agent.state.models import RuntimeTrace, SessionMessage, SessionProfileSnapshot
 from alpha_agent.state.store import StateStore
-from alpha_agent.tools.base import ToolCall, tool_output_kind
+from alpha_agent.tools.base import ToolCall, TurnToolState, tool_output_kind
 from alpha_agent.tools.default import build_tool_registry
 from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_CONTEXT_KEY
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_CONTEXT_KEY
@@ -258,15 +262,19 @@ class AlphaAgent:
         event_log: EventLog | None = None,
         coordinator: LoopCoordinator | None = None,
         compact_extraction_submitter: CompactExtractionSubmitter | None = None,
+        config: AlphaConfig | None = None,
     ):
         self.store = store
         self.llm_provider = llm_provider
+        self.config = config or _default_alpha_config(store)
         self.session_context = SessionContextAssembler(store)
         self.llm_context_config = llm_context_config or LLMContextConfig()
         self.max_context_tokens = max_context_tokens or _default_max_context_tokens(
             getattr(llm_provider, "name", None)
         )
-        self.tool_registry = tool_registry or build_tool_registry()
+        self.tool_registry = (
+            build_tool_registry(self.config) if tool_registry is None else tool_registry
+        )
         self.tool_executor = ToolExecutor(self.tool_registry)
         self.max_tool_iterations = max(0, max_tool_iterations)
         self.max_llm_rounds = (
@@ -829,6 +837,7 @@ class AlphaAgent:
         llm_round_count = llm_retry_count = tool_iteration_count = 0
         tool_call_count = provider_tool_call_count = 0
         finalizing_reason: str | None = None
+        turn_tool_state = TurnToolState()
 
         while True:
             finalizing = finalizing_reason is not None
@@ -946,6 +955,7 @@ class AlphaAgent:
                 turn_context=turn_context,
                 session_id=session_id,
                 calls=provider_tool_calls,
+                turn_tool_state=turn_tool_state,
                 memory_propose_context={
                     **dict(memory_propose_context or {}),
                     "llm_call_id": completion.llm_call_id,
@@ -1395,6 +1405,7 @@ class AlphaAgent:
         turn_context: AgentTurnContext,
         session_id: str,
         calls: list[ToolCall],
+        turn_tool_state: TurnToolState,
         memory_propose_context: Mapping[str, Any] | None = None,
         memory_recall_context: Mapping[str, Any] | None = None,
         recover_errors: bool = False,
@@ -1407,6 +1418,7 @@ class AlphaAgent:
                 MEMORY_PROPOSE_CONTEXT_KEY: dict(memory_propose_context or {}),
                 MEMORY_RECALL_CONTEXT_KEY: dict(memory_recall_context or {}),
             },
+            turn_state=turn_tool_state,
             write_trace=lambda event_type, content, metadata: self.store.append_runtime_trace(
                 session_id=session_id,
                 event_type=event_type,
@@ -1511,6 +1523,15 @@ def _default_max_context_tokens(provider_name: object) -> int:
     return DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS.get(
         provider_key,
         DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS["openai-compatible"],
+    )
+
+
+def _default_alpha_config(store: StateStore) -> AlphaConfig:
+    base_dir = store.db_path.parent
+    return AlphaConfig(
+        db_path=store.db_path,
+        log_dir=base_dir / "logs",
+        gateway_status_path=base_dir / "gateway-status.json",
     )
 
 

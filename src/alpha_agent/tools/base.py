@@ -30,6 +30,13 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class TurnToolState:
+    """Mutable tool governance state scoped to one agent turn."""
+
+    repeated_call_counts: dict[str, int] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """Single static contract for one tool implementation."""
@@ -128,6 +135,7 @@ class ToolExecutionContext:
     output_dir: Path
     check_canceled: Callable[[str], None]
     extensions: Mapping[str, Any] = field(default_factory=dict)
+    turn_state: TurnToolState = field(default_factory=TurnToolState)
 
 
 def tool_output_kind(output: JSONValue) -> str:

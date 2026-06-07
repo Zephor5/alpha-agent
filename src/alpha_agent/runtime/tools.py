@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +19,7 @@ from alpha_agent.tools.base import (
     ToolExecutionContext,
     ToolResult,
     ToolSpec,
+    TurnToolState,
     tool_availability,
     tool_output_to_model_content,
     tool_spec,
@@ -27,6 +31,8 @@ CancelCheck = Callable[[str], None]
 ToolCallInput = ToolCall | LLMToolCall | Mapping[str, Any]
 ToolCallInputs = ToolCallInput | Sequence[ToolCallInput] | None
 TRUNCATION_MARKER_TEMPLATE = "[tool output truncated: {omitted_chars} chars omitted]"
+REPEATED_TOOL_CALL_WARNING_AT = 3
+REPEATED_TOOL_CALL_BLOCK_AFTER = 3
 
 
 class ToolExecutionError(RuntimeError):
@@ -64,6 +70,22 @@ class _ToolResultView:
     trace_metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _RepeatedCallInfo:
+    """Repeat count for one canonical tool call within a turn."""
+
+    arguments_hash: str
+    repeat_count: int
+
+    @property
+    def should_warn(self) -> bool:
+        return self.repeat_count == REPEATED_TOOL_CALL_WARNING_AT
+
+    @property
+    def should_block(self) -> bool:
+        return self.repeat_count > REPEATED_TOOL_CALL_BLOCK_AFTER
+
+
 class ToolExecutor:
     """Small deterministic tool executor backed by the explicit registry."""
 
@@ -98,6 +120,7 @@ class ToolExecutor:
         session_id: str = "unknown",
         output_dir: str | Path = Path(".alpha-agent/tool-results"),
         extensions: Mapping[str, Any] | None = None,
+        turn_state: TurnToolState | None = None,
         write_trace: ToolTraceWriter,
         check_canceled: CancelCheck,
         recover_errors: bool = False,
@@ -105,6 +128,7 @@ class ToolExecutor:
         """Execute a finite list of tool calls and persist diagnostic traces."""
 
         executed: list[ExecutedToolResult] = []
+        active_turn_state = turn_state if turn_state is not None else TurnToolState()
         for index, call in enumerate(calls):
             check_canceled("before_tool")
             parse_error = call.metadata.get("arguments_parse_error")
@@ -131,6 +155,27 @@ class ToolExecutor:
                 },
             )
             try:
+                repeated_call = self._record_repeated_call(active_turn_state, call)
+                if repeated_call.should_block:
+                    result = self._repeated_call_blocked_result(call, repeated_call)
+                    result_view = self._result_view(result, spec)
+                    completed_trace = write_trace(
+                        "tool.failed",
+                        result_view.content,
+                        {
+                            "tool_name": call.name,
+                            "tool_call_id": call.id,
+                            "tool_index": index,
+                            "started_trace_id": started_trace.id,
+                            "result": result_view.result_payload,
+                            **self._trace_governance_metadata(spec, availability),
+                            **result_view.trace_metadata,
+                        },
+                    )
+                    executed.append(
+                        ExecutedToolResult(call=call, result=result, trace=completed_trace)
+                    )
+                    continue
                 if parse_error:
                     raise ToolExecutionError(
                         call,
@@ -146,8 +191,11 @@ class ToolExecutor:
                     output_dir=Path(output_dir).expanduser(),
                     check_canceled=check_canceled,
                     extensions=dict(extensions or {}),
+                    turn_state=active_turn_state,
                 )
                 result = tool.run(dict(call.arguments), context)
+                if repeated_call.should_warn:
+                    result = self._result_with_repeated_call_warning(result, repeated_call)
                 if not self._is_canceled_result(result):
                     check_canceled("after_tool")
                 result_view = self._result_view(result, spec)
@@ -343,6 +391,67 @@ class ToolExecutor:
             return result.output.get("status") == "canceled"
         return False
 
+    def _record_repeated_call(
+        self,
+        turn_state: TurnToolState,
+        call: ToolCall,
+    ) -> _RepeatedCallInfo:
+        arguments_hash = _canonical_arguments_hash(call.arguments)
+        key = f"{call.name}:{arguments_hash}"
+        repeat_count = turn_state.repeated_call_counts.get(key, 0) + 1
+        turn_state.repeated_call_counts[key] = repeat_count
+        return _RepeatedCallInfo(
+            arguments_hash=arguments_hash,
+            repeat_count=repeat_count,
+        )
+
+    def _result_with_repeated_call_warning(
+        self,
+        result: ToolResult,
+        repeated_call: _RepeatedCallInfo,
+    ) -> ToolResult:
+        warning = _repeated_call_warning_payload(repeated_call)
+        return ToolResult(
+            name=result.name,
+            output={
+                "warning": warning,
+                "result": result.output,
+            },
+            metadata={
+                **dict(result.metadata),
+                "repeated_tool_call": warning,
+            },
+        )
+
+    def _repeated_call_blocked_result(
+        self,
+        call: ToolCall,
+        repeated_call: _RepeatedCallInfo,
+    ) -> ToolResult:
+        details = _repeated_call_details(call, repeated_call)
+        message = (
+            f"Repeated identical tool call blocked for {call.name}; "
+            "change the arguments or use the prior result."
+        )
+        return ToolResult(
+            name=call.name,
+            output={
+                "error": {
+                    "code": "repeated_tool_call_blocked",
+                    "message": message,
+                    "details": details,
+                }
+            },
+            metadata={
+                "failed": True,
+                "recoverable": True,
+                "error": message,
+                "error_type": "RepeatedToolCallBlocked",
+                "tool_call_id": call.id,
+                "repeated_tool_call": details,
+            },
+        )
+
     def _error_result(
         self,
         call: ToolCall,
@@ -379,6 +488,54 @@ class ToolExecutor:
                 "tool_call_id": call.id,
             },
         )
+
+
+def _canonical_arguments_hash(arguments: Mapping[str, Any]) -> str:
+    canonical = json.dumps(
+        _json_canonical_value(arguments),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _json_canonical_value(value: Any) -> Any:
+    if value is None or isinstance(value, bool | int | str):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else repr(value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_canonical_value(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_json_canonical_value(item) for item in value]
+    return repr(value)
+
+
+def _repeated_call_warning_payload(repeated_call: _RepeatedCallInfo) -> dict[str, Any]:
+    return {
+        "code": "repeated_tool_call",
+        "message": (
+            "This is the third identical tool call in the current turn; "
+            "the next identical call will be blocked."
+        ),
+        "repeat_count": repeated_call.repeat_count,
+        "max_repeats_without_block": REPEATED_TOOL_CALL_BLOCK_AFTER,
+        "arguments_hash": repeated_call.arguments_hash,
+    }
+
+
+def _repeated_call_details(
+    call: ToolCall,
+    repeated_call: _RepeatedCallInfo,
+) -> dict[str, Any]:
+    return {
+        "tool_name": call.name,
+        "repeat_count": repeated_call.repeat_count,
+        "max_repeats_without_block": REPEATED_TOOL_CALL_BLOCK_AFTER,
+        "arguments_hash": repeated_call.arguments_hash,
+    }
 
 
 def _bounded_truncated_content(content: str, limit: int) -> tuple[str, int]:

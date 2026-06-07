@@ -16,6 +16,7 @@ from alpha_agent.tools.base import (
     ToolExecutionContext,
     ToolResult,
     ToolSpec,
+    TurnToolState,
 )
 from alpha_agent.tools.bash import BashTool
 from alpha_agent.tools.memory_propose import MemoryProposeTool
@@ -163,6 +164,35 @@ class _BadSpecTool:
         return ToolResult(name="bad_spec", output="bad")
 
 
+class _CountingTool:
+    spec = ToolSpec(
+        name="counting",
+        description="Return the number of real dispatches.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        },
+        toolset="test",
+        max_result_size_chars=1000,
+    )
+
+    def __init__(self) -> None:
+        self.run_count = 0
+
+    def check_available(self) -> ToolAvailability:
+        return ToolAvailability()
+
+    def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
+        del arguments
+        self.run_count += 1
+        return ToolResult(
+            name=self.spec.name,
+            output={"run_count": self.run_count},
+            metadata={"turn_state_id": id(context.turn_state)},
+        )
+
+
 def test_registry_exposes_governance_metadata_and_filters_unavailable_tools() -> None:
     registry = ToolRegistry()
     registry.register(_GovernedTool())
@@ -207,6 +237,19 @@ def test_registry_exposes_governance_metadata_and_filters_unavailable_tools() ->
     assert "read_only" not in function_payload
     assert "max_result_size_chars" not in function_payload
     assert "group" not in governed.spec.to_dict()
+
+
+def test_tool_execution_context_direct_construction_gets_turn_state(
+    tmp_path: Path,
+) -> None:
+    context = ToolExecutionContext(
+        session_id="s1",
+        tool_call_id="call_1",
+        output_dir=tmp_path,
+        check_canceled=lambda _stage: None,
+    )
+
+    assert isinstance(context.turn_state, TurnToolState)
 
 
 @pytest.mark.parametrize("limit", [0, -1, True, 1.5, "100"])
@@ -316,6 +359,73 @@ def test_executor_records_output_limit_contract_without_mutating_tool_result_met
         "original_chars": 2,
         "truncated": False,
     }
+
+
+def test_executor_repeated_call_guard_is_turn_scoped_and_blocks_fourth_dispatch(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    tool = _CountingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    executor = ToolExecutor(registry)
+    turn_state = TurnToolState()
+
+    def execute(arguments: dict[str, Any], call_id: str) -> ToolResult:
+        return executor.execute(
+            calls=[ToolCall(id=call_id, name="counting", arguments=arguments)],
+            session_id="s1",
+            turn_state=turn_state,
+            write_trace=lambda event_type, content, metadata: store.append_runtime_trace(
+                session_id="s1",
+                event_type=event_type,
+                content=content,
+                metadata=metadata,
+            ),
+            check_canceled=lambda _stage: None,
+            recover_errors=True,
+        )[0].result
+
+    first = execute({"b": 2, "a": 1}, "call_1")
+    second = execute({"a": 1, "b": 2}, "call_2")
+    third = execute({"b": 2, "a": 1}, "call_3")
+    fourth = execute({"a": 1, "b": 2}, "call_4")
+
+    assert first.output == {"run_count": 1}
+    assert second.output == {"run_count": 2}
+    assert tool.run_count == 3
+    assert isinstance(third.output, dict)
+    third_output = cast(dict[str, Any], third.output)
+    third_warning = cast(dict[str, Any], third_output["warning"])
+    assert third_output["result"] == {"run_count": 3}
+    assert third_warning["code"] == "repeated_tool_call"
+    assert third_warning["repeat_count"] == 3
+    assert third.metadata["repeated_tool_call"]["arguments_hash"]
+    assert isinstance(fourth.output, dict)
+    fourth_output = cast(dict[str, Any], fourth.output)
+    fourth_error = cast(dict[str, Any], fourth_output["error"])
+    fourth_details = cast(dict[str, Any], fourth_error["details"])
+    assert fourth_error["code"] == "repeated_tool_call_blocked"
+    assert fourth_details["repeat_count"] == 4
+    assert fourth_details["arguments_hash"]
+    assert "arguments" not in fourth_details
+    assert tool.run_count == 3
+
+    fresh_turn_result = executor.execute(
+        calls=[ToolCall(id="call_5", name="counting", arguments={"a": 1, "b": 2})],
+        session_id="s1",
+        turn_state=TurnToolState(),
+        write_trace=lambda event_type, content, metadata: store.append_runtime_trace(
+            session_id="s1",
+            event_type=event_type,
+            content=content,
+            metadata=metadata,
+        ),
+        check_canceled=lambda _stage: None,
+        recover_errors=True,
+    )[0].result
+
+    assert fresh_turn_result.output == {"run_count": 4}
 
 
 def test_executor_truncates_oversized_output_before_trace_and_tool_message_boundary(

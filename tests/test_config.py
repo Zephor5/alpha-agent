@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from typer.testing import CliRunner
 
 from alpha_agent.cli import app
-from alpha_agent.config import load_config, read_config_value, write_default_config
+from alpha_agent.config import FileToolConfig, load_config, read_config_value, write_default_config
+from alpha_agent.tools.files.config import max_glob_results, max_search_results
 
 
 def test_load_config_reads_toml_file(tmp_path: Path) -> None:
@@ -59,8 +62,10 @@ patch_enabled = true
 write_roots = ["~/custom-alpha/write"]
 max_read_chars = 111
 max_file_bytes = 222
-max_search_matches = 3
-max_list_entries = 4
+max_search_results = 3
+max_glob_results = 4
+max_read_lines = 77
+create_parent_dirs_enabled = true
 max_output_chars = 555
 
 [cognition.background]
@@ -139,8 +144,10 @@ api_key = "tvly-file-key"
     assert config.file_tool.write_roots == (Path("~/custom-alpha/write").expanduser().resolve(),)
     assert config.file_tool.max_read_chars == 111
     assert config.file_tool.max_file_bytes == 222
-    assert config.file_tool.max_search_matches == 3
-    assert config.file_tool.max_list_entries == 4
+    assert config.file_tool.max_search_results == 3
+    assert config.file_tool.max_glob_results == 4
+    assert config.file_tool.max_read_lines == 77
+    assert config.file_tool.create_parent_dirs_enabled is True
     assert config.file_tool.max_output_chars == 555
     assert config.deepseek_api_key == "deepseek-key"
     assert config.llm_model == "deepseek-v4-pro"
@@ -229,8 +236,10 @@ allowed_workdirs = ["."]
     monkeypatch.setenv("ALPHA_FILE_TOOL_WRITE_ROOTS", "~/alpha-write")
     monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_READ_CHARS", "123")
     monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_FILE_BYTES", "456")
-    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_SEARCH_MATCHES", "7")
-    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_LIST_ENTRIES", "8")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_SEARCH_RESULTS", "7")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_GLOB_RESULTS", "8")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_READ_LINES", "9")
+    monkeypatch.setenv("ALPHA_FILE_TOOL_CREATE_PARENT_DIRS_ENABLED", "true")
     monkeypatch.setenv("ALPHA_FILE_TOOL_MAX_OUTPUT_CHARS", "900")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_ENABLED", "false")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_STARTUP_DELAY_SECONDS", "1")
@@ -276,8 +285,10 @@ allowed_workdirs = ["."]
     assert config.file_tool.write_roots == (Path("~/alpha-write").expanduser().resolve(),)
     assert config.file_tool.max_read_chars == 123
     assert config.file_tool.max_file_bytes == 456
-    assert config.file_tool.max_search_matches == 7
-    assert config.file_tool.max_list_entries == 8
+    assert config.file_tool.max_search_results == 7
+    assert config.file_tool.max_glob_results == 8
+    assert config.file_tool.max_read_lines == 9
+    assert config.file_tool.create_parent_dirs_enabled is True
     assert config.file_tool.max_output_chars == 900
     assert config.cognition_background.enabled is False
     assert config.cognition_background.startup_delay_seconds == 1
@@ -308,6 +319,44 @@ def test_load_config_accepts_generic_tavily_env(
     config = load_config(env_file=None, config_file=config_path)
 
     assert config.tavily_api_key == "tvly-generic-key"
+
+
+def test_load_config_ignores_legacy_codex_api_key_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[codex]
+access_token = "from-file"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALPHA_CODEX_API_KEY", "legacy-env-key")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.codex_access_token == "from-file"
+
+
+def test_load_config_reads_codex_access_token_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[codex]
+access_token = "from-file"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALPHA_CODEX_ACCESS_TOKEN", "from-env")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.codex_access_token == "from-env"
 
 
 def test_write_default_config_is_non_destructive(tmp_path: Path) -> None:
@@ -390,6 +439,22 @@ def test_config_cli_set_and_get(
         app,
         ["config", "set", "tools.files.patch_enabled", "true"],
     )
+    set_files_search_limit = runner.invoke(
+        app,
+        ["config", "set", "tools.files.max_search_results", "17"],
+    )
+    set_files_glob_limit = runner.invoke(
+        app,
+        ["config", "set", "tools.files.max_glob_results", "18"],
+    )
+    set_files_read_lines = runner.invoke(
+        app,
+        ["config", "set", "tools.files.max_read_lines", "19"],
+    )
+    set_files_create_parent_dirs = runner.invoke(
+        app,
+        ["config", "set", "tools.files.create_parent_dirs_enabled", "true"],
+    )
     set_provider_limit = runner.invoke(
         app,
         ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
@@ -412,6 +477,10 @@ def test_config_cli_set_and_get(
     assert set_files_roots.exit_code == 0
     assert set_files_patch_enabled.exit_code == 0
     assert set_files_write_roots.exit_code == 0
+    assert set_files_search_limit.exit_code == 0
+    assert set_files_glob_limit.exit_code == 0
+    assert set_files_read_lines.exit_code == 0
+    assert set_files_create_parent_dirs.exit_code == 0
     assert set_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
     assert get_bash_enabled.exit_code == 0
@@ -439,6 +508,10 @@ def test_config_cli_set_and_get(
     )
     assert config.file_tool.patch_enabled is True
     assert config.file_tool.write_roots == (Path("~/alpha-write").expanduser().resolve(),)
+    assert config.file_tool.max_search_results == 17
+    assert config.file_tool.max_glob_results == 18
+    assert config.file_tool.max_read_lines == 19
+    assert config.file_tool.create_parent_dirs_enabled is True
 
 
 def test_file_patch_config_defaults_to_disabled(tmp_path: Path) -> None:
@@ -449,6 +522,47 @@ def test_file_patch_config_defaults_to_disabled(tmp_path: Path) -> None:
 
     assert config.file_tool.patch_enabled is False
     assert config.file_tool.write_roots == ()
+
+
+def test_file_tool_limit_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.file_tool.max_search_results == 100
+    assert config.file_tool.max_glob_results == 500
+    assert config.file_tool.max_read_lines == 200
+    assert config.file_tool.create_parent_dirs_enabled is False
+
+
+def test_legacy_file_tool_limit_toml_keys_do_not_override_new_limits(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[tools.files]
+max_search_matches = 3
+max_list_entries = 4
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.file_tool.max_search_results == 100
+    assert config.file_tool.max_glob_results == 500
+
+
+def test_file_tool_limit_helpers_ignore_legacy_limit_attrs() -> None:
+    legacy_only = cast(
+        FileToolConfig,
+        SimpleNamespace(max_search_matches=3, max_list_entries=4),
+    )
+
+    assert max_search_results(legacy_only) == 100
+    assert max_glob_results(legacy_only) == 500
 
 
 def test_file_patch_config_allows_empty_write_roots_when_patch_enabled(
@@ -630,6 +744,28 @@ def test_provider_specific_transport_and_model_keys_are_not_configurable(
     assert "Unsupported config key" in result.output
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "tools.files.max_search_matches",
+        "tools.files.max_list_entries",
+    ],
+)
+def test_legacy_file_tool_limit_keys_are_not_configurable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    key: str,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["config", "set", key, "1"])
+
+    assert result.exit_code != 0
+    assert "Unsupported config key" in result.output
+
+
 def test_config_set_rejects_invalid_provider(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -727,6 +863,18 @@ def test_config_set_rejects_bash_default_workdir_outside_allowlist(
             "tools.bash.max_output_chars must be greater than 0",
         ),
         (
+            "[tools.files]\nmax_read_lines = 0\n",
+            "tools.files.max_read_lines must be greater than 0",
+        ),
+        (
+            "[tools.files]\nmax_search_results = 0\n",
+            "tools.files.max_search_results must be greater than 0",
+        ),
+        (
+            "[tools.files]\nmax_glob_results = 0\n",
+            "tools.files.max_glob_results must be greater than 0",
+        ),
+        (
             '[tools.bash]\ndefault_workdir = "~/outside-alpha-work"\nallowed_workdirs = ["."]\n',
             "tools.bash.default_workdir must be within tools.bash.allowed_workdirs",
         ),
@@ -756,6 +904,11 @@ def test_load_config_rejects_invalid_toml_values(
             "ALPHA_BASH_TOOL_DEFAULT_TIMEOUT_SECONDS",
             "0",
             "tools.bash.default_timeout_seconds must be greater than 0",
+        ),
+        (
+            "ALPHA_FILE_TOOL_MAX_READ_LINES",
+            "0",
+            "tools.files.max_read_lines must be greater than 0",
         ),
     ],
 )

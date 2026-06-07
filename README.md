@@ -133,9 +133,11 @@ model by default. Other tools are opt-in:
   uv run alpha daemon restart
   ```
 
-  `file_list`, `file_read`, and `file_search` are read-only, reject paths outside
-  `tools.files.allowed_roots`, skip common large internal directories, reject
-  binary content, and apply configured output limits.
+  Read-only file inspection tools reject paths outside `tools.files.allowed_roots`,
+  skip common large internal directories, reject binary content, and apply
+  configured output limits such as `tools.files.max_glob_results`,
+  `tools.files.max_search_results`, `tools.files.max_read_lines`, and
+  `tools.files.max_output_chars`.
 
   `file_patch` is a separate write tool and is disabled by default. It is only
   registered when `tools.files.enabled = true`, `tools.files.patch_enabled = true`,
@@ -151,7 +153,8 @@ model by default. Other tools are opt-in:
   targets, binary files, and files above `tools.files.max_file_bytes`, and requires
   `expected_sha256` to match existing file content before edits are applied. New
   files require `create_if_missing = true` and an empty or omitted
-  `expected_sha256`.
+  `expected_sha256`. Whole-file creation can create missing parent directories
+  only when `tools.files.create_parent_dirs_enabled` is enabled.
 
 Each registered tool declares one `ToolSpec`: provider-facing name,
 description, parameters, and strict mode plus internal governance fields such as
@@ -197,8 +200,8 @@ defaults < config.toml < .env / environment variables
 ```
 
 See [`config.example.toml`](config.example.toml) for every available key with
-inline comments, and [`.env.example`](.env.example) for the matching environment
-variables. Common starting points: `llm.provider`, `llm.model`,
+inline comments, and [`.env.example`](.env.example) for environment variables
+read by the loader. Common starting points: `llm.provider`, `llm.model`,
 `tools.bash.enabled`, and `tavily.api_key`.
 
 ## Status & roadmap

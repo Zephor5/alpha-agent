@@ -29,10 +29,12 @@ from alpha_agent.cognition.processing_ledger import (
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import (
+    AlphaConfig,
     BackgroundExtractionConfig,
     BackgroundIntakeConfig,
     BackgroundSummaryConfig,
     CognitionBackgroundConfig,
+    FileToolConfig,
     LLMContextConfig,
 )
 from alpha_agent.llm.base import (
@@ -62,6 +64,14 @@ from alpha_agent.tools.base import (
     ToolSpec,
 )
 from alpha_agent.tools.default import build_tool_registry
+from alpha_agent.tools.files import (
+    FILE_GLOB_TOOL_NAME,
+    FILE_PATCH_TOOL_NAME,
+    FILE_READ_TOOL_NAME,
+    FILE_SEARCH_TOOL_NAME,
+    FILE_WRITE_TOOL_NAME,
+    FileGlobTool,
+)
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
 from alpha_agent.tools.registry import ToolRegistry
 from tests.cognition.test_belief_projection_apply import belief, summary_belief
@@ -75,6 +85,93 @@ def _store(tmp_path) -> StateStore:
 
 def _copy_chat_message(message: ChatMessage) -> ChatMessage:
     return cast(ChatMessage, dict(message))
+
+
+def test_direct_agent_default_registry_uses_default_file_tool_config(tmp_path) -> None:
+    store = _store(tmp_path)
+
+    agent = AlphaAgent(store=store, llm_provider=MockLLMProvider())
+
+    assert {
+        FILE_GLOB_TOOL_NAME,
+        FILE_READ_TOOL_NAME,
+        FILE_SEARCH_TOOL_NAME,
+    }.issubset(set(agent.tool_registry.names()))
+    assert FILE_PATCH_TOOL_NAME not in agent.tool_registry.names()
+    assert FILE_WRITE_TOOL_NAME not in agent.tool_registry.names()
+    glob_tool = agent.tool_registry.get(FILE_GLOB_TOOL_NAME)
+    assert isinstance(glob_tool, FileGlobTool)
+    assert glob_tool.allowed_roots == tuple(
+        root.expanduser().resolve() for root in agent.config.file_tool.allowed_roots
+    )
+
+
+def test_direct_agent_default_registry_respects_file_write_gates(tmp_path) -> None:
+    read_root = tmp_path / "read"
+    write_root = tmp_path / "write"
+    read_root.mkdir()
+    write_root.mkdir()
+
+    patch_disabled = AlphaAgent(
+        store=_store(tmp_path / "patch-disabled"),
+        llm_provider=MockLLMProvider(),
+        config=AlphaConfig(
+            db_path=tmp_path / "patch-disabled.db",
+            log_dir=tmp_path / "logs",
+            gateway_status_path=tmp_path / "gateway.json",
+            file_tool=FileToolConfig(
+                enabled=True,
+                allowed_roots=(read_root,),
+                patch_enabled=False,
+                write_roots=(write_root,),
+            ),
+        ),
+    )
+    write_roots_empty = AlphaAgent(
+        store=_store(tmp_path / "write-roots-empty"),
+        llm_provider=MockLLMProvider(),
+        config=AlphaConfig(
+            db_path=tmp_path / "write-roots-empty.db",
+            log_dir=tmp_path / "logs",
+            gateway_status_path=tmp_path / "gateway.json",
+            file_tool=FileToolConfig(
+                enabled=True,
+                allowed_roots=(read_root,),
+                patch_enabled=True,
+                write_roots=(),
+            ),
+        ),
+    )
+    write_enabled = AlphaAgent(
+        store=_store(tmp_path / "write-enabled"),
+        llm_provider=MockLLMProvider(),
+        config=AlphaConfig(
+            db_path=tmp_path / "write-enabled.db",
+            log_dir=tmp_path / "logs",
+            gateway_status_path=tmp_path / "gateway.json",
+            file_tool=FileToolConfig(
+                enabled=True,
+                allowed_roots=(read_root,),
+                patch_enabled=True,
+                write_roots=(write_root,),
+            ),
+        ),
+    )
+
+    for agent in (patch_disabled, write_roots_empty):
+        assert {
+            FILE_GLOB_TOOL_NAME,
+            FILE_READ_TOOL_NAME,
+            FILE_SEARCH_TOOL_NAME,
+        }.issubset(set(agent.tool_registry.names()))
+        assert FILE_PATCH_TOOL_NAME not in agent.tool_registry.names()
+        assert FILE_WRITE_TOOL_NAME not in agent.tool_registry.names()
+        glob_tool = agent.tool_registry.get(FILE_GLOB_TOOL_NAME)
+        assert isinstance(glob_tool, FileGlobTool)
+        assert glob_tool.allowed_roots == (read_root.resolve(),)
+
+    assert FILE_PATCH_TOOL_NAME in write_enabled.tool_registry.names()
+    assert FILE_WRITE_TOOL_NAME in write_enabled.tool_registry.names()
 
 
 def test_agent_responds_and_persists_session_messages(tmp_path) -> None:
@@ -662,6 +759,41 @@ def test_agent_sends_only_structured_tool_output_to_llm_context(tmp_path) -> Non
     }
 
 
+def test_agent_tool_loop_repeated_call_guard_is_scoped_to_one_user_turn(tmp_path) -> None:
+    store = _store(tmp_path)
+    tool = _LoopGuardTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    provider = _RepeatedToolCallingProvider()
+    agent = AlphaAgent(store=store, llm_provider=provider, tool_registry=registry)
+
+    result = agent.respond("repeat the same tool", session_id="s1")
+
+    assert result.response == "final answer"
+    assert result.debug["provider_tool_call_count"] == 4
+    assert result.debug["tool_call_count"] == 4
+    assert tool.run_count == 3
+
+    tool_messages = [
+        message
+        for message in store.list_session_messages("s1")
+        if message.kind == "tool_message"
+    ]
+    assert len(tool_messages) == 4
+    third_payload = json.loads(tool_messages[2].raw_content)
+    assert third_payload["warning"]["code"] == "repeated_tool_call"
+    assert third_payload["warning"]["repeat_count"] == 3
+    assert third_payload["result"] == {"run_count": 3}
+    fourth_payload = json.loads(tool_messages[3].raw_content)
+    assert fourth_payload["error"]["code"] == "repeated_tool_call_blocked"
+    assert fourth_payload["error"]["details"]["repeat_count"] == 4
+
+    second_result = agent.respond("repeat in a fresh turn", session_id="s1")
+
+    assert second_result.response == "fresh turn final answer"
+    assert tool.run_count == 4
+
+
 def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> None:
     store = _store(tmp_path)
     log = SQLiteEventLog(store)
@@ -823,6 +955,7 @@ def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path)
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
+        tool_registry=ToolRegistry(),
         llm_context_config=_compression_context(),
         max_context_tokens=340,
     )
@@ -883,6 +1016,7 @@ def test_pre_user_compression_submits_direct_compact_extraction_job(tmp_path) ->
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
+        tool_registry=ToolRegistry(),
         llm_context_config=_compression_context(),
         max_context_tokens=340,
         compact_extraction_submitter=submit,
@@ -916,6 +1050,7 @@ def test_failed_pre_user_compression_does_not_persist_pending_user(tmp_path) -> 
     agent = AlphaAgent(
         store=store,
         llm_provider=provider,
+        tool_registry=ToolRegistry(),
         llm_context_config=_compression_context(),
         max_context_tokens=340,
     )
@@ -1408,6 +1543,74 @@ class _StructuredTool(Tool):
             name=self.spec.name,
             output={"ok": True, "items": [{"title": "Alpha"}]},
             metadata={"source": "test"},
+        )
+
+
+class _LoopGuardTool(Tool):
+    spec = ToolSpec(
+        name="loop_guard",
+        description="Return the number of real dispatches.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        },
+    )
+
+    def __init__(self) -> None:
+        self.run_count = 0
+
+    def check_available(self) -> ToolAvailability:
+        return ToolAvailability()
+
+    def run(self, arguments, context: ToolExecutionContext):
+        del arguments, context
+        self.run_count += 1
+        return ToolResult(
+            name=self.spec.name,
+            output={"run_count": self.run_count},
+            metadata={},
+        )
+
+
+class _RepeatedToolCallingProvider:
+    name = "repeated-tool-provider"
+
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.calls: list[list[ChatMessage]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+    ) -> LLMResponse:
+        del tools, tool_choice
+        self.call_count += 1
+        self.calls.append([_copy_chat_message(message) for message in messages])
+        if self.call_count <= 4 or self.call_count == 6:
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id=f"call_{self.call_count}",
+                        name="loop_guard",
+                        arguments={"b": 2, "a": 1},
+                        raw_arguments='{"b":2,"a":1}',
+                    )
+                ],
+            )
+        if self.call_count == 5:
+            return LLMResponse(content="final answer", model="test", provider=self.name)
+        return LLMResponse(
+            content="fresh turn final answer",
+            model="test",
+            provider=self.name,
         )
 
 

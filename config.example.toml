@@ -54,8 +54,10 @@ patch_enabled = false
 write_roots = []
 max_read_chars = 20000
 max_file_bytes = 1000000
-max_search_matches = 100
-max_list_entries = 500
+max_search_results = 100
+max_glob_results = 500
+max_read_lines = 200
+create_parent_dirs_enabled = false
 max_output_chars = 30000
 
 [cognition.consolidation]

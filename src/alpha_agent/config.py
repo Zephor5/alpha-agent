@@ -61,8 +61,10 @@ patch_enabled = false
 write_roots = []
 max_read_chars = 20000
 max_file_bytes = 1000000
-max_search_matches = 100
-max_list_entries = 500
+max_search_results = 100
+max_glob_results = 500
+max_read_lines = 200
+create_parent_dirs_enabled = false
 max_output_chars = 30000
 
 [cognition.consolidation]
@@ -147,8 +149,10 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "tools.files.write_roots": list,
     "tools.files.max_read_chars": int,
     "tools.files.max_file_bytes": int,
-    "tools.files.max_search_matches": int,
-    "tools.files.max_list_entries": int,
+    "tools.files.max_search_results": int,
+    "tools.files.max_glob_results": int,
+    "tools.files.max_read_lines": int,
+    "tools.files.create_parent_dirs_enabled": bool,
     "tools.files.max_output_chars": int,
     "cognition.background.enabled": bool,
     "cognition.background.startup_delay_seconds": int,
@@ -220,8 +224,9 @@ POSITIVE_INT_CONFIG_KEYS = {
     "tools.bash.max_output_chars",
     "tools.files.max_read_chars",
     "tools.files.max_file_bytes",
-    "tools.files.max_search_matches",
-    "tools.files.max_list_entries",
+    "tools.files.max_search_results",
+    "tools.files.max_glob_results",
+    "tools.files.max_read_lines",
     "tools.files.max_output_chars",
 }
 
@@ -285,8 +290,10 @@ class FileToolConfig:
     write_roots: tuple[Path, ...] = ()
     max_read_chars: int = 20000
     max_file_bytes: int = 1000000
-    max_search_matches: int = 100
-    max_list_entries: int = 500
+    max_search_results: int = 100
+    max_glob_results: int = 500
+    max_read_lines: int = 200
+    create_parent_dirs_enabled: bool = False
     max_output_chars: int = 30000
 
 
@@ -627,7 +634,6 @@ def load_config(
         ),
         codex_access_token=(
             os.getenv("ALPHA_CODEX_ACCESS_TOKEN")
-            or os.getenv("ALPHA_CODEX_API_KEY")
             or _string_setting(config_data, "codex", "access_token")
         ),
         tavily_api_key=(
@@ -723,8 +729,12 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         "tools.files.patch_enabled": config.file_tool.patch_enabled,
         "tools.files.max_read_chars": config.file_tool.max_read_chars,
         "tools.files.max_file_bytes": config.file_tool.max_file_bytes,
-        "tools.files.max_search_matches": config.file_tool.max_search_matches,
-        "tools.files.max_list_entries": config.file_tool.max_list_entries,
+        "tools.files.max_search_results": config.file_tool.max_search_results,
+        "tools.files.max_glob_results": config.file_tool.max_glob_results,
+        "tools.files.max_read_lines": config.file_tool.max_read_lines,
+        "tools.files.create_parent_dirs_enabled": (
+            config.file_tool.create_parent_dirs_enabled
+        ),
         "tools.files.max_output_chars": config.file_tool.max_output_chars,
         "cognition.background.enabled": config.cognition_background.enabled,
         "cognition.background.startup_delay_seconds": (
@@ -871,8 +881,9 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         ("tools.bash.max_output_chars", config.bash_tool.max_output_chars),
         ("tools.files.max_read_chars", config.file_tool.max_read_chars),
         ("tools.files.max_file_bytes", config.file_tool.max_file_bytes),
-        ("tools.files.max_search_matches", config.file_tool.max_search_matches),
-        ("tools.files.max_list_entries", config.file_tool.max_list_entries),
+        ("tools.files.max_search_results", config.file_tool.max_search_results),
+        ("tools.files.max_glob_results", config.file_tool.max_glob_results),
+        ("tools.files.max_read_lines", config.file_tool.max_read_lines),
         ("tools.files.max_output_chars", config.file_tool.max_output_chars),
     )
     for key, value in positive_values:
@@ -928,8 +939,9 @@ def _validate_config_data(config_data: dict[str, Any]) -> None:
         for key, default in (
             ("max_read_chars", 20000),
             ("max_file_bytes", 1000000),
-            ("max_search_matches", 100),
-            ("max_list_entries", 500),
+            ("max_search_results", 100),
+            ("max_glob_results", 500),
+            ("max_read_lines", 200),
             ("max_output_chars", 30000),
         ):
             if _int_value(files.get(key), default) <= 0:
@@ -1191,13 +1203,21 @@ def _file_tool_config(section: dict[str, Any]) -> FileToolConfig:
             "ALPHA_FILE_TOOL_MAX_FILE_BYTES",
             _int_value(section.get("max_file_bytes"), 1000000),
         ),
-        max_search_matches=_int_env(
-            "ALPHA_FILE_TOOL_MAX_SEARCH_MATCHES",
-            _int_value(section.get("max_search_matches"), 100),
+        max_search_results=_int_env(
+            "ALPHA_FILE_TOOL_MAX_SEARCH_RESULTS",
+            _int_value(section.get("max_search_results"), 100),
         ),
-        max_list_entries=_int_env(
-            "ALPHA_FILE_TOOL_MAX_LIST_ENTRIES",
-            _int_value(section.get("max_list_entries"), 500),
+        max_glob_results=_int_env(
+            "ALPHA_FILE_TOOL_MAX_GLOB_RESULTS",
+            _int_value(section.get("max_glob_results"), 500),
+        ),
+        max_read_lines=_int_env(
+            "ALPHA_FILE_TOOL_MAX_READ_LINES",
+            _int_value(section.get("max_read_lines"), 200),
+        ),
+        create_parent_dirs_enabled=_bool_env(
+            "ALPHA_FILE_TOOL_CREATE_PARENT_DIRS_ENABLED",
+            _bool_value(section.get("create_parent_dirs_enabled"), False),
         ),
         max_output_chars=_int_env(
             "ALPHA_FILE_TOOL_MAX_OUTPUT_CHARS",

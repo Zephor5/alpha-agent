@@ -10,7 +10,7 @@ from alpha_agent.config import AlphaConfig, BashToolConfig
 from alpha_agent.tools.base import ToolExecutionContext
 from alpha_agent.tools.default import build_tool_registry
 from alpha_agent.tools.files import (
-    FILE_LIST_TOOL_NAME,
+    FILE_GLOB_TOOL_NAME,
     FILE_READ_TOOL_NAME,
     FILE_SEARCH_TOOL_NAME,
 )
@@ -212,7 +212,7 @@ def test_tool_registry_includes_memory_propose_and_configured_tools(
     default_names = [
         MEMORY_PROPOSE_TOOL_NAME,
         MEMORY_RECALL_TOOL_NAME,
-        FILE_LIST_TOOL_NAME,
+        FILE_GLOB_TOOL_NAME,
         FILE_READ_TOOL_NAME,
         FILE_SEARCH_TOOL_NAME,
     ]
