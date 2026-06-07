@@ -63,10 +63,9 @@ Hermes patterns worth adopting:
 
 - `search_files` supports content search and file search in one interface, with
   regex, glob filters, output modes, context, offset, and limit.
-- File search is ripgrep-first, fallback-capable, and sorted by modification
-  time when possible.
+- File search is ripgrep-first and sorted by modification time when possible.
 - Read tools add line numbers, enforce pagination limits, suggest similar files,
-  block device paths, deduplicate repeated reads, and stop repeated read/search
+  block device paths, deduplicate repeated reads, and stop repeated tool-call
   loops.
 - Write and patch tools use per-path locks and stale-read warnings for
   concurrent subagents.
@@ -97,6 +96,18 @@ Codex-style patterns worth adopting:
   patches before touching disk.
 - Defer delete and move grammar until destructive file operations are explicitly
   accepted as a separate scope.
+
+Reference decisions for Alpha:
+
+- `rg` is the required backend for content search and recursive file discovery.
+  There is no Python content-search fallback in this roadmap.
+- Directory entry listing is a separate local operation: `file_glob` may use
+  Python `Path.iterdir` for `max_depth: 1` browse calls and for returning
+  directories when `include_dirs: true`, because `rg --files` only returns files.
+- Hash checks and patch context matching are hard write guards. Runtime state
+  may add warnings and dedup, but it must not replace those guards.
+- Syntax and LSP diagnostics are advisory output. They should never cause a
+  successful disk write to be rolled back.
 
 ## Target Toolset
 
@@ -139,6 +150,15 @@ Output policy:
 - Errors should be deterministic and specific enough for the model to correct
   its next call.
 
+Backend availability policy:
+
+- `file_search` requires `rg` for all modes.
+- Recursive file-only `file_glob` discovery requires `rg`.
+- Single-directory browse and directory inclusion in `file_glob` use local
+  directory entry APIs and do not require `rg`.
+- Do not add a `use_ripgrep` toggle. Backend availability should be explicit in
+  the tool result when a requested operation requires `rg`.
+
 Concurrency policy:
 
 - Single-file writes in `range` and `replace` mode require `expected_sha256` for
@@ -149,7 +169,8 @@ Concurrency policy:
   require `expected_sha256` for `patch_text`.
 - Internal state may add warnings, but must not replace hash or context-match
   validation.
-- Writes to the same resolved path are serialized with a per-path lock.
+- Writes to the same resolved path are serialized with a process-wide per-path
+  lock registry, not a lock stored on a tool instance.
 - Multi-file patch locks are acquired in sorted path order.
 - After a successful write, all read dedup entries for affected paths are
   invalidated.
@@ -159,10 +180,13 @@ Validation policy:
 - Read and search skip unsupported binary files unless the tool explicitly
   supports that format.
 - Write and patch perform post-write verification by reading the bytes back.
+- Patch parse, path, root, hash, and context-match failures happen before writes
+  and leave disk untouched.
 - Syntax checks are run for formats with cheap deterministic parsers:
   Python, JSON, TOML, YAML if dependency support exists.
 - LSP diagnostics are optional and should be an enrichment layer, never a write
   blocker unless a future policy explicitly says otherwise.
+- Syntax and LSP diagnostics are not rollback triggers.
 
 Turn-scoped tool state:
 
@@ -190,12 +214,13 @@ Turn-scoped tool state:
 - Split the two concerns by altitude:
   - The repeated-call loop guard is generic (identical `tool_name` plus canonical
     arguments repeated within a turn). Implement it once in `ToolExecutor` against
-    `TurnToolState` so it protects every tool and can short-circuit before
-    dispatch: warn on the third identical call, block on the fourth. It is always
-    on, with no config toggle.
-  - Read/search dedup is file-tool-specific (content identity = resolved path,
-    offset, limit, mtime; returns a content stub). It lives in the file tools but
-    records its ledger in the same `TurnToolState`.
+    `TurnToolState` so it protects every tool: allow the third identical call but
+    include a model-visible warning in the tool result; block the fourth before
+    dispatch with a structured error. It is always on, with no config toggle.
+  - Read dedup is file-tool-specific (content identity = resolved path, offset,
+    limit, `max_chars`, `format`, file size, and mtime; returns a content stub).
+    It lives in the file tools but records its ledger in the same
+    `TurnToolState`.
 
 ## Tool Contracts
 
@@ -205,8 +230,8 @@ Purpose: find files by name or path pattern without reading file contents.
 
 Parameters:
 
-- `pattern: string` - glob pattern such as `*.py`, `**/*test*.py`, or
-  `src/**/config*.toml`.
+- `pattern?: string` - glob pattern such as `*.py`, `**/*test*.py`, or
+  `src/**/config*.toml`; defaults to `*`.
 - `path?: string` - root directory to search; defaults to `.` under the first
   allowed root.
 - `max_depth?: integer` - limit traversal depth below `path`; `max_depth: 1`
@@ -230,9 +255,13 @@ Output:
 
 Implementation tasks:
 
-- Prefer ripgrep `rg --files` when available; pass `--max-depth` when `max_depth`
-  is set.
-- Fall back to Python traversal using existing root and excluded-dir logic.
+- Use ripgrep `rg --files` for recursive file discovery; pass `--max-depth` when
+  `max_depth` is set.
+- Return a deterministic unavailable/error result when a recursive file
+  discovery request requires `rg` and `rg` is unavailable.
+- Use local directory entry APIs for the single-directory browse case and for
+  directory results when `include_dirs: true`; this is directory-listing
+  behavior, not a recursive file-search fallback.
 - Respect current excluded directories by default.
 - Cover the single-directory browse case (`max_depth: 1` with `include_dirs:
   true`) so removing `file_list` does not lose directory listing.
@@ -240,9 +269,10 @@ Implementation tasks:
   ripgrep's `--sort`/`--sortr modified` disables parallelism; sorting in Python
   after a bounded collection may be preferable for large trees.
 - `total_count` is often not cheaply available from a streaming `rg` run; return
-  it only when the fallback enumerates fully, and omit it otherwise.
+  it only when the implementation fully enumerates results cheaply, and omit it
+  otherwise.
 - Add tests for pagination, root policy, hidden/excluded directories, symlinks,
-  single-directory listing, and deterministic sorting.
+  single-directory listing, deterministic sorting, and `rg` unavailable behavior.
 
 ### `file_search`
 
@@ -254,9 +284,9 @@ Parameters:
 - `mode?: "regex" | "literal"` - default `regex`.
 - `path?: string` - file or directory to search.
 - `glob?: string` - file glob filter.
-- `type?: string` - optional ripgrep type filter when using rg.
+- `type?: string` - optional ripgrep type filter.
 - `output_mode?: "content" | "files_with_matches" | "count"` - default
-  `content`.
+  `files_with_matches`.
 - `case_sensitive?: boolean` - default false.
 - `context?: integer` - symmetric context lines.
 - `before_context?: integer`
@@ -299,14 +329,19 @@ Implementation tasks:
 - Replace the current `query`, `max_matches`, and `context_lines` schema with
   the target `pattern`, `limit`, and context fields in one direct contract
   change.
-- Use ripgrep when available for regex, multiline, type filters, and speed.
-- Keep a Python fallback for literal mode and environments without rg.
-- Make `literal` mode escape user input before passing it to rg.
+- Require ripgrep for all content search modes. Return a deterministic
+  unavailable/error result when `rg` is unavailable.
+- Use ripgrep for regex, fixed-string literal mode, multiline, type filters,
+  output modes, and pagination.
+- Use rg fixed-string mode for `literal` rather than hand-escaped regex.
+- Preserve `tools.files.max_file_bytes` by passing an equivalent rg max-filesize
+  limit or by filtering candidate files before search.
 - Rely on the generic `ToolExecutor` repeated-call guard (see the Turn-scoped
   tool state contract) for repeated identical searches; do not add a search-only
   loop counter inside this tool.
-- Add tests for regex, literal escaping, output modes, context, pagination,
-  binary skip, missing path suggestion, and max output truncation.
+- Add tests for `rg` unavailable behavior, regex, literal fixed-string search,
+  output modes, context, pagination, binary skip, missing path suggestion,
+  max-filesize handling, type filters, multiline mode, and max output truncation.
 
 ### `file_read`
 
@@ -346,9 +381,10 @@ Implementation tasks:
 - Add device path blocklist.
 - Add file-not-found suggestions from nearby directory entries and likely cwd
   mistakes.
-- Add repeated-read dedup keyed by resolved path, offset, limit, and mtime,
-  recorded in `TurnToolState` (see the Turn-scoped tool state contract). Do not
-  store it on tool instances or in the per-iteration
+- Add repeated-read dedup keyed by resolved path, offset, limit, `max_chars`,
+  `format`, file size, and mtime, recorded in `TurnToolState` (see the
+  Turn-scoped tool state contract). Do not store it on tool instances or in the
+  per-iteration
   `ToolExecutionContext.extensions`.
 - Rely on the generic `ToolExecutor` repeated-call guard for repeated-read loops;
   do not add a read-only loop counter inside this tool.
@@ -398,6 +434,21 @@ Patch-text grammar:
 *** End Patch
 ```
 
+Patch-text grammar rules:
+
+- The patch must contain exactly one `*** Begin Patch` header and one
+  `*** End Patch` footer.
+- Only `*** Add File` and `*** Update File` operations are accepted in this
+  roadmap; delete and move operations are rejected.
+- Patch paths must be project-root or write-root relative display paths, never
+  machine-specific absolute paths.
+- `Add File` fails if the target already exists. `Update File` fails if the
+  target does not exist.
+- Multiple operations against the same resolved path are rejected in the first
+  implementation.
+- Update hunks require exact context matching. Ambiguous or missing context
+  fails before any file is written.
+
 Output:
 
 - `files_modified`
@@ -416,18 +467,19 @@ Implementation tasks:
 - Add replace mode with exact unique matching first.
 - Reject replace mode when `old_string` is absent.
 - Reject replace mode when multiple matches exist and `replace_all` is false.
-- Add optional fuzzy matching only after exact mode is tested and stable.
 - Add patch-text parser with strict grammar and no partial application.
+- Do not add fuzzy matching in this roadmap; exact context and exact string
+  matching are the default edit behavior.
 - Use strict context-line matching as the `patch_text` concurrency guard: reject
   the patch when on-disk context no longer matches, rather than requiring a hash.
 - For multi-file patch text, validate every operation before writing any file.
 - Lock all affected files in sorted resolved-path order.
 - Write via temp file and atomic rename where supported.
 - Verify by reading back written content.
-- Run syntax validation and include diagnostics in result.
+- Run advisory syntax validation and include diagnostics in result.
 - Add tests for exact replace, replace-all, no-match, ambiguous match,
-  multi-file add/update, malformed patch, lock ordering, and rollback on
-  validation failure.
+  multi-file add/update, malformed patch, lock ordering, advisory validation,
+  and no disk mutation on pre-write parse/root/context failures.
 
 ### `file_write`
 
@@ -449,6 +501,8 @@ Rules:
 - New file creation rejects non-empty `expected_sha256`.
 - Parent directory creation should be explicit:
   `create_parent_dirs?: boolean`, default false.
+- `create_parent_dirs: true` only succeeds when
+  `tools.files.create_parent_dirs_enabled` is enabled.
 - The tool should return a diff for updates, not the full written content.
 
 Implementation tasks:
@@ -456,7 +510,7 @@ Implementation tasks:
 - Add only after `file_patch` has replace mode and atomic write helpers.
 - Reuse the same path, binary, NUL, hash, lock, and validation helpers as
   `file_patch`.
-- Run post-write verification and syntax validation.
+- Run post-write verification and advisory syntax validation.
 - Add tests for create, overwrite rejection, hash mismatch, parent directory
   behavior, max file size, and diff output bounds.
 
@@ -485,7 +539,6 @@ Suggested modules:
   - hash calculation
 - `alpha_agent.tools.files.searching`
   - rg invocation
-  - Python fallback
   - output mode mapping
   - pagination helpers
 - `alpha_agent.tools.files.patching`
@@ -495,7 +548,7 @@ Suggested modules:
   - diff generation
 - `alpha_agent.tools.files.writing`
   - hash checks
-  - per-path locks
+  - process-wide per-path locks
   - temp write and rename
   - readback verification
   - dedup invalidation
@@ -505,7 +558,6 @@ Suggested modules:
   - optional diagnostics adapters
 - `alpha_agent.tools.files.state`
   - read dedup
-  - repeated read/search loop guard
   - read stamps
   - cross-agent stale warnings
 
@@ -536,13 +588,13 @@ Replace current limit settings directly:
 Add:
 
 - `tools.files.max_read_lines`
-- `tools.files.read_dedup_enabled`
-- `tools.files.post_write_validation_enabled`
 - `tools.files.create_parent_dirs_enabled`
 
-Do not add a `use_ripgrep` configuration toggle. Ripgrep is an implementation
-backend: auto-detect it when available and fall back to the Python traversal or
-search path when it is not.
+Do not add a `use_ripgrep` configuration toggle. Ripgrep is a required backend
+for `file_search` and recursive file-only `file_glob` discovery. If it is
+unavailable, those calls return deterministic unavailable/error results.
+Directory listing behavior in `file_glob` remains local and does not require
+`rg`.
 
 Do not add a general "allow destructive file operations" flag. Each destructive
 tool should be individually gated by tool availability and write roots.
@@ -556,101 +608,184 @@ the non-goals accept this, so no migration shim is required.
 
 ## Delivery Plan
 
-### Phase 1: Search And Discovery
+Phases are ordered by dependency and implementation size. A phase may use local
+smoke tests or focused tests while it is being implemented, but the formal
+acceptance gate is the final "Overall Completion Acceptance" section. Do not
+force every phase to be independently shippable if doing so creates artificial
+compatibility work.
+
+Dependency shape:
+
+- Phase 1 is the shared file-tool foundation.
+- Phases 2 and 3 both depend on Phase 1 and may be implemented in either order,
+  but should land sequentially because both touch tool registration and file-tool
+  tests.
+- Phase 4 is runtime state plumbing and must land before read dedup.
+- Phase 5 depends on Phases 1 and 4.
+- Phase 6 is the write-safety foundation.
+- Phases 7, 8, and 9 depend on Phase 6. Keep `file_patch` improvements before
+  `file_write`, because patch remains the primary edit path.
+
+### Phase 1: File Tool Foundation
+
+Purpose: create the shared structure needed by discovery, search, read, and
+write changes without changing the external toolset more than necessary.
 
 Deliverables:
 
-- Add `file_glob`.
-- Replace the registered external `file_list` surface with `file_glob`, after
-  confirming `file_glob` covers single-directory listing (`max_depth: 1` with
-  `include_dirs: true`) so directory browsing is not lost.
-- Upgrade `file_search` to regex plus output modes and pagination.
-- Add rg backend with Python fallback.
-- Update README built-in tools section.
+- Convert `src/alpha_agent/tools/files.py` into a
+  `src/alpha_agent/tools/files/` package with an `__init__.py` registry export.
+- Extract path resolution, root policy, display path rendering, binary/NUL
+  checks, output bounding, and common result helpers used by current tools.
+- Add an `rg` capability helper and a deterministic unavailable/error result
+  helper for operations that require `rg`.
+- Apply direct config renames/additions:
+  `max_search_results`, `max_glob_results`, `max_read_lines`, and
+  `create_parent_dirs_enabled`, with no migration shim.
+- Update config documentation files for the renamed and added keys.
 
-Acceptance:
+### Phase 2: File Discovery
 
-- `uv run ruff check .`
-- `uv run mypy src tests`
-- `uv run pytest tests/test_file_tools.py -q` (keep file-tool tests runnable as a
-  group even if later split into focused modules)
-- New tests cover file-list replacement, regex, literal mode, output modes,
-  pagination, and glob sorting.
-
-### Phase 2: Read Ergonomics And State
-
-Prerequisite:
-
-- Add the turn-scoped tool state plumbing (see the Turn-scoped tool state
-  contract): a runtime-owned `TurnToolState` created per turn and surfaced as a
-  typed `ToolExecutionContext` field, plus the generic repeated-call loop guard in
-  `ToolExecutor`. Dedup and the read/search loop guard depend on this.
+Purpose: replace directory listing and path discovery with the target
+`file_glob` surface.
 
 Deliverables:
 
-- Change `file_read` contract to `offset/limit`.
-- Add line-numbered output.
-- Add device path blocklist.
-- Add similar-path suggestions.
-- Add read/search dedup in the file tools, recorded in `TurnToolState`.
+- Add `file_glob` with optional `pattern`, pagination, `sort`, `max_depth`, and
+  `include_dirs`.
+- Use `rg --files` for recursive file discovery and local directory entry APIs
+  for single-directory browse and directory inclusion.
+- Preserve root, symlink, excluded-directory, binary, output-bound, and display
+  path policies through the shared helpers.
+- Replace the registered external `file_list` surface with `file_glob` after
+  proving `max_depth: 1` with `include_dirs: true` covers directory browsing.
+- Add focused tests for list replacement, pagination, sorting, excluded paths,
+  and deterministic `rg` unavailable behavior.
 
-Acceptance:
+### Phase 3: Content Search
 
-- Existing read tests are rewritten to target `offset/limit`.
-- Dedup test proves unchanged repeated reads return a stub.
-- Stale read test proves modified files return fresh content.
-- Loop guard test proves repeated identical reads/searches within one turn stop
-  wasting iterations, and that counters reset on a new turn.
-
-### Phase 3: Patch As The Primary Edit Tool
-
-Deliverables:
-
-- Refactor shared write helpers.
-- Add `file_patch mode=replace`.
-- Add atomic write and readback verification.
-- Add cheap syntax validation for Python, JSON, TOML, and YAML when available.
-
-Acceptance:
-
-- Replace mode refuses ambiguous matches unless `replace_all` is true.
-- Hash mismatch still blocks writes before disk mutation.
-- Write verification failure is surfaced as an error.
-- Syntax validation appears in tool output and does not hide the diff.
-
-### Phase 4: Multi-file Patch Text
+Purpose: upgrade `file_search` into an rg-backed content search tool with a
+clear contract.
 
 Deliverables:
 
-- Add `file_patch mode=patch_text`.
-- Support add and update operations.
-- Defer delete and move operations until after `file_patch` and `file_write`
-  share stable destructive-operation safety infrastructure.
-- Validate the full patch before writing anything.
-- Lock all affected files in stable order.
+- Replace `query`, `max_matches`, and `context_lines` with `pattern`, `limit`,
+  `offset`, output modes, context fields, `glob`, `type`, and `multiline`.
+- Require `rg` for all content search modes.
+- Implement regex, fixed-string literal mode, files-with-matches, count mode,
+  content mode, context lines, pagination, and max-filesize handling.
+- Keep repeated-search protection in the generic loop guard, not inside
+  `file_search`.
+- Add focused tests for regex, literal fixed-string search, output modes,
+  context, pagination, type filters, multiline, truncation, and `rg` unavailable
+  behavior.
 
-Acceptance:
+### Phase 4: Turn-Scoped Tool State
 
-- Multi-file patches are all-or-nothing.
-- Malformed patch text does not touch disk.
-- A patch that targets outside write roots fails before touching disk.
-- Diffs are bounded and identify every changed file.
+Purpose: add the runtime state lifecycle needed for dedup and generic loop
+protection.
 
-### Phase 5: Full-file Write
+Deliverables:
+
+- Add a runtime-owned `TurnToolState` created once per `_run_agent_loop`.
+- Surface the state as a typed `ToolExecutionContext` field and thread it through
+  `_execute_tool_calls`, `ToolExecutor.execute`, and tool execution.
+- Implement the generic repeated-call guard in `ToolExecutor`: warn in the third
+  identical call result and block the fourth with a structured error.
+- Keep the guard always on with no config toggle.
+- Add focused runtime tests proving state persists across tool-call iterations
+  within a turn and resets between turns.
+
+### Phase 5: File Read Ergonomics
+
+Purpose: make reads line-addressable, bounded, and state-aware.
+
+Deliverables:
+
+- Change `file_read` to `offset` and `limit`.
+- Add `plain` and `line_numbered` formats, with line-numbered output documented
+  as display-only for edits.
+- Add device path blocking and file-not-found suggestions.
+- Add repeated-read dedup recorded in `TurnToolState` with the full read identity
+  key: resolved path, offset, limit, `max_chars`, `format`, size, and mtime.
+- Rewrite focused read tests for pagination, hashes, truncation, dedup, stale
+  invalidation, suggestions, and device path rejection.
+
+### Phase 6: Write Safety Foundation
+
+Purpose: centralize write mechanics before adding new write modes.
+
+Deliverables:
+
+- Extract writer helpers for hash checks, process-wide per-path locks, sorted
+  multi-file lock acquisition, temp write, atomic rename where supported,
+  readback verification, bounded diff output, and read dedup invalidation.
+- Add advisory syntax validation helpers for Python, JSON, TOML, and YAML when
+  dependency support exists.
+- Refactor current `file_patch` range mode onto the shared writer helpers without
+  changing its target external behavior beyond improved verification output.
+- Add focused write-safety tests for hash mismatch, lock ordering helpers,
+  readback verification errors, bounded diffs, and advisory validation output.
+
+### Phase 7: Replace Patch Mode
+
+Purpose: add the first new edit mode on top of the shared write-safety layer.
+
+Deliverables:
+
+- Add `file_patch mode=replace` with `old_string`, `new_string`, and
+  `replace_all`.
+- Require exact unique matching unless `replace_all` is true.
+- Reject absent `old_string` and ambiguous matches before disk mutation.
+- Preserve `expected_sha256` for existing-file replace operations.
+- Add focused tests for exact replace, replace-all, no-match, ambiguous match,
+  hash mismatch, and diff output bounds.
+
+### Phase 8: Multi-file Patch Text
+
+Purpose: add strict Codex-style patch text for multi-file changes.
+
+Deliverables:
+
+- Add `file_patch mode=patch_text` with strict `*** Begin Patch`,
+  `*** Add File`, `*** Update File`, and `*** End Patch` grammar.
+- Support add and update operations only; reject delete, move, duplicate paths,
+  absolute paths, malformed patches, and missing or ambiguous context.
+- Validate every file operation before writing anything.
+- Lock all affected files in sorted resolved-path order.
+- Add focused tests for multi-file all-or-nothing behavior, malformed input,
+  outside-root rejection, context mismatch, duplicate paths, and bounded per-file
+  diffs.
+
+### Phase 9: Full-file Write
+
+Purpose: add the explicit whole-file write path after patch editing is mature.
 
 Deliverables:
 
 - Add `file_write`.
 - Restrict it to explicit create or explicit full overwrite.
-- Require `expected_sha256` for existing-file overwrite.
-- Reuse validation, locking, verification, and diff output.
+- Require `overwrite: true` and matching `expected_sha256` for existing-file
+  overwrite.
+- Allow parent directory creation only when both `create_parent_dirs: true` and
+  `tools.files.create_parent_dirs_enabled` are set.
+- Reuse path, hash, locking, verification, advisory validation, and bounded diff
+  helpers from the write-safety layer.
+- Add focused tests for create, overwrite rejection, hash mismatch, parent
+  directory behavior, max file size, and bounded diff output.
 
-Acceptance:
+### Overall Completion Acceptance
 
-- Existing file overwrite without `overwrite: true` fails.
-- Existing file overwrite without matching `expected_sha256` fails.
-- New file creation with non-empty `expected_sha256` fails.
-- Result returns create/update metadata and bounded diff.
+- `uv run ruff check .`
+- `uv run mypy src tests`
+- `uv run pytest -q`
+- Registered file tools expose the target toolset:
+  `file_glob`, `file_search`, `file_read`, `file_patch`, and `file_write`.
+- Tests cover the Testing Matrix categories below, including deterministic `rg`
+  unavailable behavior, turn-state reset, read dedup, and write no-mutation
+  guarantees for pre-write failures.
+- `README.md`, `config.example.toml`, `.env.example`, and `ToolSpec`
+  descriptions reflect the final contracts.
 
 ## Testing Matrix
 
@@ -664,12 +799,15 @@ Required categories:
 - Binary/NUL: binary extension, NUL bytes in file, NUL bytes in replacement.
 - Bounds: max bytes, max chars, max lines, max result size.
 - Pagination: limit, offset, next offset, truncation.
-- Search: regex, literal, glob filter, count mode, files mode, context mode.
+- Search: `rg` unavailable behavior, regex, fixed-string literal, glob filter,
+  count mode, files mode, context mode, multiline mode, type filters,
+  max-filesize handling.
 - Write safety: expected hash, stale content, lock behavior, readback
   verification.
 - Patch parsing: malformed inputs, overlapping edits, ambiguous replace,
-  multi-file all-or-nothing.
-- Validation: syntax success, syntax failure, validation skipped.
+  multi-file all-or-nothing, no disk mutation on pre-write failures.
+- Validation: syntax success, syntax failure, validation skipped, diagnostics
+  returned without rollback.
 
 CI gate:
 
@@ -679,9 +817,14 @@ uv run mypy src tests
 uv run pytest -q
 ```
 
-## Documentation Updates Per Phase
+## Documentation Updates
 
-Each phase must update:
+Any implementation slice that changes public tool behavior, configuration, or
+model-facing tool descriptions must update the relevant active docs in the same
+change. The final overall acceptance still checks that all docs match the final
+tool contracts.
+
+Relevant docs:
 
 - `README.md` built-in tools section.
 - `config.example.toml` if configuration changes.
@@ -695,6 +838,9 @@ Each phase must update:
 - Do not make shell commands the primary file editing path.
 - Do not add delete/move/copy before patch and write have shared safety
   infrastructure.
+- Do not add Python content-search fallback for `rg`-backed search and recursive
+  file discovery.
+- Do not add fuzzy matching as default edit behavior.
 - Do not support arbitrary binary editing through these text tools.
 - Do not include image, PDF, or notebook support in this roadmap; revisit those
   in a separate plan if rich-format workflows become a priority.
