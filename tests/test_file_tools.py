@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -141,12 +142,16 @@ def test_file_glob_recursive_requires_rg_when_unavailable(
     assert result.metadata["unavailable"] is True
 
 
-def test_file_glob_recursive_include_dirs_prunes_excluded_subtrees(tmp_path: Path) -> None:
+def test_file_glob_recursive_include_dirs_prunes_excluded_subtrees(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = tmp_path / "root"
     root.mkdir()
     (root / "src" / "pkg").mkdir(parents=True)
     (root / ".git" / "objects").mkdir(parents=True)
     (root / "node_modules" / "pkg").mkdir(parents=True)
+    monkeypatch.setattr("alpha_agent.tools.files.tools.rg_files", lambda *_args, **_kwargs: [])
 
     result = FileGlobTool(_file_config(root)).run(
         {
@@ -223,12 +228,53 @@ def test_file_read_suggests_likely_project_relative_missing_paths(tmp_path: Path
     assert "tests/foo.py" in message
 
 
-def test_file_search_literal_content_context_and_count_modes(tmp_path: Path) -> None:
+def test_file_search_literal_content_context_and_count_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root = tmp_path / "root"
     root.mkdir()
-    (root / "a.txt").write_text("before\nneedle.one\nafter\nneedle.two\n", encoding="utf-8")
-    (root / "b.txt").write_text("needle.one\n", encoding="utf-8")
+    a_path = root / "a.txt"
+    b_path = root / "b.txt"
+    a_path.write_text("before\nneedle.one\nafter\nneedle.two\n", encoding="utf-8")
+    b_path.write_text("needle.one\n", encoding="utf-8")
     tool = FileSearchTool(_file_config(root, max_search_results=2))
+
+    def rg_event(event_type: str, path: Path, line_number: int, line: str) -> str:
+        return json.dumps(
+            {
+                "type": event_type,
+                "data": {
+                    "path": {"text": str(path)},
+                    "line_number": line_number,
+                    "lines": {"text": f"{line}\n"},
+                },
+            }
+        )
+
+    def fake_rg_run(_cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        pattern = _cmd[_cmd.index("--") + 1]
+        if pattern == "needle.one":
+            stdout = "\n".join(
+                [
+                    rg_event("context", a_path, 1, "before"),
+                    rg_event("match", a_path, 2, "needle.one"),
+                    rg_event("context", a_path, 3, "after"),
+                    rg_event("match", b_path, 1, "needle.one"),
+                ]
+            )
+        else:
+            stdout = "\n".join(
+                [
+                    rg_event("match", a_path, 2, "needle.one"),
+                    rg_event("match", a_path, 4, "needle.two"),
+                    rg_event("match", b_path, 1, "needle.one"),
+                ]
+            )
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr("alpha_agent.tools.files.searching.shutil.which", lambda _name: "rg")
+    monkeypatch.setattr("alpha_agent.tools.files.searching.subprocess.run", fake_rg_run)
 
     content = tool.run(
         {
