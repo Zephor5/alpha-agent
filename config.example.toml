@@ -2,11 +2,12 @@
 # Copy to ~/.alpha-agent/config.toml or run `uv run alpha config init`.
 
 [runtime]
-db_path = "~/.alpha-agent/alpha.db"
-log_dir = "~/.alpha-agent/logs"
-gateway_status_path = "~/.alpha-agent/gateway-status.json"
-daemon_socket_path = "~/.alpha-agent/daemon.sock"
-daemon_status_path = "~/.alpha-agent/daemon-status.json"
+home_dir = "~/.alpha-agent"
+db_path = "alpha.db"
+log_dir = "logs"
+gateway_status_path = "gateway-status.json"
+daemon_socket_path = "daemon.sock"
+daemon_status_path = "daemon-status.json"
 
 [llm]
 provider = "mock"
@@ -38,8 +39,8 @@ max_context_tokens = 1000000
 [tools.bash]
 # Disabled by default because this executes local foreground shell commands.
 enabled = false
-default_workdir = "."
-allowed_workdirs = ["."]
+default_workdir = "workspace"
+allowed_workdirs = ["workspace"]
 default_timeout_seconds = 120
 max_timeout_seconds = 600
 max_output_chars = 30000
@@ -49,7 +50,7 @@ env_passthrough = []
 # Read-only file tools are enabled by default. file_patch stays disabled until
 # both patch_enabled is true and write_roots is non-empty.
 enabled = true
-allowed_roots = ["."]
+allowed_roots = ["workspace"]
 patch_enabled = false
 write_roots = []
 max_read_chars = 20000

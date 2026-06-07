@@ -14,11 +14,12 @@ DEFAULT_CONFIG_TOML = """# Alpha Agent local configuration.
 # Environment variables still override these values for one-off runs or deploys.
 
 [runtime]
-db_path = "~/.alpha-agent/alpha.db"
-log_dir = "~/.alpha-agent/logs"
-gateway_status_path = "~/.alpha-agent/gateway-status.json"
-daemon_socket_path = "~/.alpha-agent/daemon.sock"
-daemon_status_path = "~/.alpha-agent/daemon-status.json"
+home_dir = "~/.alpha-agent"
+db_path = "alpha.db"
+log_dir = "logs"
+gateway_status_path = "gateway-status.json"
+daemon_socket_path = "daemon.sock"
+daemon_status_path = "daemon-status.json"
 
 [llm]
 provider = "mock"
@@ -47,8 +48,8 @@ max_context_tokens = 1000000
 
 [tools.bash]
 enabled = false
-default_workdir = "."
-allowed_workdirs = ["."]
+default_workdir = "workspace"
+allowed_workdirs = ["workspace"]
 default_timeout_seconds = 120
 max_timeout_seconds = 600
 max_output_chars = 30000
@@ -56,7 +57,7 @@ env_passthrough = []
 
 [tools.files]
 enabled = true
-allowed_roots = ["."]
+allowed_roots = ["workspace"]
 patch_enabled = false
 write_roots = []
 max_read_chars = 20000
@@ -118,6 +119,7 @@ api_key = ""
 """
 
 CONFIG_KEY_TYPES: dict[str, type] = {
+    "runtime.home_dir": str,
     "runtime.db_path": str,
     "runtime.log_dir": str,
     "runtime.gateway_status_path": str,
@@ -272,8 +274,8 @@ class BashToolConfig:
     """Configuration for the opt-in local bash tool."""
 
     enabled: bool = False
-    default_workdir: Path = Path(".")
-    allowed_workdirs: tuple[Path, ...] = (Path("."),)
+    default_workdir: Path = Path("~/.alpha-agent/workspace").expanduser()
+    allowed_workdirs: tuple[Path, ...] = (Path("~/.alpha-agent/workspace").expanduser(),)
     default_timeout_seconds: int = 120
     max_timeout_seconds: int = 600
     max_output_chars: int = 30000
@@ -285,7 +287,7 @@ class FileToolConfig:
     """Configuration for local file tools."""
 
     enabled: bool = True
-    allowed_roots: tuple[Path, ...] = (Path("."),)
+    allowed_roots: tuple[Path, ...] = (Path("~/.alpha-agent/workspace").expanduser(),)
     patch_enabled: bool = False
     write_roots: tuple[Path, ...] = ()
     max_read_chars: int = 20000
@@ -363,6 +365,7 @@ class AlphaConfig:
     db_path: Path
     log_dir: Path
     gateway_status_path: Path
+    home_dir: Path = Path("~/.alpha-agent").expanduser()
     daemon_socket_path: Path = Path("~/.alpha-agent/daemon.sock").expanduser()
     daemon_status_path: Path = Path("~/.alpha-agent/daemon-status.json").expanduser()
     llm_provider: str = "mock"
@@ -489,58 +492,80 @@ def load_config(
     drive = drive if isinstance(drive, dict) else {}
     deepseek = _section(config_data, "deepseek")
     tavily = _section(config_data, "tavily")
+    home_dir = _path_setting(
+        _env_or_config(
+            "ALPHA_HOME_DIR",
+            config_data,
+            "runtime",
+            "home_dir",
+            "~/.alpha-agent",
+        )
+        or "~/.alpha-agent",
+        "runtime.home_dir",
+    )
 
     config = AlphaConfig(
-        db_path=Path(
+        home_dir=home_dir,
+        db_path=_path_setting(
             _env_or_config(
                 "ALPHA_DB_PATH",
                 config_data,
                 "runtime",
                 "db_path",
-                "~/.alpha-agent/alpha.db",
+                "alpha.db",
             )
-            or "~/.alpha-agent/alpha.db"
-        ).expanduser(),
-        log_dir=Path(
+            or "alpha.db",
+            "runtime.db_path",
+            base_dir=home_dir,
+        ),
+        log_dir=_path_setting(
             _env_or_config(
                 "ALPHA_LOG_DIR",
                 config_data,
                 "runtime",
                 "log_dir",
-                "~/.alpha-agent/logs",
+                "logs",
             )
-            or "~/.alpha-agent/logs"
-        ).expanduser(),
-        gateway_status_path=Path(
+            or "logs",
+            "runtime.log_dir",
+            base_dir=home_dir,
+        ),
+        gateway_status_path=_path_setting(
             _env_or_config(
                 "ALPHA_GATEWAY_STATUS_PATH",
                 config_data,
                 "runtime",
                 "gateway_status_path",
-                "~/.alpha-agent/gateway-status.json",
+                "gateway-status.json",
             )
-            or "~/.alpha-agent/gateway-status.json"
-        ).expanduser(),
-        daemon_socket_path=Path(
+            or "gateway-status.json",
+            "runtime.gateway_status_path",
+            base_dir=home_dir,
+        ),
+        daemon_socket_path=_path_setting(
             _env_or_config(
                 "ALPHA_DAEMON_SOCKET_PATH",
                 config_data,
                 "runtime",
                 "daemon_socket_path",
-                "~/.alpha-agent/daemon.sock",
+                "daemon.sock",
             )
-            or "~/.alpha-agent/daemon.sock"
-        ).expanduser(),
-        daemon_status_path=Path(
+            or "daemon.sock",
+            "runtime.daemon_socket_path",
+            base_dir=home_dir,
+        ),
+        daemon_status_path=_path_setting(
             _env_or_config(
                 "ALPHA_DAEMON_STATUS_PATH",
                 config_data,
                 "runtime",
                 "daemon_status_path",
-                "~/.alpha-agent/daemon-status.json",
+                "daemon-status.json",
             )
-            or "~/.alpha-agent/daemon-status.json"
-        ).expanduser(),
+            or "daemon-status.json",
+            "runtime.daemon_status_path",
+            base_dir=home_dir,
+        ),
         llm_provider=(
             _env_or_config("ALPHA_LLM_PROVIDER", config_data, "llm", "provider", "mock")
             or "mock"
@@ -576,8 +601,8 @@ def load_config(
                 _int_value(llm_context.get("safety_margin_tokens"), 1024),
             ),
         ),
-        bash_tool=_bash_tool_config(bash_tool),
-        file_tool=_file_tool_config(file_tool),
+        bash_tool=_bash_tool_config(bash_tool, base_dir=home_dir),
+        file_tool=_file_tool_config(file_tool, base_dir=home_dir),
         llm_provider_max_context_tokens=_provider_max_context_tokens(llm_providers),
         compatible_base_url=_env_or_config(
             "ALPHA_COMPATIBLE_BASE_URL",
@@ -694,7 +719,15 @@ def _validate_config_value(key: str, value: Any) -> Any:
         "tools.files.write_roots",
     }:
         return _validate_string_list_config_value(key, value)
-    if key in {"tools.bash.default_workdir"}:
+    if key in {
+        "runtime.home_dir",
+        "runtime.db_path",
+        "runtime.log_dir",
+        "runtime.gateway_status_path",
+        "runtime.daemon_socket_path",
+        "runtime.daemon_status_path",
+        "tools.bash.default_workdir",
+    }:
         text = str(value)
         if "\x00" in text:
             raise ValueError(f"{key} must not contain NUL characters")
@@ -707,6 +740,12 @@ def _validate_config_value(key: str, value: Any) -> Any:
 
 def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
     values = {
+        "runtime.home_dir": str(config.home_dir),
+        "runtime.db_path": str(config.db_path),
+        "runtime.log_dir": str(config.log_dir),
+        "runtime.gateway_status_path": str(config.gateway_status_path),
+        "runtime.daemon_socket_path": str(config.daemon_socket_path),
+        "runtime.daemon_status_path": str(config.daemon_status_path),
         "llm.provider": config.llm_provider,
         "llm.context.tool_truncate_threshold_ratio": (
             config.llm_context.tool_truncate_threshold_ratio
@@ -897,6 +936,8 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
 
 
 def _validate_config_data(config_data: dict[str, Any]) -> None:
+    runtime = _section(config_data, "runtime")
+    home_dir = _path_setting(str(runtime.get("home_dir") or "~/.alpha-agent"), "runtime.home_dir")
     tools = _section(config_data, "tools")
     bash = tools.get("bash")
     bash = bash if isinstance(bash, dict) else {}
@@ -915,14 +956,19 @@ def _validate_config_data(config_data: dict[str, Any]) -> None:
         max_output_chars = _int_value(bash.get("max_output_chars"), 30000)
         if max_output_chars <= 0:
             raise ValueError("tools.bash.max_output_chars must be greater than 0")
-        allowed_workdirs = _list_value(bash.get("allowed_workdirs"), (".",))
+        allowed_workdirs = _list_value(bash.get("allowed_workdirs"), ("workspace",))
         if not allowed_workdirs:
             raise ValueError("tools.bash.allowed_workdirs must not be empty")
         default_workdir = _path_setting(
-            _string_from_mapping(bash, "default_workdir", "."),
+            _string_from_mapping(bash, "default_workdir", "workspace"),
             "tools.bash.default_workdir",
+            base_dir=home_dir,
         )
-        allowed_paths = _path_tuple(allowed_workdirs, "tools.bash.allowed_workdirs")
+        allowed_paths = _path_tuple(
+            allowed_workdirs,
+            "tools.bash.allowed_workdirs",
+            base_dir=home_dir,
+        )
         if not _path_is_inside_allowed(default_workdir, allowed_paths):
             raise ValueError(
                 "tools.bash.default_workdir must be within tools.bash.allowed_workdirs"
@@ -930,12 +976,12 @@ def _validate_config_data(config_data: dict[str, Any]) -> None:
     files = tools.get("files")
     files = files if isinstance(files, dict) else {}
     if files:
-        allowed_roots = _list_value(files.get("allowed_roots"), (".",))
+        allowed_roots = _list_value(files.get("allowed_roots"), ("workspace",))
         if not allowed_roots:
             raise ValueError("tools.files.allowed_roots must not be empty")
-        _path_tuple(allowed_roots, "tools.files.allowed_roots")
+        _path_tuple(allowed_roots, "tools.files.allowed_roots", base_dir=home_dir)
         write_roots = _list_value(files.get("write_roots"), ())
-        _path_tuple(write_roots, "tools.files.write_roots")
+        _path_tuple(write_roots, "tools.files.write_roots", base_dir=home_dir)
         for key, default in (
             ("max_read_chars", 20000),
             ("max_file_bytes", 1000000),
@@ -1134,18 +1180,20 @@ def _mapping_section(mapping: dict[str, Any], name: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _bash_tool_config(section: dict[str, Any]) -> BashToolConfig:
+def _bash_tool_config(section: dict[str, Any], *, base_dir: Path) -> BashToolConfig:
     default_workdir = _path_setting(
         os.getenv("ALPHA_BASH_TOOL_DEFAULT_WORKDIR")
-        or _string_from_mapping(section, "default_workdir", "."),
+        or _string_from_mapping(section, "default_workdir", "workspace"),
         "tools.bash.default_workdir",
+        base_dir=base_dir,
     )
     allowed_workdirs = _path_tuple(
         _list_env(
             "ALPHA_BASH_TOOL_ALLOWED_WORKDIRS",
-            _list_value(section.get("allowed_workdirs"), (".",)),
+            _list_value(section.get("allowed_workdirs"), ("workspace",)),
         ),
         "tools.bash.allowed_workdirs",
+        base_dir=base_dir,
     )
     return BashToolConfig(
         enabled=_bool_env("ALPHA_BASH_TOOL_ENABLED", _bool_value(section.get("enabled"), False)),
@@ -1172,13 +1220,14 @@ def _bash_tool_config(section: dict[str, Any]) -> BashToolConfig:
     )
 
 
-def _file_tool_config(section: dict[str, Any]) -> FileToolConfig:
+def _file_tool_config(section: dict[str, Any], *, base_dir: Path) -> FileToolConfig:
     allowed_roots = _path_tuple(
         _list_env(
             "ALPHA_FILE_TOOL_ALLOWED_ROOTS",
-            _list_value(section.get("allowed_roots"), (".",)),
+            _list_value(section.get("allowed_roots"), ("workspace",)),
         ),
         "tools.files.allowed_roots",
+        base_dir=base_dir,
     )
     write_roots = _path_tuple(
         _list_env(
@@ -1186,6 +1235,7 @@ def _file_tool_config(section: dict[str, Any]) -> FileToolConfig:
             _list_value(section.get("write_roots"), ()),
         ),
         "tools.files.write_roots",
+        base_dir=base_dir,
     )
     return FileToolConfig(
         enabled=_bool_env("ALPHA_FILE_TOOL_ENABLED", _bool_value(section.get("enabled"), True)),
@@ -1287,19 +1337,30 @@ def _string_from_mapping(mapping: dict[str, Any], key: str, default: str) -> str
     return text
 
 
-def _path_setting(value: str, label: str) -> Path:
+def _path_setting(value: str, label: str, *, base_dir: Path | None = None) -> Path:
     if "\x00" in value:
         raise ValueError(f"{label} must not contain NUL characters")
-    return Path(value).expanduser().resolve()
+    path = Path(value).expanduser()
+    if not path.is_absolute() and base_dir is not None:
+        path = base_dir / path
+    return path.resolve()
 
 
-def _path_tuple(values: tuple[str, ...], label: str) -> tuple[Path, ...]:
+def _path_tuple(
+    values: tuple[str, ...],
+    label: str,
+    *,
+    base_dir: Path | None = None,
+) -> tuple[Path, ...]:
     resolved: list[Path] = []
     seen: set[Path] = set()
     for value in values:
         if "\x00" in value:
             raise ValueError(f"{label} must not contain NUL characters")
-        path = Path(value).expanduser().resolve()
+        path = Path(value).expanduser()
+        if not path.is_absolute() and base_dir is not None:
+            path = base_dir / path
+        path = path.resolve()
         if path not in seen:
             resolved.append(path)
             seen.add(path)

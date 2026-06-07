@@ -109,6 +109,7 @@ api_key = "tvly-file-key"
 
     config = load_config(env_file=None, config_file=config_path)
 
+    assert config.home_dir == Path("~/.alpha-agent").expanduser().resolve()
     assert config.db_path == Path("~/custom-alpha/alpha.db").expanduser()
     assert config.log_dir == Path("~/custom-alpha/logs").expanduser()
     assert config.gateway_status_path == Path("~/custom-alpha/status.json").expanduser()
@@ -126,9 +127,9 @@ api_key = "tvly-file-key"
     assert config.max_context_tokens_for_provider("compatible") == 200000
     assert config.max_context_tokens_for_provider("deepseek") == 900000
     assert config.bash_tool.enabled is True
-    assert config.bash_tool.default_workdir == Path(".").resolve()
+    assert config.bash_tool.default_workdir == Path("~/.alpha-agent").expanduser().resolve()
     assert config.bash_tool.allowed_workdirs == (
-        Path(".").resolve(),
+        Path("~/.alpha-agent").expanduser().resolve(),
         Path("~/custom-alpha").expanduser().resolve(),
     )
     assert config.bash_tool.default_timeout_seconds == 30
@@ -137,7 +138,7 @@ api_key = "tvly-file-key"
     assert config.bash_tool.env_passthrough == ("ALPHA_VISIBLE_ENV",)
     assert config.file_tool.enabled is True
     assert config.file_tool.allowed_roots == (
-        Path(".").resolve(),
+        Path("~/.alpha-agent").expanduser().resolve(),
         Path("~/custom-alpha/files").expanduser().resolve(),
     )
     assert config.file_tool.patch_enabled is True
@@ -186,6 +187,53 @@ def test_background_tick_timeout_default_is_sixty_seconds(tmp_path: Path) -> Non
     config = load_config(env_file=None, config_file=config_path)
 
     assert config.cognition_background.tick_timeout_seconds == 60
+
+
+def test_relative_paths_resolve_under_runtime_home_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    home_dir = tmp_path / "alpha-home"
+    start_cwd = tmp_path / "start-cwd"
+    start_cwd.mkdir()
+    config_path.write_text(
+        f"""
+[runtime]
+home_dir = "{home_dir}"
+db_path = "alpha.db"
+log_dir = "logs"
+gateway_status_path = "gateway-status.json"
+daemon_socket_path = "daemon.sock"
+daemon_status_path = "daemon-status.json"
+
+[tools.bash]
+default_workdir = "workspace"
+allowed_workdirs = ["workspace", "scratch"]
+
+[tools.files]
+allowed_roots = ["workspace"]
+write_roots = ["workspace/write"]
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(start_cwd)
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.home_dir == home_dir.resolve()
+    assert config.db_path == home_dir / "alpha.db"
+    assert config.log_dir == home_dir / "logs"
+    assert config.gateway_status_path == home_dir / "gateway-status.json"
+    assert config.daemon_socket_path == home_dir / "daemon.sock"
+    assert config.daemon_status_path == home_dir / "daemon-status.json"
+    assert config.bash_tool.default_workdir == home_dir / "workspace"
+    assert config.bash_tool.allowed_workdirs == (
+        home_dir / "workspace",
+        home_dir / "scratch",
+    )
+    assert config.file_tool.allowed_roots == (home_dir / "workspace",)
+    assert config.file_tool.write_roots == (home_dir / "workspace" / "write",)
 
 
 def test_environment_overrides_config_file(
@@ -269,7 +317,7 @@ allowed_workdirs = ["."]
     assert config.bash_tool.enabled is True
     assert config.bash_tool.default_workdir == Path("~").expanduser().resolve()
     assert config.bash_tool.allowed_workdirs == (
-        Path(".").resolve(),
+        Path("~/.alpha-agent").expanduser().resolve(),
         Path("~").expanduser().resolve(),
     )
     assert config.bash_tool.default_timeout_seconds == 45
@@ -278,7 +326,7 @@ allowed_workdirs = ["."]
     assert config.bash_tool.env_passthrough == ("ALPHA_VISIBLE_ENV", "CI")
     assert config.file_tool.enabled is True
     assert config.file_tool.allowed_roots == (
-        Path(".").resolve(),
+        Path("~/.alpha-agent").expanduser().resolve(),
         Path("~/alpha-files").expanduser().resolve(),
     )
     assert config.file_tool.patch_enabled is True
@@ -413,7 +461,9 @@ def test_config_cli_set_and_get(
     config_path = tmp_path / "config.toml"
     monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
     runner = CliRunner()
+    home_dir = tmp_path / "alpha-home"
 
+    set_home_dir = runner.invoke(app, ["config", "set", "runtime.home_dir", str(home_dir)])
     set_provider = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
     set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
     set_context = runner.invoke(
@@ -460,6 +510,7 @@ def test_config_cli_set_and_get(
         ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
     )
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
+    get_home_dir = runner.invoke(app, ["config", "get", "runtime.home_dir"])
     get_bash_enabled = runner.invoke(app, ["config", "get", "tools.bash.enabled"])
     get_files_enabled = runner.invoke(app, ["config", "get", "tools.files.enabled"])
     get_files_patch_enabled = runner.invoke(
@@ -467,6 +518,7 @@ def test_config_cli_set_and_get(
         ["config", "get", "tools.files.patch_enabled"],
     )
 
+    assert set_home_dir.exit_code == 0
     assert set_provider.exit_code == 0
     assert set_debug.exit_code == 0
     assert set_context.exit_code == 0
@@ -483,14 +535,17 @@ def test_config_cli_set_and_get(
     assert set_files_create_parent_dirs.exit_code == 0
     assert set_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
+    assert get_home_dir.exit_code == 0
     assert get_bash_enabled.exit_code == 0
     assert get_files_enabled.exit_code == 0
     assert get_files_patch_enabled.exit_code == 0
     assert "codex" in get_provider.output
+    assert str(home_dir) in get_home_dir.output
     assert "true" in get_bash_enabled.output
     assert "true" in get_files_enabled.output
     assert "true" in get_files_patch_enabled.output
     config = load_config(env_file=None, config_file=config_path)
+    assert config.home_dir == home_dir.resolve()
     assert config.llm_provider == "codex"
     assert config.llm_debug_logging is True
     assert config.llm_context.expected_output_reserve_tokens == 2048
@@ -498,12 +553,12 @@ def test_config_cli_set_and_get(
     assert config.tavily_api_key == "tvly-test"
     assert config.bash_tool.enabled is True
     assert config.bash_tool.allowed_workdirs == (
-        Path(".").resolve(),
+        home_dir.resolve(),
         Path("~/alpha-work").expanduser().resolve(),
     )
     assert config.file_tool.enabled is True
     assert config.file_tool.allowed_roots == (
-        Path(".").resolve(),
+        home_dir.resolve(),
         Path("~/alpha-files").expanduser().resolve(),
     )
     assert config.file_tool.patch_enabled is True

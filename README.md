@@ -123,12 +123,15 @@ model by default. Other tools are opt-in:
   blocking, and output truncation — but it is **not a security sandbox**. Don't
   expose it to untrusted gateway users without a stronger approval layer.
 
-- **Local file tools** — enabled by default for the current working tree. Configure
-  the allowed roots, or disable them if you do not want the model to inspect local
-  files:
+- **Local file tools** — enabled by default for the Alpha workspace under
+  `runtime.home_dir`. Relative local paths in runtime, bash, and file-tool
+  settings resolve under that home directory, so daemon behavior does not depend
+  on the directory where it was started. Configure the allowed roots, or disable
+  file tools if you do not want the model to inspect local files:
 
   ```bash
-  uv run alpha config set tools.files.allowed_roots .
+  uv run alpha config set runtime.home_dir ~/.alpha-agent
+  uv run alpha config set tools.files.allowed_roots workspace
   uv run alpha config set tools.files.enabled false
   uv run alpha daemon restart
   ```
@@ -144,7 +147,7 @@ model by default. Other tools are opt-in:
   and `tools.files.write_roots` is non-empty:
 
   ```bash
-  uv run alpha config set tools.files.write_roots .
+  uv run alpha config set tools.files.write_roots workspace
   uv run alpha config set tools.files.patch_enabled true
   uv run alpha daemon restart
   ```
