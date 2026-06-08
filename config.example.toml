@@ -108,5 +108,5 @@ reasoning_effort = ""
 access_token = ""
 
 [tavily]
-# Enables the built-in web_search tool when set.
+# Enables the built-in web_search and web_fetch tools when set.
 api_key = ""

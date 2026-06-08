@@ -14,6 +14,7 @@ from alpha_agent.tools.files import (
 from alpha_agent.tools.memory_propose import MemoryProposeTool
 from alpha_agent.tools.memory_recall import MemoryRecallTool
 from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.tools.web_fetch import TavilyWebFetchTool
 from alpha_agent.tools.web_search import TavilyWebSearchTool
 
 
@@ -36,6 +37,7 @@ def build_tool_registry(config: AlphaConfig | None = None) -> ToolRegistry:
         registry.register(BashTool(config=config.bash_tool, secret_values=_config_secrets(config)))
     if config.tavily_api_key:
         registry.register(TavilyWebSearchTool(api_key=config.tavily_api_key))
+        registry.register(TavilyWebFetchTool(api_key=config.tavily_api_key))
     return registry
 
 

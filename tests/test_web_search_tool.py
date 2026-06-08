@@ -219,9 +219,14 @@ def test_tool_registry_includes_memory_propose_and_configured_tools(
 
     assert empty_registry.names() == default_names
     assert [tool.name for tool in empty_registry.to_llm_tool_definitions()] == default_names
-    assert build_tool_registry(configured).names() == [*default_names, "web_search"]
+    assert build_tool_registry(configured).names() == [*default_names, "web_search", "web_fetch"]
     assert build_tool_registry(bash_configured).names() == [*default_names, "bash"]
-    assert build_tool_registry(both_configured).names() == [*default_names, "bash", "web_search"]
+    assert build_tool_registry(both_configured).names() == [
+        *default_names,
+        "bash",
+        "web_search",
+        "web_fetch",
+    ]
     assert [
         tool.name for tool in build_tool_registry(both_configured).to_llm_tool_definitions()
-    ] == [*default_names, "bash", "web_search"]
+    ] == [*default_names, "bash", "web_search", "web_fetch"]

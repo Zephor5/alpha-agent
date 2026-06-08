@@ -117,6 +117,7 @@ def test_agent_factory_registers_configured_default_tools(tmp_path: Path) -> Non
         "file_search",
         "bash",
         "web_search",
+        "web_fetch",
     ]
 
 

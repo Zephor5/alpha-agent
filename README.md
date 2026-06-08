@@ -104,7 +104,7 @@ Run `uv run alpha --help` (or `--help` on any subcommand) for the full list.
 Memory recall, memory proposal, and local file inspection are available to the
 model by default. Other tools are opt-in:
 
-- **Web search** — enabled automatically once a Tavily key is set:
+- **Web search and fetch** — enabled automatically once a Tavily key is set:
 
   ```bash
   uv run alpha config set tavily.api_key tvly-...
