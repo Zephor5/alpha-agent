@@ -19,6 +19,7 @@ from alpha_agent.tools.base import (
     ToolExecutionContext,
     ToolResult,
     ToolSpec,
+    ToolUserError,
     TurnToolState,
     tool_availability,
     tool_output_to_model_content,
@@ -474,6 +475,25 @@ class ToolExecutor:
                 metadata={
                     "failed": True,
                     "error": message,
+                    "error_type": type(exc).__name__,
+                    "tool_call_id": call.id,
+                },
+            )
+        if isinstance(exc, ToolUserError):
+            error: dict[str, Any] = {
+                "code": exc.code,
+                "message": str(exc),
+            }
+            if exc.details:
+                error["details"] = dict(exc.details)
+            return ToolResult(
+                name=call.name,
+                output={"error": error},
+                metadata={
+                    "failed": True,
+                    "recoverable": True,
+                    "error": str(exc),
+                    "error_code": exc.code,
                     "error_type": type(exc).__name__,
                     "tool_call_id": call.id,
                 },

@@ -36,6 +36,24 @@ class ResolvedPath:
     display: str
 
 
+READ_BOUNDARY_MESSAGE = (
+    "path is outside the readable file workspace; use a relative path inside the workspace"
+)
+WRITE_BOUNDARY_MESSAGE = (
+    "path is outside the writable file workspace; use a relative path inside a writable workspace"
+)
+READ_BOUNDARY_DETAILS = {
+    "argument": "path",
+    "retry": (
+        "Use a workspace-relative path, or inspect available files with file_glob using path '.'."
+    ),
+}
+WRITE_BOUNDARY_DETAILS = {
+    "argument": "path",
+    "retry": "Use a relative target path under a writable workspace.",
+}
+
+
 def normalized_roots(
     roots: tuple[Path, ...],
     *,
@@ -50,7 +68,12 @@ def normalized_roots(
             resolved.append(path)
             seen.add(path)
     if required and not resolved:
-        raise FileToolError(f"{label} must not be empty")
+        scope = _root_scope(label)
+        raise FileToolError(
+            f"{scope} file workspace roots must not be empty",
+            code=f"file_{scope}_workspace_roots_empty",
+            details={"scope": scope},
+        )
     return tuple(resolved)
 
 
@@ -86,7 +109,11 @@ def resolve_read_path(
         suffix = f"; suggestions: {', '.join(suggestions)}" if suggestions else ""
         raise FileToolError(f"path does not exist{suffix}") from exc
     if not is_inside_allowed(resolved, roots):
-        raise FileToolError("path is outside tools.files.allowed_roots")
+        raise FileToolError(
+            READ_BOUNDARY_MESSAGE,
+            code="file_path_outside_readable_workspace",
+            details=READ_BOUNDARY_DETAILS,
+        )
     return ResolvedPath(path=resolved, display=display_path(resolved, roots))
 
 
@@ -111,7 +138,7 @@ def resolve_write_path(
     if candidate.exists():
         resolved = candidate.resolve(strict=True)
         if not is_inside_allowed(resolved, roots):
-            raise FileToolError("path is outside tools.files.write_roots")
+            raise _write_boundary_error()
         return ResolvedPath(path=resolved, display=display_path(resolved, roots))
 
     if not create_if_missing:
@@ -126,7 +153,7 @@ def resolve_write_path(
             resolved,
             roots,
         ):
-            raise FileToolError("path is outside tools.files.write_roots")
+            raise _write_boundary_error()
         parent.mkdir(parents=True, exist_ok=True)
     if parent.is_symlink():
         raise FileToolError("symlink directories are not patched")
@@ -134,8 +161,20 @@ def resolve_write_path(
     if not parent_resolved.is_dir():
         raise FileToolError("parent path must be a directory")
     if not is_inside_allowed(parent_resolved, roots) or not is_inside_allowed(resolved, roots):
-        raise FileToolError("path is outside tools.files.write_roots")
+        raise _write_boundary_error()
     return ResolvedPath(path=resolved, display=display_path(resolved, roots))
+
+
+def _write_boundary_error() -> FileToolError:
+    return FileToolError(
+        WRITE_BOUNDARY_MESSAGE,
+        code="file_path_outside_writable_workspace",
+        details=WRITE_BOUNDARY_DETAILS,
+    )
+
+
+def _root_scope(label: str) -> str:
+    return "writable" if "write" in label else "readable"
 
 
 def reject_symlink_ancestors(candidate: Path) -> None:

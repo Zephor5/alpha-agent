@@ -13,6 +13,7 @@ from alpha_agent.tools.base import (
     ToolExecutionContext,
     ToolResult,
     ToolSpec,
+    ToolUserError,
 )
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
@@ -112,7 +113,7 @@ class TavilyWebSearchTool:
         """Return whether Tavily-backed web search can currently run."""
 
         if not self.api_key:
-            return ToolAvailability.unavailable("tavily.api_key is required")
+            return ToolAvailability.unavailable("web search credentials are not configured")
         return ToolAvailability()
 
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
@@ -120,7 +121,11 @@ class TavilyWebSearchTool:
 
         del context
         if not self.api_key:
-            raise ValueError("tavily.api_key is required to use web_search")
+            raise ToolUserError(
+                "web_search is unavailable because web search credentials are not configured",
+                code="web_search_credentials_missing",
+                details={"retry": "Configure web search credentials before calling web_search."},
+            )
         payload = self._request_payload(arguments)
         response = self._post(payload)
         normalized = self._response_payload(response)

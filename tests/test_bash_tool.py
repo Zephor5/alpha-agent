@@ -165,7 +165,20 @@ def test_bash_tool_blocks_workdir_outside_allowed_roots(tmp_path: Path) -> None:
     output = _bash_output(result)
 
     assert output["status"] == "blocked"
-    assert "allowed workdirs" in output["stderr"]
+    assert "shell workspace" in output["stderr"]
+
+
+def test_bash_tool_blocks_when_no_shell_workspace_is_configured(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool = BashTool(config=_config(workspace, allowed_workdirs=()))
+
+    result = tool.run({"command": "printf nope"}, _context(tmp_path))
+    output = _bash_output(result)
+
+    assert output["status"] == "blocked"
+    assert output["stderr"] == "shell tool has no allowed workspaces configured"
+    assert "tools.bash" not in json.dumps(output)
 
 
 def test_bash_tool_rejects_unknown_arguments(tmp_path: Path) -> None:

@@ -10,7 +10,9 @@ from typing import Any, cast
 import pytest
 
 from alpha_agent.config import AlphaConfig, FileToolConfig
-from alpha_agent.tools.base import ToolExecutionContext
+from alpha_agent.runtime.tools import ToolExecutor
+from alpha_agent.state.store import StateStore
+from alpha_agent.tools.base import Tool, ToolCall, ToolExecutionContext
 from alpha_agent.tools.default import build_tool_registry
 from alpha_agent.tools.files import (
     FILE_GLOB_TOOL_NAME,
@@ -27,6 +29,7 @@ from alpha_agent.tools.files import (
 )
 from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_TOOL_NAME
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
+from alpha_agent.tools.registry import ToolRegistry
 
 
 def _tool_context(tmp_path: Path, *, turn_state: object | None = None) -> ToolExecutionContext:
@@ -55,6 +58,32 @@ def _file_config(root: Path, **overrides: object) -> FileToolConfig:
     }
     values.update(overrides)
     return FileToolConfig(**values)
+
+
+def _execute_tool_once(
+    tmp_path: Path,
+    tool: Tool,
+    *,
+    name: str,
+    arguments: dict[str, Any],
+) -> object:
+    registry = ToolRegistry()
+    registry.register(tool)
+    executor = ToolExecutor(registry)
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    return executor.execute(
+        calls=[ToolCall(id="call_1", name=name, arguments=arguments)],
+        session_id="s1",
+        write_trace=lambda event_type, content, metadata: store.append_runtime_trace(
+            session_id="s1",
+            event_type=event_type,
+            content=content,
+            metadata=metadata,
+        ),
+        check_canceled=lambda _stage: None,
+        recover_errors=True,
+    )[0].result.output
 
 
 def test_default_registry_uses_target_file_toolset(tmp_path: Path) -> None:
@@ -226,6 +255,31 @@ def test_file_read_suggests_likely_project_relative_missing_paths(tmp_path: Path
     assert "suggestions:" in message
     assert "src/foo.py" in message
     assert "tests/foo.py" in message
+
+
+def test_file_tool_executor_returns_actionable_read_boundary_error(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    outside_path = outside / "secret.txt"
+    outside_path.write_text("secret\n", encoding="utf-8")
+
+    output = _execute_tool_once(
+        tmp_path,
+        FileReadTool(_file_config(root)),
+        name=FILE_READ_TOOL_NAME,
+        arguments={"path": str(outside_path)},
+    )
+
+    assert isinstance(output, dict)
+    error = cast(dict[str, object], output["error"])
+    assert error["code"] == "file_path_outside_readable_workspace"
+    assert error["message"] == (
+        "path is outside the readable file workspace; use a relative path inside the workspace"
+    )
+    assert "file_glob" in str(error["details"])
+    assert "tools.files" not in json.dumps(output)
 
 
 def test_file_search_literal_content_context_and_count_modes(
@@ -559,7 +613,7 @@ def test_file_write_create_overwrite_hash_and_parent_gate(tmp_path: Path) -> Non
             },
             _tool_context(tmp_path),
         )
-    with pytest.raises(FileToolError, match="create_parent_dirs is disabled"):
+    with pytest.raises(FileToolError, match="create_parent_dirs cannot be used"):
         tool.run(
             {"path": "nested/new.txt", "content": "new\n", "create_parent_dirs": True},
             _tool_context(tmp_path),
@@ -572,7 +626,7 @@ def test_file_write_create_overwrite_hash_and_parent_gate(tmp_path: Path) -> Non
             create_parent_dirs_enabled=True,
         )
     )
-    with pytest.raises(FileToolError, match="outside tools.files.write_roots"):
+    with pytest.raises(FileToolError, match="outside the writable file workspace"):
         parent_enabled.run(
             {"path": "../outside/new.txt", "content": "new\n", "create_parent_dirs": True},
             _tool_context(tmp_path),
@@ -592,6 +646,84 @@ def test_file_write_create_overwrite_hash_and_parent_gate(tmp_path: Path) -> Non
     assert output["files_modified"] == ["sample.txt"]
     assert "-one" in str(output["diff"])
     assert "+two" in str(output["diff"])
+
+
+def test_file_tool_executor_returns_actionable_write_boundary_error(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    tool = FileWriteTool(
+        _file_config(
+            root,
+            patch_enabled=True,
+            write_roots=(root.resolve(),),
+            create_parent_dirs_enabled=True,
+        )
+    )
+
+    output = _execute_tool_once(
+        tmp_path,
+        tool,
+        name=FILE_WRITE_TOOL_NAME,
+        arguments={"path": "../outside/new.txt", "content": "new\n", "create_parent_dirs": True},
+    )
+
+    assert isinstance(output, dict)
+    error = cast(dict[str, object], output["error"])
+    assert error["code"] == "file_path_outside_writable_workspace"
+    assert error["message"] == (
+        "path is outside the writable file workspace; "
+        "use a relative path inside a writable workspace"
+    )
+    assert "tools.files" not in json.dumps(output)
+    assert not (tmp_path / "outside").exists()
+
+
+def test_file_tool_executor_returns_actionable_write_availability_error(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    tool = FileWriteTool(_file_config(root, patch_enabled=False, write_roots=(root.resolve(),)))
+
+    output = _execute_tool_once(
+        tmp_path,
+        tool,
+        name=FILE_WRITE_TOOL_NAME,
+        arguments={"path": "sample.txt", "content": "new\n"},
+    )
+
+    assert isinstance(output, dict)
+    error = cast(dict[str, Any], output["error"])
+    assert error["code"] == "tool_unavailable"
+    assert error["message"] == (
+        "Tool unavailable: file_write: file writing is disabled for this session"
+    )
+    assert error["details"]["availability"]["reason"] == "file writing is disabled for this session"
+    assert "tools.files" not in json.dumps(output)
+
+
+def test_file_tool_executor_returns_actionable_parent_directory_gate_error(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    tool = FileWriteTool(_file_config(root, patch_enabled=True, write_roots=(root.resolve(),)))
+
+    output = _execute_tool_once(
+        tmp_path,
+        tool,
+        name=FILE_WRITE_TOOL_NAME,
+        arguments={"path": "nested/new.txt", "content": "new\n", "create_parent_dirs": True},
+    )
+
+    assert isinstance(output, dict)
+    error = cast(dict[str, object], output["error"])
+    assert error["code"] == "file_parent_creation_disabled"
+    assert error["message"] == (
+        "create_parent_dirs cannot be used in this session; "
+        "choose an existing parent directory or retry with create_parent_dirs false"
+    )
+    assert "tools.files" not in json.dumps(output)
 
 
 def test_file_write_rechecks_expected_sha256_inside_path_lock(

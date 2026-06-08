@@ -92,14 +92,14 @@ class BashTool:
         """Return whether local bash execution is enabled."""
 
         if not self.config.enabled:
-            return ToolAvailability.unavailable("tools.bash.enabled is false")
+            return ToolAvailability.unavailable("local shell is disabled for this session")
         return ToolAvailability()
 
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
         """Run a policy-approved command and return a structured JSON result."""
 
-        policy = BashExecutionPolicy(self.config)
         try:
+            policy = BashExecutionPolicy(self.config)
             prepared = policy.prepare(arguments)
         except BashPolicyError as exc:
             return self._blocked_result(str(exc), arguments)

@@ -30,6 +30,21 @@ class ToolResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+class ToolUserError(ValueError):
+    """User-actionable tool error that can be returned to the model as structured JSON."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "tool_error",
+        details: Mapping[str, JSONValue] | None = None,
+    ):
+        super().__init__(_required_text(message, "message"))
+        self.code = _required_text(code, "code")
+        self.details = dict(details or {})
+
+
 @dataclass
 class TurnToolState:
     """Mutable tool governance state scoped to one agent turn."""

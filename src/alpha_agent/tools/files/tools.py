@@ -79,9 +79,11 @@ class _FileToolBase:
 
     def check_available(self) -> ToolAvailability:
         if not self.config.enabled:
-            return ToolAvailability.unavailable("tools.files.enabled is false")
+            return ToolAvailability.unavailable("file tools are disabled for this session")
         if not self.allowed_roots:
-            return ToolAvailability.unavailable("tools.files.allowed_roots is empty")
+            return ToolAvailability.unavailable(
+                "file tools have no readable workspace roots configured"
+            )
         return ToolAvailability()
 
     def _display(self, path: Path) -> str:
@@ -99,12 +101,17 @@ class FileGlobTool(_FileToolBase):
         limit = max_glob_results(self.config)
         return ToolSpec(
             name=FILE_GLOB_TOOL_NAME,
-            description="Find files by path/name pattern under configured allowed roots.",
+            description="Find files by path/name pattern under the readable file workspace.",
             parameters={
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Glob pattern, default *."},
-                    "path": {"type": "string", "description": "Root path to search."},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative file or directory to search; defaults to '.'."
+                        ),
+                    },
                     "max_depth": {"type": "integer", "minimum": 1},
                     "limit": {"type": "integer", "minimum": 1, "maximum": limit},
                     "offset": {"type": "integer", "minimum": 0},
@@ -243,7 +250,12 @@ class FileReadTool(_FileToolBase):
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative file path inside the readable workspace."
+                        ),
+                    },
                     "offset": {"type": "integer", "minimum": 1},
                     "limit": {
                         "type": "integer",
@@ -361,7 +373,12 @@ class FileSearchTool(_FileToolBase):
                 "properties": {
                     "pattern": {"type": "string"},
                     "mode": {"type": "string", "enum": ["regex", "literal"]},
-                    "path": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative file or directory to search; defaults to '.'."
+                        ),
+                    },
                     "glob": {"type": "string"},
                     "type": {"type": "string"},
                     "output_mode": {
@@ -461,7 +478,7 @@ class FileSearchTool(_FileToolBase):
 
 
 class FilePatchTool(_FileToolBase):
-    """Apply targeted edits inside configured write roots."""
+    """Apply targeted edits inside writable file workspaces."""
 
     @property
     def spec(self) -> ToolSpec:
@@ -472,7 +489,12 @@ class FilePatchTool(_FileToolBase):
                 "type": "object",
                 "properties": {
                     "mode": {"type": "string", "enum": ["range", "replace", "patch_text"]},
-                    "path": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative target path inside a writable workspace."
+                        ),
+                    },
                     "expected_sha256": {"type": "string"},
                     "create_if_missing": {"type": "boolean"},
                     "edits": {"type": "array"},
@@ -497,9 +519,11 @@ class FilePatchTool(_FileToolBase):
         if not availability.available:
             return availability
         if not self.config.patch_enabled:
-            return ToolAvailability.unavailable("tools.files.patch_enabled is false")
+            return ToolAvailability.unavailable("file writing is disabled for this session")
         if not self.write_roots:
-            return ToolAvailability.unavailable("tools.files.write_roots is empty")
+            return ToolAvailability.unavailable(
+                "file writing has no writable workspace roots configured"
+            )
         return ToolAvailability()
 
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
@@ -613,7 +637,12 @@ class FileWriteTool(_FileToolBase):
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Workspace-relative target path inside a writable workspace."
+                        ),
+                    },
                     "content": {"type": "string"},
                     "expected_sha256": {"type": "string"},
                     "create_if_missing": {"type": "boolean"},
@@ -635,9 +664,11 @@ class FileWriteTool(_FileToolBase):
         if not availability.available:
             return availability
         if not self.config.patch_enabled:
-            return ToolAvailability.unavailable("tools.files.patch_enabled is false")
+            return ToolAvailability.unavailable("file writing is disabled for this session")
         if not self.write_roots:
-            return ToolAvailability.unavailable("tools.files.write_roots is empty")
+            return ToolAvailability.unavailable(
+                "file writing has no writable workspace roots configured"
+            )
         return ToolAvailability()
 
     def run(self, arguments: dict[str, Any], context: ToolExecutionContext) -> ToolResult:
@@ -651,7 +682,16 @@ class FileWriteTool(_FileToolBase):
         )
         if create_parent_dirs and not create_parent_dirs_enabled(self.config):
             raise FileToolError(
-                "create_parent_dirs is disabled by tools.files.create_parent_dirs_enabled"
+                "create_parent_dirs cannot be used in this session; "
+                "choose an existing parent directory or retry with create_parent_dirs false",
+                code="file_parent_creation_disabled",
+                details={
+                    "argument": "create_parent_dirs",
+                    "retry": (
+                        "Write to a path whose parent directory already exists, "
+                        "or call the tool with create_parent_dirs false."
+                    ),
+                },
             )
         resolved = self._resolve_write_lock_target(arguments, create_parent_dirs=create_parent_dirs)
         with path_locks([resolved.path]):

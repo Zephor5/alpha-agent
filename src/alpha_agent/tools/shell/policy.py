@@ -159,7 +159,7 @@ class BashExecutionPolicy:
             resolved == root or resolved.is_relative_to(root) for root in self.allowed_workdirs
         )
         if not inside_allowed_root:
-            raise BashPolicyError("workdir must be within allowed workdirs")
+            raise BashPolicyError("workdir must be inside the shell workspace")
         return resolved
 
     def _timeout_seconds(self, raw_timeout: Any) -> int:
@@ -489,7 +489,7 @@ def _resolve_allowed_workdirs(paths: Sequence[Path]) -> tuple[Path, ...]:
         resolved.append(root)
         seen.add(root)
     if not resolved:
-        raise BashPolicyError("tools.bash.allowed_workdirs must not be empty")
+        raise BashPolicyError("shell tool has no allowed workspaces configured")
     return tuple(resolved)
 
 

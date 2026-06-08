@@ -315,7 +315,7 @@ def test_existing_tools_declare_governance_metadata(tmp_path: Path) -> None:
     assert unavailable_web.spec.read_only is True
     assert unavailable_web.check_available().to_dict() == {
         "available": False,
-        "reason": "tavily.api_key is required",
+        "reason": "web search credentials are not configured",
     }
 
 

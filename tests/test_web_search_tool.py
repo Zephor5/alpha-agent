@@ -168,7 +168,7 @@ def test_tavily_web_search_tool_validates_arguments(
 def test_tavily_web_search_tool_requires_api_key() -> None:
     tool = TavilyWebSearchTool(api_key="")
 
-    with pytest.raises(ValueError, match="tavily.api_key"):
+    with pytest.raises(ValueError, match="web search credentials are not configured"):
         tool.run({"query": "alpha"}, _tool_context())
 
 
