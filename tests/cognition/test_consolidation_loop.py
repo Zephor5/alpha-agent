@@ -733,6 +733,45 @@ def test_failed_validation_marks_failure_without_processed_checkpoint_or_belief_
     assert service.beliefs.list_active() == []
 
 
+def test_failed_background_llm_validation_logs_raw_output_preview(
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    source = BackgroundSourceRef("session_message", "msg-1")
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        source_refs=(source,),
+        idempotency_key="extract:s1:malformed",
+    )
+    run = service.ledger.start_stage_run(
+        worker_id="worker-a",
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        window_id=window.window_id,
+        input_refs=(source,),
+    )
+
+    with pytest.raises(BackgroundLLMValidationError, match="malformed background LLM JSON"):
+        service.accept_background_llm_json(
+            "not json",
+            _validation_context(window_id=window.window_id, source_refs=(source,)),
+            window_id=window.window_id,
+            run_id=run.run_id,
+            checkpoint_id="checkpoint:should-not-advance",
+        )
+
+    stderr = capsys.readouterr().err
+    assert "background_llm_validation_failed" in stderr
+    assert f'"run_id":"{run.run_id}"' in stderr
+    assert f'"window_id":"{window.window_id}"' in stderr
+    assert '"stage":"extraction"' in stderr
+    assert '"target_unit":"session:s1"' in stderr
+    assert '"raw_output_preview":"not json"' in stderr
+
+
 @pytest.mark.parametrize(
     "operation, payload, expected_error",
     [

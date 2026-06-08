@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -66,6 +67,8 @@ CREATE TABLE IF NOT EXISTS cognition_state_audit (
 CREATE INDEX IF NOT EXISTS idx_cognition_state_audit_kind_time
     ON cognition_state_audit(kind, created_at);
 """
+
+_BACKGROUND_LLM_RAW_OUTPUT_PREVIEW_CHARS = 2048
 
 
 def _dumps(value: Any) -> str:
@@ -295,6 +298,13 @@ class CognitionStateStore:
                 checkpoint_id=checkpoint_id,
             )
         except BackgroundLLMValidationError as exc:
+            _log_background_llm_validation_failed(
+                raw_output,
+                context,
+                window_id=window_id,
+                run_id=run_id,
+                error=str(exc),
+            )
             self._mark_background_validation_failed(
                 context,
                 window_id=window_id,
@@ -894,6 +904,39 @@ def _program_attached_sources(context: Any, *, run_id: str | None) -> list[Refer
     if run_id is not None:
         refs.append(Reference("background_stage_run", run_id))
     return refs
+
+
+def _log_background_llm_validation_failed(
+    raw_output: str,
+    context: Any,
+    *,
+    window_id: str,
+    run_id: str | None,
+    error: str,
+) -> None:
+    try:
+        source_window = getattr(context, "source_window", None)
+        stage = getattr(source_window, "stage", None)
+        stage_value = stage.value if isinstance(stage, BackgroundStage) else stage
+        raw_output_preview = raw_output[:_BACKGROUND_LLM_RAW_OUTPUT_PREVIEW_CHARS]
+        payload = {
+            "error": error,
+            "run_id": run_id,
+            "window_id": window_id,
+            "stage": str(stage_value) if stage_value is not None else None,
+            "target_unit": _target_unit_for_context(context),
+            "raw_output_length": len(raw_output),
+            "raw_output_preview": raw_output_preview,
+            "raw_output_truncated": len(raw_output)
+            > _BACKGROUND_LLM_RAW_OUTPUT_PREVIEW_CHARS,
+        }
+        print(
+            f"background_llm_validation_failed {deterministic_json(payload)}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        return
 
 
 def _background_operation_audit(
