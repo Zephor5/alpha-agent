@@ -1,4 +1,4 @@
-"""Chat-completions helper functions for replayable runtime messages."""
+"""Runtime ChatMessage formatting and replay helpers."""
 
 from __future__ import annotations
 
@@ -11,11 +11,26 @@ from alpha_agent.state.models import SessionMessage
 
 SYSTEM_REMINDER_OPEN = "<system-reminder>"
 SYSTEM_REMINDER_CLOSE = "</system-reminder>"
+TOOL_TRUNCATION_MARKER = "<system-reminder>truncated</system-reminder>"
 COUNTERPART_PROFILE_LABEL = "Counterpart profile:"
 
 
 def wrap_system_reminder(content: str) -> str:
-    return f"{SYSTEM_REMINDER_OPEN}\n{content.strip()}\n{SYSTEM_REMINDER_CLOSE}"
+    """Wrap content as an idempotent user-role system reminder."""
+
+    stripped = content.strip()
+    if stripped.startswith(SYSTEM_REMINDER_OPEN) and stripped.endswith(SYSTEM_REMINDER_CLOSE):
+        return stripped
+    return f"{SYSTEM_REMINDER_OPEN}\n{stripped}\n{SYSTEM_REMINDER_CLOSE}"
+
+
+def strip_system_reminder(content: str) -> str:
+    """Return the visible body of a user-role system reminder."""
+
+    stripped = content.strip()
+    if stripped.startswith(SYSTEM_REMINDER_OPEN) and stripped.endswith(SYSTEM_REMINDER_CLOSE):
+        return stripped[len(SYSTEM_REMINDER_OPEN) : -len(SYSTEM_REMINDER_CLOSE)].strip()
+    return stripped
 
 
 def render_counterpart_profile(content: str) -> str:
@@ -31,8 +46,21 @@ def estimate_chat_tokens(
     return estimate.message_tokens + estimate.tool_schema_tokens
 
 
+def session_message_to_chat(message: SessionMessage) -> ChatMessage:
+    """Convert any durable session message into a replayable chat message."""
+
+    if message.kind == "compressed_message":
+        content = (
+            message.model_content
+            if message.model_content is not None
+            else message.raw_content
+        )
+        return {"role": "user", "content": wrap_system_reminder(content)}
+    return source_message_to_chat(message)
+
+
 def source_message_to_chat(message: SessionMessage) -> ChatMessage:
-    """Convert a durable source message into a replayable chat message."""
+    """Convert an ordinary durable source message into a replayable chat message."""
 
     content = message.model_content if message.model_content is not None else message.raw_content
     if message.kind == "compressed_message":
@@ -71,3 +99,17 @@ def _source_tool_call(payload: Mapping[str, Any]) -> ChatCompletionToolCall:
             "arguments": str(function.get("arguments") or "{}"),
         },
     }
+
+
+__all__ = [
+    "COUNTERPART_PROFILE_LABEL",
+    "SYSTEM_REMINDER_CLOSE",
+    "SYSTEM_REMINDER_OPEN",
+    "TOOL_TRUNCATION_MARKER",
+    "estimate_chat_tokens",
+    "render_counterpart_profile",
+    "session_message_to_chat",
+    "source_message_to_chat",
+    "strip_system_reminder",
+    "wrap_system_reminder",
+]

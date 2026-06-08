@@ -6,11 +6,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
-from alpha_agent.cognition.render import (
+from alpha_agent.llm.base import ChatMessage
+from alpha_agent.runtime.chat_messages import (
     render_counterpart_profile,
     wrap_system_reminder,
 )
-from alpha_agent.llm.base import ChatMessage
 from alpha_agent.state.models import SessionProfileSnapshot
 
 _DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {

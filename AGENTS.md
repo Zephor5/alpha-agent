@@ -30,27 +30,26 @@ src/
     gateway/          Gateway operation shell, adapter contracts, session routing, status, logging, and gateway config.
       adapters/       External gateway adapter interfaces.
     runtime/          Agent turn/session execution, event models, context budget/handover, session context, counterpart routing, and runtime tool wiring.
+      chat_messages.py ChatMessage formatting, source replay conversion, system-reminder helpers, and chat token estimates.
       counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
-    cognition/        Cognition foundations, Reactive tick orchestration, event emission, loop coordination, payload contracts, projections, and search/tokenization helpers.
+    cognition/        Cognition foundations, Reactive/background loop orchestration, event emission, state services, payload contracts, projections, and search/tokenization helpers.
+      authority.py    Authority and consent helpers for cognition writes.
+      background_llm_contract.py Validation contracts for LLM-mediated background cognition outputs.
       controller.py   CognitiveController orchestration for one Reactive tick.
       coordinator.py  LoopCoordinator lock/lease control for Reactive and background cognition loops.
-      counterpart_profile.py Counterpart digest belief helpers.
+      domain_guidance.py Domain guidance assembly for background cognition prompts.
       emitter.py      Cognitive event emission helpers.
       payload_contract.py Fail-fast validation for consumed cognition event payload fields.
+      processing_ledger.py Background processing ledger stage/status helpers.
       projection_runner.py Projection registry execution and rebuild helpers.
       search_tokenizer.py Deterministic tokenization for mixed CJK and technical search text.
-      models/         Frozen cognition data contracts for events, perceptions, judgments, decisions, beliefs, goals, strategies, subjects, values, situations, and threads.
+      state_service.py State service for atomic beliefs, summaries, background operations, and audit writes.
+      models/         Frozen cognition data contracts for events, beliefs, goals, subjects, situations, enums, and loop metadata.
       event_log/      In-memory and SQLite cognitive event log implementations.
-      stages/         Perceive, Attend, Interpret, Judge, Decide, Act/Effector, Feedback, Reflect, and Revise stages.
-      reflectors/     L1/L2/L3 reflector orchestration, deterministic audit rules, L2 strategy rules, and L3 self-model aggregators.
-        l2_rules/     Deterministic L2 strategy override rules.
-        l3_aggregators/ Deterministic self-model aggregators for capabilities, failure modes, preferences, strategies, tradeoffs, and interaction patterns.
-      loops/          In-process scheduler, checkpoint storage, ConsolidationLoop, deterministic workers, and synchronous DriveLoop.
-        workers/      Background consolidation workers for beliefs, context, procedures, goals, value lens, strategies, counterpart summaries, and archive/resolve tasks.
+      loops/          In-process scheduler, checkpoint storage, ConsolidationLoop, background service, and DriveLoop.
+        workers/      LLM-mediated memory extraction, consolidation, summary workers, plus expired-belief archival.
       goals/          GoalRegistry event write path for DriveLoop goals.
-      value/          Deterministic ValueProfile derivation, ValueLens persistence, and conflict resolution.
-      projections/    SQLite-backed projections for counterpart, belief, context window, reflection, strategy, goal, subject, procedure, and event counts.
-      render/         CognitionView assembly and renderers for chat prompts, graph snapshots, diffs, and evidence traces.
+      projections/    SQLite-backed projections for counterpart, belief, goal, subject, and event counts.
     state/            SQLite-backed state store/schema/models for session messages, runtime traces, gateway mappings/dedup, cognitive events, and projection tables.
     llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
     tools/            Tool abstractions and registry used by the runtime.
@@ -59,7 +58,7 @@ src/
       builtin/        Built-in Markdown skills such as debug-loop and summarize.
     utils/            Shared utility helpers for IDs and time.
 tests/                Test coverage for CLI, runtime, config, daemon, gateway, LLM providers, tools, and session/context behavior.
-  cognition/          Cognition-specific tests for events, projections, renderers, reflectors, loops, goals, memory tools, tokenization, and CLI inspection commands.
+  cognition/          Cognition-specific tests for events, projections, renderers, loops, goals, memory tools, tokenization, and CLI inspection commands.
 ```
 
 ## Validation Commands

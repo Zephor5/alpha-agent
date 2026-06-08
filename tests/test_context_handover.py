@@ -12,6 +12,7 @@ from alpha_agent.llm.base import (
     LLMToolDefinition,
     LLMToolDefinitionInput,
 )
+from alpha_agent.runtime.chat_messages import wrap_system_reminder
 from alpha_agent.runtime.context_handover import (
     DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
     DEFAULT_HANDOVER_COMPRESSION_VERSION,
@@ -22,7 +23,7 @@ from alpha_agent.runtime.context_handover import (
     handover_prompt_prefix_hash,
     handover_tools_schema_hash,
 )
-from alpha_agent.runtime.session_context import SessionContextAssembler, wrap_system_reminder
+from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.state.store import StateStore
 
 

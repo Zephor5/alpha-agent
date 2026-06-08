@@ -14,11 +14,11 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.runtime.chat_messages import wrap_system_reminder
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.runtime.session_context import (
     SessionContextAssembler,
     SessionContextProjection,
-    wrap_system_reminder,
 )
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
 

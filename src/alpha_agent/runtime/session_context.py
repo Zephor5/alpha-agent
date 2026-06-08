@@ -8,21 +8,18 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from alpha_agent.cognition.render.text_chat import source_message_to_chat
 from alpha_agent.config import LLMContextConfig
 from alpha_agent.llm.base import ChatMessage, LLMToolDefinitionInput
+from alpha_agent.runtime.chat_messages import (
+    TOOL_TRUNCATION_MARKER,
+    session_message_to_chat,
+)
 from alpha_agent.runtime.context_budget import (
     ContextBudgetEstimate,
     estimate_context_budget,
-    estimate_text_tokens,
-    stable_json,
 )
 from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
-
-SYSTEM_REMINDER_OPEN = "<system-reminder>"
-SYSTEM_REMINDER_CLOSE = "</system-reminder>"
-TOOL_TRUNCATION_MARKER = "<system-reminder>truncated</system-reminder>"
 
 
 @dataclass(frozen=True)
@@ -173,32 +170,6 @@ class SessionContextAssembler:
             before_estimate=before_estimate,
             after_estimate=after_estimate,
         )
-
-
-def session_message_to_chat(message: SessionMessage) -> ChatMessage:
-    """Convert a durable source message into a replayable chat message."""
-
-    if message.kind == "compressed_message":
-        content = (
-            message.model_content
-            if message.model_content is not None
-            else message.raw_content
-        )
-        return {"role": "user", "content": _ensure_system_reminder(content)}
-    return source_message_to_chat(message)
-
-
-def wrap_system_reminder(content: str) -> str:
-    """Wrap content as a user-role system reminder."""
-
-    return _ensure_system_reminder(content)
-
-
-def _ensure_system_reminder(content: str) -> str:
-    stripped = content.strip()
-    if stripped.startswith(SYSTEM_REMINDER_OPEN) and stripped.endswith(SYSTEM_REMINDER_CLOSE):
-        return stripped
-    return f"{SYSTEM_REMINDER_OPEN}\n{stripped}\n{SYSTEM_REMINDER_CLOSE}"
 
 
 def _prepare_tool_payload_update(
@@ -354,13 +325,8 @@ def _dump_replay_json(value: Any) -> str:
 
 
 __all__ = [
-    "ContextBudgetEstimate",
     "SessionContextAssembler",
     "SessionContextProjection",
     "ToolContextTruncationResult",
-    "estimate_context_budget",
-    "estimate_text_tokens",
     "session_message_to_chat",
-    "stable_json",
-    "wrap_system_reminder",
 ]

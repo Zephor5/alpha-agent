@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from alpha_agent.config import LLMContextConfig, load_config
-from alpha_agent.runtime.session_context import (
+from alpha_agent.runtime.context_budget import (
     estimate_context_budget,
     estimate_text_tokens,
 )

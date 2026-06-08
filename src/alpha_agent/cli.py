@@ -72,13 +72,10 @@ from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
 from alpha_agent.runtime.agent import AlphaAgent
+from alpha_agent.runtime.chat_messages import strip_system_reminder
 from alpha_agent.runtime.prompt_builder import build_answer_prompt_messages
 from alpha_agent.runtime.session import new_session_id
-from alpha_agent.runtime.session_context import (
-    SYSTEM_REMINDER_CLOSE,
-    SYSTEM_REMINDER_OPEN,
-    SessionContextAssembler,
-)
+from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.skills.manager import SkillManager
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
@@ -290,7 +287,7 @@ def _chat_history_role_label(message: SessionMessage) -> str:
 def _chat_history_content(message: SessionMessage) -> str:
     content = message.model_content if message.model_content is not None else message.raw_content
     if message.kind == "compressed_message":
-        content = _strip_system_reminder(content)
+        content = strip_system_reminder(content)
     elif message.kind == "tool_message":
         content = _tool_result_display(message, content)
     elif message.tool_calls:
@@ -332,13 +329,6 @@ def _display_jsonish(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     except TypeError:
         return str(value)
-
-
-def _strip_system_reminder(content: str) -> str:
-    stripped = content.strip()
-    if stripped.startswith(SYSTEM_REMINDER_OPEN) and stripped.endswith(SYSTEM_REMINDER_CLOSE):
-        return stripped[len(SYSTEM_REMINDER_OPEN) : -len(SYSTEM_REMINDER_CLOSE)].strip()
-    return stripped
 
 
 def _truncate_chat_history_content(content: str) -> str:

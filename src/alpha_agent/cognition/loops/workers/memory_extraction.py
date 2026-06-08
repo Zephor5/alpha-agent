@@ -44,6 +44,7 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.runtime.chat_messages import source_message_to_chat
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.runtime.context_handover import (
     DEFAULT_MEMORY_EXTRACTION_VERSION,
@@ -52,7 +53,6 @@ from alpha_agent.runtime.context_handover import (
     handover_tools_schema_hash,
 )
 from alpha_agent.runtime.prompt_builder import default_runtime_system_message
-from alpha_agent.runtime.session_context import source_message_to_chat
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.utils.time import utc_now_iso

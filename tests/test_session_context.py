@@ -9,7 +9,8 @@ from alpha_agent.cognition.processing_ledger import (
 )
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import LLMContextConfig
-from alpha_agent.runtime.session_context import SessionContextAssembler, wrap_system_reminder
+from alpha_agent.runtime.chat_messages import wrap_system_reminder
+from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.state.store import StateStore
 
 

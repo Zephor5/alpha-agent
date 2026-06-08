@@ -41,11 +41,6 @@ from alpha_agent.cognition.models import (
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.counterpart import CounterpartProjection
-from alpha_agent.cognition.render import (
-    estimate_chat_tokens,
-    source_message_to_chat,
-    wrap_system_reminder,
-)
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import (
     DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS,
@@ -59,6 +54,11 @@ from alpha_agent.llm.base import (
     LLMResponse,
     LLMToolChoice,
     LLMToolDefinitionInput,
+)
+from alpha_agent.runtime.chat_messages import (
+    estimate_chat_tokens,
+    source_message_to_chat,
+    wrap_system_reminder,
 )
 from alpha_agent.runtime.context_budget import ContextBudgetEstimate, estimate_context_budget
 from alpha_agent.runtime.context_handover import (
