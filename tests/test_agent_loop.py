@@ -57,6 +57,7 @@ from alpha_agent.runtime.context_handover import (
     handover_prompt_prefix_hash,
 )
 from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID
+from alpha_agent.runtime.prompt_builder import default_runtime_system_message
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import (
     Tool,
@@ -87,6 +88,19 @@ def _store(tmp_path) -> StateStore:
 
 def _copy_chat_message(message: ChatMessage) -> ChatMessage:
     return cast(ChatMessage, dict(message))
+
+
+def test_default_runtime_system_message_states_context_memory_and_tool_boundaries() -> None:
+    content = str(default_runtime_system_message()["content"])
+
+    assert "Identity: Alpha Agent." in content
+    assert "stable summary context" in content
+    assert "not live system state" in content
+    assert "Call memory_recall" in content
+    assert "Use memory_propose only" in content
+    assert "Do not write task progress" in content
+    assert "Use tools when they improve correctness" in content
+    assert "verify results before finalizing" in content
 
 
 def test_direct_agent_default_registry_uses_default_file_tool_config(tmp_path) -> None:
@@ -1169,7 +1183,7 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
         llm_provider=provider,
         tool_registry=registry,
         llm_context_config=_compression_context(),
-        max_context_tokens=340,
+        max_context_tokens=520,
     )
 
     result = agent.respond("use tool", session_id="s1")
