@@ -7,9 +7,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 import typer
 from prompt_toolkit import prompt as _terminal_prompt
@@ -103,6 +104,7 @@ DAEMON_STOP_TIMEOUT_SECONDS = 5.0
 DAEMON_START_POLL_INTERVAL_SECONDS = 0.1
 CHAT_HISTORY_PREVIEW_LIMIT = 8
 CHAT_HISTORY_MESSAGE_MAX_CHARS = 900
+CHAT_TURN_PROGRESS_POLL_INTERVAL_SECONDS = 0.1
 CHAT_DISPLAY_MESSAGE_KINDS = {
     "user_message",
     "assistant_message",
@@ -113,6 +115,12 @@ CHAT_TURN_DISPLAY_MESSAGE_KINDS = {
     "assistant_message",
     "tool_message",
 }
+
+
+class _DaemonRequestClient(Protocol):
+    def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send one daemon request."""
+        ...
 
 
 def _display_model(config: AlphaConfig) -> str:
@@ -265,6 +273,69 @@ def _displayable_chat_turn_messages(
         for message in store.list_session_messages(session_id, after_ordinal=after_ordinal)
         if message.kind in CHAT_TURN_DISPLAY_MESSAGE_KINDS
     ]
+
+
+def _render_chat_turn_progress(
+    store: StateStore,
+    session_id: str,
+    *,
+    after_ordinal: int,
+) -> int:
+    messages = store.list_session_messages(session_id, after_ordinal=after_ordinal)
+    if not messages:
+        return after_ordinal
+    turn_messages = [
+        message
+        for message in messages
+        if message.kind in CHAT_TURN_DISPLAY_MESSAGE_KINDS
+    ]
+    if turn_messages:
+        _render_chat_turn_messages(turn_messages, fallback_response="")
+    return messages[-1].ordinal
+
+
+def _request_chat_turn_with_progress(
+    client: _DaemonRequestClient,
+    payload: dict[str, Any],
+    *,
+    store: StateStore,
+    session_id: str,
+    after_ordinal: int,
+) -> tuple[dict[str, Any], int]:
+    done = threading.Event()
+    responses: list[dict[str, Any]] = []
+    errors: list[BaseException] = []
+
+    def run_request() -> None:
+        try:
+            responses.append(client.request(payload))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=run_request, daemon=True)
+    thread.start()
+
+    rendered_after_ordinal = after_ordinal
+    while not done.wait(CHAT_TURN_PROGRESS_POLL_INTERVAL_SECONDS):
+        rendered_after_ordinal = _render_chat_turn_progress(
+            store,
+            session_id,
+            after_ordinal=rendered_after_ordinal,
+        )
+
+    thread.join()
+    rendered_after_ordinal = _render_chat_turn_progress(
+        store,
+        session_id,
+        after_ordinal=rendered_after_ordinal,
+    )
+    if errors:
+        raise errors[0]
+    if not responses:
+        raise RuntimeError("Daemon request finished without a response.")
+    return responses[0], rendered_after_ordinal
 
 
 def _latest_session_ordinal(store: StateStore, session_id: str) -> int:
@@ -844,22 +915,25 @@ def chat(
             break
         request_session_id = session_id
         before_ordinal = _latest_session_ordinal(store, request_session_id)
-        response = _client_response_or_exit(
-            client.request(
-                {
-                    "type": "chat_turn",
-                    "message": message,
-                    "session_id": request_session_id,
-                    "source_metadata": _source_metadata("chat"),
-                }
-            )
+        response, rendered_after_ordinal = _request_chat_turn_with_progress(
+            client,
+            {
+                "type": "chat_turn",
+                "message": message,
+                "session_id": request_session_id,
+                "source_metadata": _source_metadata("chat"),
+            },
+            store=store,
+            session_id=request_session_id,
+            after_ordinal=before_ordinal,
         )
+        response = _client_response_or_exit(response)
         session_id = str(response.get("session_id") or request_session_id)
         turn_messages = (
             _displayable_chat_turn_messages(
                 store,
                 session_id,
-                after_ordinal=before_ordinal,
+                after_ordinal=rendered_after_ordinal,
             )
             if session_id == request_session_id
             else []

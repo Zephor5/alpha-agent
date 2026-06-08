@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from typing import Any
 
 from typer.testing import CliRunner
@@ -265,6 +266,81 @@ def test_chat_renders_current_turn_tool_rounds(tmp_path: Path, monkeypatch) -> N
     assert '{"query":"second"}' in result.output
     assert '{"result":"second"}' in result.output
     assert "final answer" in result.output
+
+
+def test_chat_progress_renders_before_ipc_response_returns(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    progress_rendered = Event()
+    progress_seen_before_response: list[bool] = []
+    rendered_contents: list[str] = []
+
+    class BlockingFakeClient:
+        def __init__(self, socket_path: Path):
+            self.socket_path = socket_path
+
+        def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+            session_id = str(payload["session_id"])
+            store.append_session_message(
+                session_id=session_id,
+                kind="user_message",
+                llm_role="user",
+                raw_content=str(payload["message"]),
+            )
+            store.append_session_message(
+                session_id=session_id,
+                kind="assistant_message",
+                llm_role="assistant",
+                raw_content="I am checking that now.",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": '{"query":"progress"}',
+                        },
+                    }
+                ],
+            )
+            progress_seen_before_response.append(progress_rendered.wait(timeout=1.0))
+            store.append_session_message(
+                session_id=session_id,
+                kind="assistant_message",
+                llm_role="assistant",
+                raw_content="done",
+            )
+            return {"ok": True, "session_id": session_id, "response": "done"}
+
+    def capture_rendered_messages(
+        messages: list[Any],
+        *,
+        fallback_response: str,
+    ) -> None:
+        for message in messages:
+            content = cli._chat_turn_content(message)
+            rendered_contents.append(content)
+            if "I am checking that now." in content:
+                progress_rendered.set()
+
+    monkeypatch.setattr(cli, "_render_chat_turn_messages", capture_rendered_messages)
+    monkeypatch.setattr(cli, "CHAT_TURN_PROGRESS_POLL_INTERVAL_SECONDS", 0.01)
+
+    response, rendered_after_ordinal = cli._request_chat_turn_with_progress(
+        BlockingFakeClient(tmp_path / "daemon.sock"),
+        {"type": "chat_turn", "message": "hello", "session_id": "s1"},
+        store=store,
+        session_id="s1",
+        after_ordinal=0,
+    )
+
+    assert response == {"ok": True, "session_id": "s1", "response": "done"}
+    assert progress_seen_before_response == [True]
+    assert any("I am checking that now." in content for content in rendered_contents)
+    assert rendered_after_ordinal == 3
 
 
 def test_chat_with_existing_session_renders_recent_history(tmp_path: Path, monkeypatch) -> None:
