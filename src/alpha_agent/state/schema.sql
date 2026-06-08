@@ -83,16 +83,19 @@ CREATE TABLE IF NOT EXISTS session_counterparts (
 CREATE INDEX IF NOT EXISTS idx_session_counterparts_counterpart
     ON session_counterparts(counterpart_id, created_at DESC);
 
-CREATE TABLE IF NOT EXISTS session_profile_snapshots (
-    session_id TEXT PRIMARY KEY,
-    counterpart_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS session_summary_snapshots (
+    session_id TEXT NOT NULL,
+    summary_kind TEXT NOT NULL,
+    target_kind TEXT NOT NULL,
+    target_id TEXT NOT NULL,
     source_belief_id TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, summary_kind)
 );
 
-CREATE INDEX IF NOT EXISTS idx_session_profile_counterpart
-    ON session_profile_snapshots(counterpart_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_summary_target
+    ON session_summary_snapshots(summary_kind, target_kind, target_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_gateway_session_lookup
     ON gateway_session_mappings(platform, session_mode, session_key);

@@ -13,6 +13,7 @@ SYSTEM_REMINDER_OPEN = "<system-reminder>"
 SYSTEM_REMINDER_CLOSE = "</system-reminder>"
 TOOL_TRUNCATION_MARKER = "<system-reminder>truncated</system-reminder>"
 COUNTERPART_PROFILE_LABEL = "Counterpart profile:"
+SELF_MEMORY_SUMMARY_LABEL = "Self memory summary:"
 
 
 def wrap_system_reminder(content: str) -> str:
@@ -35,6 +36,10 @@ def strip_system_reminder(content: str) -> str:
 
 def render_counterpart_profile(content: str) -> str:
     return f"{COUNTERPART_PROFILE_LABEL} {content}"
+
+
+def render_self_memory_summary(content: str) -> str:
+    return f"{SELF_MEMORY_SUMMARY_LABEL} {content}"
 
 
 def estimate_chat_tokens(
@@ -103,11 +108,13 @@ def _source_tool_call(payload: Mapping[str, Any]) -> ChatCompletionToolCall:
 
 __all__ = [
     "COUNTERPART_PROFILE_LABEL",
+    "SELF_MEMORY_SUMMARY_LABEL",
     "SYSTEM_REMINDER_CLOSE",
     "SYSTEM_REMINDER_OPEN",
     "TOOL_TRUNCATION_MARKER",
     "estimate_chat_tokens",
     "render_counterpart_profile",
+    "render_self_memory_summary",
     "session_message_to_chat",
     "source_message_to_chat",
     "strip_system_reminder",

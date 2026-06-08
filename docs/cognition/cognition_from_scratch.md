@@ -12,7 +12,7 @@ runtime turn
   -> allocate AgentTurnContext
   -> append user session message
   -> record perceived input audit
-  -> assemble prompt from session context and stable profile snapshot
+  -> assemble prompt from session context and stable summary snapshots
   -> run the LLM/tool loop
   -> persist assistant and tool messages
   -> record acted and source-link audit events
@@ -81,12 +81,12 @@ their lower-layer source material is eligible. The timer decides when to check
 for work; it does not refresh cognition by elapsed time alone.
 
 Background progress uses the sidecar processing ledger rather than mutating raw
-session messages or replaying audit logs. Extraction, consolidation, and
-profile/domain/self summary outputs are cognition-maintenance artifacts. Only
-the explicit counterpart profile snapshot path can turn a profile summary into
-answer-path context; other background artifacts are not prompt context by
-default. Removed deterministic workers are not preserved as compatibility
-shims.
+session messages or replaying audit logs. Extraction, consolidation, and domain
+summary outputs are cognition-maintenance artifacts. Only the explicit session
+summary snapshot path can turn `self_memory_summary` and `counterpart_profile`
+summaries into answer-path context; other background artifacts are not prompt
+context by default. Removed deterministic workers are not preserved as
+compatibility shims.
 
 ## Drive Loop
 

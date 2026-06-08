@@ -14,10 +14,12 @@ from alpha_agent.cognition.loops import BackgroundCognitionService
 from alpha_agent.cognition.models import (
     SUBJECT_SELF,
     AtomicBelief,
+    BeliefScope,
     CognitiveEventKind,
     CounterpartId,
     DerivationStage,
     Instant,
+    Reference,
     SummaryKind,
     counterpart_ref,
 )
@@ -290,9 +292,70 @@ def test_agent_reuses_session_profile_snapshot_before_history(tmp_path) -> None:
         "first answer",
         "second turn",
     ]
-    snapshot = store.get_session_profile_snapshot("s1")
+    snapshot = store.get_session_summary_snapshot("s1", SummaryKind.COUNTERPART_PROFILE.value)
     assert snapshot is not None
     assert snapshot.content == "Stable profile v1."
+
+
+def test_agent_injects_self_memory_summary_before_counterpart_profile_as_separate_stable_messages(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    projection = _seed_active_digest(
+        store,
+        log,
+        "belief:profile:v1",
+        "User prefers concise answers.",
+    )
+    projection.upsert_summary(
+        summary_belief(
+            "belief:self-memory:v1",
+            "Agent solves root causes before applying local patches.",
+            about=[Reference("subject", "subject:self")],
+            object_="self memory",
+            summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+            scope=BeliefScope.SELF,
+        )
+    )
+    provider = _QueuedRecordingProvider(["first answer", "second answer"])
+    agent = AlphaAgent(store=store, llm_provider=provider, event_log=log)
+
+    agent.respond("first turn", session_id="s1")
+
+    projection.upsert_summary(
+        summary_belief(
+            "belief:self-memory:v2",
+            "Agent updated self memory mid-session.",
+            about=[Reference("subject", "subject:self")],
+            object_="self memory",
+            summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+            scope=BeliefScope.SELF,
+            held_since="2026-01-01T00:00:01+00:00",
+        )
+    )
+    agent.respond("second turn", session_id="s1")
+
+    first_call = provider.calls[0]
+    assert [message["role"] for message in first_call] == ["system", "user", "user", "user"]
+    assert "Self memory summary: Agent solves root causes" in str(first_call[1]["content"])
+    assert "Counterpart profile: User prefers concise answers." in str(first_call[2]["content"])
+    assert "Counterpart profile:" not in str(first_call[1]["content"])
+    assert "Self memory summary:" not in str(first_call[2]["content"])
+    assert first_call[3]["content"] == "first turn"
+
+    second_call = provider.calls[1]
+    assert [message["role"] for message in second_call] == [
+        "system",
+        "user",
+        "user",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert "Self memory summary: Agent solves root causes" in str(second_call[1]["content"])
+    assert "Agent updated self memory mid-session." not in str(second_call)
+    assert "Counterpart profile: User prefers concise answers." in str(second_call[2]["content"])
 
 
 def test_background_profile_summary_feeds_new_sessions_without_mutating_existing_snapshot(
@@ -372,8 +435,14 @@ def test_background_profile_summary_feeds_new_sessions_without_mutating_existing
     assert "Counterpart profile: User prefers Python examples and concise answers." in str(
         answer_provider.calls[2]
     )
-    existing_snapshot = store.get_session_profile_snapshot("existing")
-    new_snapshot = store.get_session_profile_snapshot("new-session")
+    existing_snapshot = store.get_session_summary_snapshot(
+        "existing",
+        SummaryKind.COUNTERPART_PROFILE.value,
+    )
+    new_snapshot = store.get_session_summary_snapshot(
+        "new-session",
+        SummaryKind.COUNTERPART_PROFILE.value,
+    )
     assert existing_snapshot is not None
     assert existing_snapshot.content == "Original stable profile."
     assert new_snapshot is not None
@@ -494,34 +563,54 @@ def test_answer_prompt_excludes_background_integration_artifacts_by_default(
         assert hidden_text not in rendered_prompt
 
 
-def test_session_profile_snapshots_are_keyed_by_session(tmp_path) -> None:
+def test_session_summary_snapshots_are_keyed_by_session_and_kind(tmp_path) -> None:
     store = _store(tmp_path)
 
-    first = store.create_session_profile_snapshot(
+    first = store.create_session_summary_snapshot(
         session_id="s1",
-        counterpart_id="counterpart:a",
+        summary_kind=SummaryKind.COUNTERPART_PROFILE.value,
+        target_kind="counterpart",
+        target_id="counterpart:a",
         source_belief_id="belief:digest:a",
         content="Profile A.",
     )
-    second = store.create_session_profile_snapshot(
+    second = store.create_session_summary_snapshot(
         session_id="s2",
-        counterpart_id="counterpart:b",
+        summary_kind=SummaryKind.COUNTERPART_PROFILE.value,
+        target_kind="counterpart",
+        target_id="counterpart:b",
         source_belief_id="belief:digest:b",
         content="Profile B.",
     )
-    duplicate = store.create_session_profile_snapshot(
+    self_snapshot = store.create_session_summary_snapshot(
         session_id="s1",
-        counterpart_id="counterpart:b",
+        summary_kind=SummaryKind.SELF_MEMORY_SUMMARY.value,
+        target_kind="subject",
+        target_id="subject:self",
+        source_belief_id="belief:self",
+        content="Self memory.",
+    )
+    duplicate = store.create_session_summary_snapshot(
+        session_id="s1",
+        summary_kind=SummaryKind.COUNTERPART_PROFILE.value,
+        target_kind="counterpart",
+        target_id="counterpart:b",
         source_belief_id="belief:digest:a-new",
         content="Profile A new.",
     )
 
     assert first.content == "Profile A."
     assert second.content == "Profile B."
+    assert self_snapshot.content == "Self memory."
     assert duplicate.content == "Profile A."
-    assert store.get_session_profile_snapshot("s1") == first
-    assert store.get_session_profile_snapshot("s2") == second
-    assert store.get_session_profile_snapshot("missing") is None
+    s1_profile = store.get_session_summary_snapshot("s1", SummaryKind.COUNTERPART_PROFILE.value)
+    s1_self = store.get_session_summary_snapshot("s1", SummaryKind.SELF_MEMORY_SUMMARY.value)
+    s2_profile = store.get_session_summary_snapshot("s2", SummaryKind.COUNTERPART_PROFILE.value)
+    missing = store.get_session_summary_snapshot("missing", SummaryKind.COUNTERPART_PROFILE.value)
+    assert s1_profile == first
+    assert s1_self == self_snapshot
+    assert s2_profile == second
+    assert missing is None
 
 
 def test_agent_binds_session_counterpart_and_reuses_session_profile(tmp_path) -> None:
@@ -562,7 +651,7 @@ def test_agent_binds_session_counterpart_and_reuses_session_profile(tmp_path) ->
     binding = store.get_session_counterpart("shared")
     assert binding is not None
     assert binding.counterpart_id == str(DEFAULT_COUNTERPART_ID)
-    snapshot = store.get_session_profile_snapshot("shared")
+    snapshot = store.get_session_summary_snapshot("shared", SummaryKind.COUNTERPART_PROFILE.value)
     assert snapshot is not None
     assert snapshot.content == "Alice stable profile."
     assert store.get_session_counterpart("missing") is None
@@ -592,7 +681,7 @@ def test_first_turn_profile_snapshot_participates_in_pre_user_budget(tmp_path) -
 
     assert provider.calls == []
     assert store.list_session_messages("s1") == []
-    snapshot = store.get_session_profile_snapshot("s1")
+    snapshot = store.get_session_summary_snapshot("s1", SummaryKind.COUNTERPART_PROFILE.value)
     assert snapshot is not None
     assert snapshot.content.startswith("profileword0")
 

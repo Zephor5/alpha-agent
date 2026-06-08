@@ -2050,7 +2050,7 @@ class _RecordingLLMProvider:
 
 def _runtime_prefix(store: StateStore, session_id: str) -> list[ChatMessage]:
     return build_answer_prompt_messages(
-        profile_snapshot=store.get_session_profile_snapshot(session_id),
+        summary_snapshots=store.list_session_summary_snapshots(session_id),
         session_history=SessionContextAssembler(store).load(session_id).chat_messages,
         system_message=default_runtime_system_message(),
     )

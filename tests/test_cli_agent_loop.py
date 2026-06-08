@@ -53,7 +53,7 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
         assert tables == {
             "session_messages",
             "session_counterparts",
-            "session_profile_snapshots",
+            "session_summary_snapshots",
             "runtime_traces",
             "gateway_session_mappings",
             "gateway_dedup",
@@ -121,9 +121,11 @@ def test_debug_prompt_renders_session_profile_snapshot(
 ) -> None:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
-    store.create_session_profile_snapshot(
+    store.create_session_summary_snapshot(
         session_id="s1",
-        counterpart_id="counterpart:main-user",
+        summary_kind="counterpart_profile",
+        target_kind="counterpart",
+        target_id="counterpart:main-user",
         source_belief_id="belief:digest:v1",
         content="Stable debug profile.",
     )
@@ -150,9 +152,11 @@ def test_debug_prompt_renders_session_profile_snapshot(
 def test_debug_prompt_matches_shared_answer_prompt_builder(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
-    store.create_session_profile_snapshot(
+    store.create_session_summary_snapshot(
         session_id="s1",
-        counterpart_id="counterpart:main-user",
+        summary_kind="counterpart_profile",
+        target_kind="counterpart",
+        target_id="counterpart:main-user",
         source_belief_id="belief:digest:v1",
         content="Stable shared profile.",
     )
@@ -169,7 +173,7 @@ def test_debug_prompt_matches_shared_answer_prompt_builder(tmp_path: Path) -> No
         raw_content="hi",
     )
     expected_messages = build_answer_prompt_messages(
-        profile_snapshot=store.get_session_profile_snapshot("s1"),
+        summary_snapshots=store.list_session_summary_snapshots("s1"),
         session_history=SessionContextAssembler(store).load("s1").chat_messages,
         current_turn_messages=[{"role": "user", "content": "continue"}],
     )

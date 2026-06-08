@@ -178,8 +178,8 @@ mode. Tool specs do not use a `group` field.
   relationships), consolidates them, and reviews conflicts.
 - **Explicit recall.** The model pulls relevant memory on demand via a
   `memory_recall` tool and writes updates via `memory_propose` — recall is never
-  silently injected. A compact, stable profile of who you are is always kept near
-  the top of the prompt.
+  silently injected. Compact, stable self-memory and counterpart profile context
+  are kept near the top of the prompt when available.
 - **Pluggable providers.** `mock`, `openai-compatible`, `deepseek`, and `codex`
   share one interface; the rest of the runtime doesn't care which you use.
 

@@ -24,6 +24,7 @@ from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.models import (
+    BeliefScope,
     CognitiveEvent,
     CognitiveEventKind,
     CounterpartId,
@@ -77,7 +78,7 @@ from alpha_agent.runtime.prompt_builder import (
 )
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
-from alpha_agent.state.models import RuntimeTrace, SessionMessage, SessionProfileSnapshot
+from alpha_agent.state.models import RuntimeTrace, SessionMessage, SessionSummarySnapshot
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import ToolCall, TurnToolState, tool_output_kind
 from alpha_agent.tools.default import build_tool_registry
@@ -86,6 +87,8 @@ from alpha_agent.tools.memory_recall import MEMORY_RECALL_CONTEXT_KEY
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
+
+_SELF_MEMORY_SUMMARY_REF = Reference("subject", "subject:self")
 
 
 @dataclass(frozen=True)
@@ -365,7 +368,7 @@ class AlphaAgent:
             }
             self._check_canceled(session_id, "before_user_event")
             model_tools = self.tool_registry.to_llm_tool_definitions()
-            self._session_profile_snapshot(session_id, counterpart)
+            self._session_summary_snapshots(session_id, counterpart)
             self._run_pre_user_context_maintenance(
                 turn_context=agent_turn,
                 session_id=session_id,
@@ -504,10 +507,10 @@ class AlphaAgent:
         debug: dict[str, Any],
     ) -> None:
         pending_message: ChatMessage = {"role": "user", "content": pending_user_message}
-        profile_snapshot = self.store.get_session_profile_snapshot(session_id)
+        summary_snapshots = self.store.list_session_summary_snapshots(session_id)
         pending_only_estimate = self._estimate_context_budget(
             build_answer_prompt_messages(
-                profile_snapshot=profile_snapshot,
+                summary_snapshots=summary_snapshots,
                 session_history=[],
                 current_turn_messages=[pending_message],
                 system_message=self._default_system_message(),
@@ -518,7 +521,7 @@ class AlphaAgent:
             self._raise_pending_user_too_large(pending_only_estimate)
 
         planning_messages = build_answer_prompt_messages(
-            profile_snapshot=profile_snapshot,
+            summary_snapshots=summary_snapshots,
             session_history=[],
             current_turn_messages=[pending_message],
             system_message=self._default_system_message(),
@@ -609,7 +612,7 @@ class AlphaAgent:
                 tools=model_tools,
                 planning_messages=[
                     prompt_frame.system_message,
-                    *prompt_frame.profile_context_messages,
+                    *prompt_frame.summary_context_messages,
                 ],
             )
             llm_messages = self._rebuild_runtime_llm_messages(
@@ -684,7 +687,7 @@ class AlphaAgent:
         extra_source_messages: Sequence[ChatMessage] | None = None,
     ) -> list[ChatMessage]:
         return build_answer_prompt_messages(
-            profile_snapshot=self.store.get_session_profile_snapshot(session_id),
+            summary_snapshots=self.store.list_session_summary_snapshots(session_id),
             session_history=self.session_context.load(session_id).chat_messages,
             current_turn_messages=extra_source_messages or (),
             system_message=self._default_system_message(),
@@ -735,7 +738,7 @@ class AlphaAgent:
 
     def _answer_prompt_frame(self, session_id: str) -> AnswerPromptFrame:
         return build_answer_prompt_frame(
-            profile_snapshot=self.store.get_session_profile_snapshot(session_id),
+            summary_snapshots=self.store.list_session_summary_snapshots(session_id),
             system_message=self._default_system_message(),
         )
 
@@ -773,15 +776,56 @@ class AlphaAgent:
         )
         return counterpart_ref(CounterpartId(binding.counterpart_id))
 
-    def _session_profile_snapshot(
+    def _session_summary_snapshots(
         self,
         session_id: str,
         counterpart: Reference | None,
-    ) -> SessionProfileSnapshot | None:
-        snapshot = self.store.get_session_profile_snapshot(session_id)
-        # Counterpart profile context is intentionally session-stable: once a
-        # session has a snapshot, later background summary updates do not
-        # rewrite this prompt prefix mid-conversation.
+    ) -> list[SessionSummarySnapshot]:
+        self._session_self_memory_snapshot(session_id)
+        self._session_counterpart_profile_snapshot(session_id, counterpart)
+        return self.store.list_session_summary_snapshots(session_id)
+
+    def _session_self_memory_snapshot(
+        self,
+        session_id: str,
+    ) -> SessionSummarySnapshot | None:
+        snapshot = self.store.get_session_summary_snapshot(
+            session_id,
+            SummaryKind.SELF_MEMORY_SUMMARY.value,
+        )
+        # Stable summary context is intentionally session-stable: once a session
+        # has a snapshot, later background summary updates do not rewrite this
+        # prompt prefix mid-conversation.
+        if snapshot is not None:
+            return snapshot
+        summary = BeliefProjection(self.store).latest_summary(
+            summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+            scope=BeliefScope.SELF,
+        )
+        if summary is None:
+            return None
+        content = str(summary.content).strip()
+        if not content:
+            return None
+        target = summary.about[0] if summary.about else _SELF_MEMORY_SUMMARY_REF
+        return self.store.create_session_summary_snapshot(
+            session_id=session_id,
+            summary_kind=SummaryKind.SELF_MEMORY_SUMMARY.value,
+            target_kind=target.kind,
+            target_id=target.id,
+            source_belief_id=str(summary.id),
+            content=content,
+        )
+
+    def _session_counterpart_profile_snapshot(
+        self,
+        session_id: str,
+        counterpart: Reference | None,
+    ) -> SessionSummarySnapshot | None:
+        snapshot = self.store.get_session_summary_snapshot(
+            session_id,
+            SummaryKind.COUNTERPART_PROFILE.value,
+        )
         if snapshot is not None or counterpart is None:
             return snapshot
         profile = BeliefProjection(self.store).latest_summary(
@@ -793,9 +837,11 @@ class AlphaAgent:
         content = str(profile.content).strip()
         if not content:
             return None
-        return self.store.create_session_profile_snapshot(
+        return self.store.create_session_summary_snapshot(
             session_id=session_id,
-            counterpart_id=counterpart.id,
+            summary_kind=SummaryKind.COUNTERPART_PROFILE.value,
+            target_kind=counterpart.kind,
+            target_id=counterpart.id,
             source_belief_id=str(profile.id),
             content=content,
         )

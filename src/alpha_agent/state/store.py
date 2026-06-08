@@ -15,7 +15,7 @@ from alpha_agent.state.models import (
     SessionCounterpart,
     SessionMessage,
     SessionMessageKind,
-    SessionProfileSnapshot,
+    SessionSummarySnapshot,
 )
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.time import utc_now_iso
@@ -368,53 +368,101 @@ class StateStore:
         with self.immediate_transaction() as local:
             return op(local)
 
-    def get_session_profile_snapshot(
+    def get_session_summary_snapshot(
+        self,
+        session_id: str,
+        summary_kind: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionSummarySnapshot | None:
+        """Return one stable summary snapshot for a session, if any."""
+
+        def op(db: sqlite3.Connection) -> SessionSummarySnapshot | None:
+            row = db.execute(
+                """
+                SELECT *
+                FROM session_summary_snapshots
+                WHERE session_id = ?
+                  AND summary_kind = ?
+                """,
+                (session_id, summary_kind),
+            ).fetchone()
+            return self._session_summary_snapshot_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def list_session_summary_snapshots(
         self,
         session_id: str,
         *,
         conn: sqlite3.Connection | None = None,
-    ) -> SessionProfileSnapshot | None:
-        """Return the stable profile snapshot for one session, if any."""
+    ) -> list[SessionSummarySnapshot]:
+        """Return stable summary snapshots selected for one session."""
 
-        def op(db: sqlite3.Connection) -> SessionProfileSnapshot | None:
-            row = db.execute(
+        def op(db: sqlite3.Connection) -> list[SessionSummarySnapshot]:
+            rows = db.execute(
                 """
                 SELECT *
-                FROM session_profile_snapshots
+                FROM session_summary_snapshots
                 WHERE session_id = ?
+                ORDER BY summary_kind
                 """,
                 (session_id,),
-            ).fetchone()
-            return self._session_profile_snapshot_from_row(row) if row is not None else None
+            ).fetchall()
+            return [self._session_summary_snapshot_from_row(row) for row in rows]
 
         return self._with_conn(conn, op)
 
-    def create_session_profile_snapshot(
+    def create_session_summary_snapshot(
         self,
         *,
         session_id: str,
-        counterpart_id: str,
+        summary_kind: str,
+        target_kind: str,
+        target_id: str,
         source_belief_id: str,
         content: str,
         created_at: str | None = None,
         conn: sqlite3.Connection | None = None,
-    ) -> SessionProfileSnapshot:
-        """Create or return the stable profile snapshot for one session."""
+    ) -> SessionSummarySnapshot:
+        """Create or return one stable summary snapshot for a session."""
 
         timestamp = created_at or utc_now_iso()
 
-        def op(db: sqlite3.Connection) -> SessionProfileSnapshot:
+        def op(db: sqlite3.Connection) -> SessionSummarySnapshot:
             db.execute(
                 """
-                INSERT OR IGNORE INTO session_profile_snapshots
-                    (session_id, counterpart_id, source_belief_id, content, created_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR IGNORE INTO session_summary_snapshots
+                    (
+                        session_id,
+                        summary_kind,
+                        target_kind,
+                        target_id,
+                        source_belief_id,
+                        content,
+                        created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (session_id, counterpart_id, source_belief_id, content, timestamp),
+                (
+                    session_id,
+                    summary_kind,
+                    target_kind,
+                    target_id,
+                    source_belief_id,
+                    content,
+                    timestamp,
+                ),
             )
-            snapshot = self.get_session_profile_snapshot(session_id, conn=db)
+            snapshot = self.get_session_summary_snapshot(
+                session_id,
+                summary_kind,
+                conn=db,
+            )
             if snapshot is None:
-                raise RuntimeError(f"failed to create profile snapshot for {session_id!r}")
+                raise RuntimeError(
+                    f"failed to create {summary_kind!r} summary snapshot for {session_id!r}"
+                )
             return snapshot
 
         if conn is not None:
@@ -626,13 +674,15 @@ class StateStore:
             metadata=_loads_dict(row["metadata"]),
         )
 
-    def _session_profile_snapshot_from_row(
+    def _session_summary_snapshot_from_row(
         self,
         row: sqlite3.Row,
-    ) -> SessionProfileSnapshot:
-        return SessionProfileSnapshot(
+    ) -> SessionSummarySnapshot:
+        return SessionSummarySnapshot(
             session_id=row["session_id"],
-            counterpart_id=row["counterpart_id"],
+            summary_kind=row["summary_kind"],
+            target_kind=row["target_kind"],
+            target_id=row["target_id"],
             source_belief_id=row["source_belief_id"],
             content=row["content"],
             created_at=row["created_at"],

@@ -903,7 +903,7 @@ def prompt(
     session_id = session or new_session_id()
     context = SessionContextAssembler(store).load(session_id)
     messages = build_answer_prompt_messages(
-        profile_snapshot=store.get_session_profile_snapshot(session_id),
+        summary_snapshots=store.list_session_summary_snapshots(session_id),
         session_history=context.chat_messages,
         current_turn_messages=[{"role": "user", "content": message}],
     )

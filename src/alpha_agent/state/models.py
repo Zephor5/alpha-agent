@@ -39,11 +39,13 @@ class SessionMessage:
 
 
 @dataclass(frozen=True)
-class SessionProfileSnapshot:
-    """Stable counterpart profile selected for a session."""
+class SessionSummarySnapshot:
+    """Stable summary selected for one session prompt context slot."""
 
     session_id: str
-    counterpart_id: str
+    summary_kind: str
+    target_kind: str
+    target_id: str
     source_belief_id: str
     content: str
     created_at: str

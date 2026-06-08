@@ -77,6 +77,7 @@ def summary_belief(
     about: list[Reference],
     object_: str = "profile",
     summary_kind: SummaryKind = SummaryKind.COUNTERPART_PROFILE,
+    scope: BeliefScope = BeliefScope.COUNTERPART,
     held_since: str = "2026-01-01T00:00:00+00:00",
 ) -> SummaryBelief:
     return SummaryBelief(
@@ -87,7 +88,7 @@ def summary_belief(
         content=NLStatement(content),
         summary_kind=summary_kind,
         derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
-        scope=BeliefScope.COUNTERPART,
+        scope=scope,
         authority=Authority.BACKGROUND_SYNTHESIZED,
         validity=ValidityWindow(observed_at=Instant(held_since)),
         formed_in=situation_ref(SituationId("situation:test")),

@@ -6,12 +6,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
+from alpha_agent.cognition.models import SummaryKind
 from alpha_agent.llm.base import ChatMessage
 from alpha_agent.runtime.chat_messages import (
     render_counterpart_profile,
+    render_self_memory_summary,
     wrap_system_reminder,
 )
-from alpha_agent.state.models import SessionProfileSnapshot
+from alpha_agent.state.models import SessionSummarySnapshot
 
 _DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {
     "role": "system",
@@ -19,10 +21,14 @@ _DEFAULT_RUNTIME_SYSTEM_MESSAGE: ChatMessage = {
         "Identity: Alpha Agent.\n"
         "Use the current turn and session context and answer concisely. "
         "Call tools only when they are useful. "
-        "When stable counterpart profile context is present, it is already visible near "
-        "the start of the prompt. Use memory_recall for explicit long-term belief "
+        "When stable self-memory or counterpart profile context is present, it is already "
+        "visible near the start of the prompt. Use memory_recall for explicit long-term belief "
         "lookups, and use memory_propose only for explicit long-term memory updates."
     ),
+}
+_SUMMARY_PROMPT_ORDER = {
+    SummaryKind.SELF_MEMORY_SUMMARY.value: 0,
+    SummaryKind.COUNTERPART_PROFILE.value: 1,
 }
 
 
@@ -31,7 +37,7 @@ class AnswerPromptFrame:
     """Stable answer prompt prefix shared by runtime and debug rendering."""
 
     system_message: ChatMessage
-    profile_context_messages: list[ChatMessage] = field(default_factory=list)
+    summary_context_messages: list[ChatMessage] = field(default_factory=list)
 
 
 def copy_chat_message(message: ChatMessage) -> ChatMessage:
@@ -48,7 +54,7 @@ def default_runtime_system_message() -> ChatMessage:
 
 def build_answer_prompt_frame(
     *,
-    profile_snapshot: SessionProfileSnapshot | None,
+    summary_snapshots: Sequence[SessionSummarySnapshot] = (),
     system_message: ChatMessage | None = None,
 ) -> AnswerPromptFrame:
     """Build the non-history prefix for an answer prompt."""
@@ -57,28 +63,42 @@ def build_answer_prompt_frame(
         system_message=copy_chat_message(
             system_message if system_message is not None else _DEFAULT_RUNTIME_SYSTEM_MESSAGE
         ),
-        profile_context_messages=build_profile_context_messages(profile_snapshot),
+        summary_context_messages=build_summary_context_messages(summary_snapshots),
     )
 
 
-def build_profile_context_messages(
-    snapshot: SessionProfileSnapshot | None,
+def build_summary_context_messages(
+    snapshots: Sequence[SessionSummarySnapshot],
 ) -> list[ChatMessage]:
-    """Render the stable session profile snapshot, when one exists."""
+    """Render stable session summary snapshots as separate prompt messages."""
 
-    if snapshot is None:
-        return []
-    return [
-        {
-            "role": "user",
-            "content": wrap_system_reminder(render_counterpart_profile(snapshot.content)),
-        }
-    ]
+    messages: list[ChatMessage] = []
+    ordered = sorted(
+        snapshots,
+        key=lambda snapshot: (
+            _SUMMARY_PROMPT_ORDER.get(snapshot.summary_kind, len(_SUMMARY_PROMPT_ORDER)),
+            snapshot.summary_kind,
+        ),
+    )
+    for snapshot in ordered:
+        rendered = _render_summary_snapshot(snapshot)
+        if rendered is None:
+            continue
+        messages.append({"role": "user", "content": wrap_system_reminder(rendered)})
+    return messages
+
+
+def _render_summary_snapshot(snapshot: SessionSummarySnapshot) -> str | None:
+    if snapshot.summary_kind == SummaryKind.SELF_MEMORY_SUMMARY.value:
+        return render_self_memory_summary(snapshot.content)
+    if snapshot.summary_kind == SummaryKind.COUNTERPART_PROFILE.value:
+        return render_counterpart_profile(snapshot.content)
+    return None
 
 
 def build_answer_prompt_messages(
     *,
-    profile_snapshot: SessionProfileSnapshot | None,
+    summary_snapshots: Sequence[SessionSummarySnapshot] = (),
     session_history: Sequence[ChatMessage],
     current_turn_messages: Sequence[ChatMessage] = (),
     system_message: ChatMessage | None = None,
@@ -87,7 +107,7 @@ def build_answer_prompt_messages(
 
     return build_answer_prompt_messages_from_frame(
         frame=build_answer_prompt_frame(
-            profile_snapshot=profile_snapshot,
+            summary_snapshots=summary_snapshots,
             system_message=system_message,
         ),
         session_history=session_history,
@@ -101,11 +121,11 @@ def build_answer_prompt_messages_from_frame(
     session_history: Sequence[ChatMessage],
     current_turn_messages: Sequence[ChatMessage] = (),
 ) -> list[ChatMessage]:
-    """Compose system, profile snapshot, session history, and current-turn messages."""
+    """Compose system, summary snapshots, session history, and current-turn messages."""
 
     return [
         copy_chat_message(frame.system_message),
-        *[copy_chat_message(message) for message in frame.profile_context_messages],
+        *[copy_chat_message(message) for message in frame.summary_context_messages],
         *[copy_chat_message(message) for message in session_history],
         *[copy_chat_message(message) for message in current_turn_messages],
     ]

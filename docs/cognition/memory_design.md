@@ -14,8 +14,8 @@ Alpha keeps three separate memory surfaces:
 - `atomic_beliefs`: first-order long-term belief entities written by explicit
   memory tools or retained workers.
 - `summary_beliefs`: compact profile and maintenance summary entities. Only
-  `counterpart_profile` can become stable prompt context through the explicit
-  session profile snapshot path.
+  `self_memory_summary` and `counterpart_profile` can become stable prompt
+  context through the explicit session summary snapshot path.
 
 `cognitive_events` remains append-only, but belief lifecycle is not rebuilt from
 belief events. Memory writes mutate the belief tables directly and may emit
@@ -80,9 +80,9 @@ The tool returns compact handles:
 The tool does not expose source records, relation records, or internal ranking
 features. It only returns active atomic beliefs.
 
-Stable counterpart profile context is assembled before the provider call from
-summary beliefs. It is session-stable prompt context, not a dynamic lookup
-result.
+Stable self-memory and counterpart profile context is assembled before the
+provider call from summary snapshots. It is session-stable prompt context, not a
+dynamic lookup result.
 
 ## Write Path
 
@@ -137,19 +137,21 @@ lower-layer material:
 Processing state lives in the sidecar ledger tables
 `background_source_progress`, `background_source_window`, and
 `background_stage_run`; raw session messages and traces are not mutated to track
-background progress. Extraction, consolidation, and profile/domain/self summary
-outputs are cognition-maintenance artifacts, not answer-path prompt context by
-default.
+background progress. Extraction, consolidation, and domain summary outputs are
+cognition-maintenance artifacts, not answer-path prompt context by default.
+Self-memory and counterpart profile summaries enter prompt context only through
+the session-stable summary snapshot path.
 
 ## Prompt Use
 
 The prompt builder uses:
 
 - session transcript context and handover compression for continuity.
-- stable summary beliefs for counterpart profile context when available.
+- stable self-memory summary context when available.
+- stable counterpart profile context when available.
 - explicit `memory_recall` calls for dynamic lookup.
 
 Runtime does not silently search long-term memory from the user message and does
 not inject dynamic recall results unless the model calls the tool. It also does
 not inject background source windows, stage runs, audit records, extraction
-outputs, consolidation outputs, or non-profile summary outputs by default.
+outputs, consolidation outputs, or domain summary outputs by default.
