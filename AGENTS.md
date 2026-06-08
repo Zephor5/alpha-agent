@@ -18,7 +18,7 @@ config.example.toml   Example runtime configuration.
 .gitignore            Ignore rules for local environments, caches, build artifacts, and runtime state.
 LICENSE               Project license.
 docs/
-  cognition/          Reference docs for cognition and memory design.
+  cognition/          Reference docs for cognition.
   develop_record/     Historical archive only; skip by default and never treat as current implementation evidence.
   doing/              Execution ledger for active tasks only; record during execution, then clear after self-check.
   todo/               Project todo docs.
