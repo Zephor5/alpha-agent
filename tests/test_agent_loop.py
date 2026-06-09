@@ -973,8 +973,12 @@ def test_llm_debug_payloads_are_written_to_jsonl_not_database(tmp_path) -> None:
     agent = AlphaAgent(
         store=store,
         llm_provider=_RawMetadataProvider(),
-        llm_debug_logging=True,
-        llm_trace_log_path=trace_log,
+        config=AlphaConfig(
+            db_path=store.db_path,
+            log_dir=tmp_path,
+            gateway_status_path=tmp_path / "gateway-status.json",
+            llm_debug_logging=True,
+        ),
     )
 
     agent.respond("secret input", session_id="s1")

@@ -23,6 +23,7 @@ from alpha_agent.cognition.loops.scheduler import (
     WorkerStatus,
     YieldingCoordinator,
 )
+from alpha_agent.cognition.loops.workers._common import background_llm_trace_metadata
 from alpha_agent.cognition.models import (
     AtomicBelief,
     BeliefLifecycle,
@@ -42,6 +43,7 @@ from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.llm.base import JSON_OBJECT_RESPONSE_FORMAT, ChatMessage, LLMProvider
+from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.utils.time import utc_now_iso
 
@@ -122,11 +124,13 @@ class MemoryConsolidationWorker:
         *,
         batch_size: int = 12,
         worker_id: str | None = None,
+        llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.state_service = state_service
         self.llm_provider = llm_provider
         self.batch_size = max(1, int(batch_size))
         self.worker_id = worker_id or self.name
+        self.llm_trace_logger = llm_trace_logger
 
     def run_once(
         self,
@@ -144,6 +148,7 @@ class MemoryConsolidationWorker:
             checkpoint=checkpoint or WorkerCheckpoint(worker_name=self.name),
             coordinator=coordinator or _NeverYieldCoordinator(),
             batch_size=self.batch_size,
+            llm_trace_logger=self.llm_trace_logger,
         )
 
     def run(
@@ -174,6 +179,10 @@ class MemoryConsolidationWorker:
             checkpoint=checkpoint,
             coordinator=coordinator,
             batch_size=max(1, int(getattr(config, "consolidation_batch_size", self.batch_size))),
+            llm_trace_logger=(
+                getattr(config, "llm_trace_logger", self.llm_trace_logger)
+                or self.llm_trace_logger
+            ),
         )
 
     def _run_with(
@@ -184,6 +193,7 @@ class MemoryConsolidationWorker:
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
         batch_size: int,
+        llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
         candidate = _next_consolidation_candidate(state_service, batch_size=batch_size)
         if candidate is None:
@@ -257,8 +267,17 @@ class MemoryConsolidationWorker:
                 metadata={"last_window_id": window.window_id},
             )
         try:
-            response = llm_provider.complete(
+            response = traced_llm_complete(
+                llm_provider,
                 [_consolidation_instruction_message(candidate)],
+                trace_logger=llm_trace_logger,
+                trace_metadata=background_llm_trace_metadata(
+                    worker_name=self.name,
+                    worker_id=self.worker_id,
+                    stage=BackgroundStage.CONSOLIDATION,
+                    window=window,
+                    run_id=run.run_id,
+                ),
                 tool_choice="none",
                 response_format=JSON_OBJECT_RESPONSE_FORMAT,
             )
@@ -314,10 +333,12 @@ class MemoryConflictReviewWorker:
         llm_provider: LLMProvider | None = None,
         *,
         worker_id: str | None = None,
+        llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.state_service = state_service
         self.llm_provider = llm_provider
         self.worker_id = worker_id or self.name
+        self.llm_trace_logger = llm_trace_logger
 
     def run_once(
         self,
@@ -334,6 +355,7 @@ class MemoryConflictReviewWorker:
             llm_provider=self.llm_provider,
             checkpoint=checkpoint or WorkerCheckpoint(worker_name=self.name),
             coordinator=coordinator or _NeverYieldCoordinator(),
+            llm_trace_logger=self.llm_trace_logger,
         )
 
     def run(
@@ -363,6 +385,10 @@ class MemoryConflictReviewWorker:
             llm_provider=provider,
             checkpoint=checkpoint,
             coordinator=coordinator,
+            llm_trace_logger=(
+                getattr(config, "llm_trace_logger", self.llm_trace_logger)
+                or self.llm_trace_logger
+            ),
         )
 
     def _run_with(
@@ -372,6 +398,7 @@ class MemoryConflictReviewWorker:
         llm_provider: LLMProvider,
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
+        llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
         window = _next_conflict_review_window(state_service)
         if window is None:
@@ -429,8 +456,17 @@ class MemoryConflictReviewWorker:
                     notes=[message],
                     metadata={"last_window_id": window.window_id},
                 )
-            response = llm_provider.complete(
+            response = traced_llm_complete(
+                llm_provider,
                 [_conflict_review_instruction_message(window, active_beliefs)],
+                trace_logger=llm_trace_logger,
+                trace_metadata=background_llm_trace_metadata(
+                    worker_name=self.name,
+                    worker_id=self.worker_id,
+                    stage=BackgroundStage.CONFLICT_REVIEW,
+                    window=window,
+                    run_id=run.run_id,
+                ),
                 tool_choice="none",
                 response_format=JSON_OBJECT_RESPONSE_FORMAT,
             )

@@ -10,6 +10,7 @@ from alpha_agent.cognition.loops.scheduler import WorkerReport
 from alpha_agent.cognition.loops.workers.memory_extraction import MemoryExtractionWorker
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.llm.base import LLMProvider, LLMToolDefinitionInput
+from alpha_agent.llm.tracing import LLMTraceLogger
 from alpha_agent.runtime.context_handover import HandoverExtractionJob
 from alpha_agent.state.store import StateStore
 
@@ -26,12 +27,14 @@ class DirectCompactExtractionService:
         source_batch_size: int = 12,
         max_workers: int = 2,
         enabled: bool = True,
+        llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.store = store
         self.llm_provider = llm_provider
         self.tools = tuple(tools)
         self.source_batch_size = max(1, int(source_batch_size))
         self.enabled = enabled
+        self.llm_trace_logger = llm_trace_logger
         self._slots = BoundedSemaphore(max(1, int(max_workers)))
         self._lock = Lock()
         self._threads: set[Thread] = set()
@@ -98,6 +101,7 @@ class DirectCompactExtractionService:
                 self.llm_provider,
                 tools=tools,
                 source_batch_size=self.source_batch_size,
+                llm_trace_logger=self.llm_trace_logger,
             )
             while True:
                 report = worker.run_compact_job(job)

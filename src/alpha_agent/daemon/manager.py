@@ -16,6 +16,7 @@ from alpha_agent.llm.codex import CodexResponsesProvider
 from alpha_agent.llm.deepseek import DeepSeekProvider
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
+from alpha_agent.llm.tracing import LLMTraceLogger
 from alpha_agent.runtime.agent import AlphaAgent, CompactExtractionSubmitter
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.default import build_tool_registry
@@ -61,11 +62,13 @@ class AgentFactory:
         *,
         coordinator: LoopCoordinator | None = None,
         compact_extraction_submitter: CompactExtractionSubmitter | None = None,
+        llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.config = config
         self.store = store
         self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
         self.compact_extraction_submitter = compact_extraction_submitter
+        self.llm_trace_logger = llm_trace_logger or LLMTraceLogger.from_config(config)
         self._lock = Lock()
 
     def create(self) -> AlphaAgent:
@@ -77,8 +80,6 @@ class AgentFactory:
             store=self.store,
             llm_provider=provider,
             tool_registry=build_tool_registry(self.config),
-            llm_debug_logging=self.config.llm_debug_logging,
-            llm_trace_log_path=Path(self.config.log_dir) / "llm.jsonl",
             tool_output_dir=Path(self.config.log_dir) / "tool-results",
             llm_context_config=self.config.llm_context,
             max_context_tokens=self.config.max_context_tokens_for_provider(
@@ -86,6 +87,7 @@ class AgentFactory:
             ),
             coordinator=self.coordinator,
             compact_extraction_submitter=self.compact_extraction_submitter,
+            llm_trace_logger=self.llm_trace_logger,
         )
 
 

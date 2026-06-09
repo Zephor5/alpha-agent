@@ -53,6 +53,7 @@ from alpha_agent.gateway.config import (
 )
 from alpha_agent.gateway.runner import ActiveTurnGuard, GatewayRuntimeBridge
 from alpha_agent.gateway.session import GatewayDeduplicator, GatewaySessionStore, SessionMode
+from alpha_agent.llm.tracing import LLMTraceLogger
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.default import build_tool_registry
@@ -89,12 +90,14 @@ class AlphaDaemon:
         self.loop_coordinator = LoopCoordinator(SUBJECT_SELF)
         background_provider = build_provider(config)
         background_tools = build_tool_registry(config).to_llm_tool_definitions()
+        llm_trace_logger = LLMTraceLogger.from_config(config)
         self.direct_compact_extraction = DirectCompactExtractionService(
             store=self.store,
             llm_provider=background_provider,
             tools=background_tools,
             source_batch_size=config.cognition_background.extraction.batch_size,
             enabled=config.cognition_background.enabled,
+            llm_trace_logger=llm_trace_logger,
         )
         self.agent_manager = agent_manager or AgentManager(
             AgentFactory(
@@ -102,6 +105,7 @@ class AlphaDaemon:
                 self.store,
                 coordinator=self.loop_coordinator,
                 compact_extraction_submitter=self.direct_compact_extraction.submit,
+                llm_trace_logger=llm_trace_logger,
             )
         )
         self.turn_guard = turn_guard or ActiveTurnGuard(bypass_commands=set())
@@ -112,6 +116,7 @@ class AlphaDaemon:
             llm_provider=background_provider,
             tools=background_tools,
             active_session_ids=getattr(self.agent_manager, "session_ids", lambda: ()),
+            llm_trace_logger=llm_trace_logger,
         )
         self._server: JsonLineDaemonServer | None = None
         self._stop_requested = Event()

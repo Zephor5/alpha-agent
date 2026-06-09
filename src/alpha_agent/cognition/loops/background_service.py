@@ -54,6 +54,7 @@ from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import CognitionBackgroundConfig
 from alpha_agent.llm.base import LLMProvider, LLMToolDefinitionInput
+from alpha_agent.llm.tracing import LLMTraceLogger
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.utils.time import utc_now, utc_now_iso
@@ -191,12 +192,14 @@ class BackgroundCognitionService:
         active_session_ids: Callable[[], Sequence[str]] | None = None,
         state_service: CognitionStateStore | None = None,
         workers: Sequence[ScheduledWorker] | None = None,
+        llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.store = store
         self.config = config
         self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
         self.llm_provider = llm_provider
         self.tools = tuple(tools)
+        self.llm_trace_logger = llm_trace_logger
         self.active_session_ids = active_session_ids or (lambda: ())
         self.state_service = state_service or CognitionStateStore(store)
         self.log = SQLiteEventLog(store)
@@ -387,6 +390,7 @@ class BackgroundCognitionService:
         return SimpleNamespace(
             dry_run=False,
             llm_provider=self.llm_provider,
+            llm_trace_logger=self.llm_trace_logger,
             tools=self.tools,
             active_session_ids=active_session_ids,
             inactive_session_ids=all_session_ids,
@@ -455,10 +459,10 @@ class BackgroundCognitionService:
     def _default_workers(self) -> tuple[ScheduledWorker, ...]:
         return (
             SourceIntakeWorker(),
-            MemoryExtractionWorker(),
-            MemoryConsolidationWorker(),
-            MemoryConflictReviewWorker(),
-            MemorySummaryWorker(),
+            MemoryExtractionWorker(llm_trace_logger=self.llm_trace_logger),
+            MemoryConsolidationWorker(llm_trace_logger=self.llm_trace_logger),
+            MemoryConflictReviewWorker(llm_trace_logger=self.llm_trace_logger),
+            MemorySummaryWorker(llm_trace_logger=self.llm_trace_logger),
             ArchiveExpiredWorker(),
         )
 

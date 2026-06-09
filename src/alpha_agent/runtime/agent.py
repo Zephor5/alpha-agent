@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, is_dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path
 from threading import Lock, RLock
@@ -57,6 +56,9 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
+from alpha_agent.llm.tracing import llm_metadata_summary as _llm_metadata_summary
+from alpha_agent.llm.tracing import llm_request_summary as _llm_request_summary
 from alpha_agent.runtime.chat_messages import (
     estimate_chat_tokens,
     source_message_to_chat,
@@ -217,19 +219,24 @@ class LLMCompletionService:
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
         response_format: LLMResponseFormat | None = None,
+        trace_logger: LLMTraceLogger | None = None,
+        trace_metadata: Mapping[str, Any] | None = None,
     ) -> RetriedLLMCompletion:
-        kwargs: dict[str, Any] = {}
-        if tools is not None:
-            kwargs["tools"] = tools
-        if tool_choice is not None:
-            kwargs["tool_choice"] = tool_choice
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-
         for attempt in range(self.max_retries + 1):
             try:
                 return RetriedLLMCompletion(
-                    response=self.provider.complete(messages, **kwargs),
+                    response=traced_llm_complete(
+                        self.provider,
+                        messages,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                        response_format=response_format,
+                        trace_logger=trace_logger,
+                        trace_metadata={
+                            **dict(trace_metadata or {}),
+                            "retry_attempt": attempt,
+                        },
+                    ),
                     retry_count=attempt,
                 )
             except Exception as exc:
@@ -261,14 +268,13 @@ class AlphaAgent:
         llm_retry_sleep_seconds: float = 0.0,
         max_tool_iterations: int = 8,
         max_llm_rounds: int | None = None,
-        llm_debug_logging: bool = False,
-        llm_trace_log_path: str | Path | None = None,
         tool_output_dir: str | Path | None = None,
         llm_context_config: LLMContextConfig | None = None,
         max_context_tokens: int | None = None,
         event_log: EventLog | None = None,
         coordinator: LoopCoordinator | None = None,
         compact_extraction_submitter: CompactExtractionSubmitter | None = None,
+        llm_trace_logger: LLMTraceLogger | None = None,
         config: AlphaConfig | None = None,
     ):
         self.store = store
@@ -294,10 +300,8 @@ class AlphaAgent:
             max_retries=max_llm_retries,
             retry_sleep_seconds=llm_retry_sleep_seconds,
         )
-        self.llm_debug_logging = llm_debug_logging
-        self.llm_trace_log_path = (
-            Path(llm_trace_log_path).expanduser() if llm_trace_log_path else None
-        )
+        self.llm_trace_logger = llm_trace_logger or LLMTraceLogger.from_config(self.config)
+        self.llm_trace_log_path = self.llm_trace_logger.trace_log_path
         self.tool_output_dir = (
             Path(tool_output_dir).expanduser()
             if tool_output_dir is not None
@@ -1062,11 +1066,11 @@ class AlphaAgent:
     ) -> RetriedLLMCompletion:
         self._check_canceled(session_id, "before_llm")
         llm_call_id = new_id("llm")
-        request_log = (
-            _llm_request_log(messages=messages, tools=tools, tool_choice=tool_choice)
-            if self.llm_debug_logging
-            else None
-        )
+        trace_metadata = {
+            "turn_id": turn_context.turn_id,
+            "llm_call_id": llm_call_id,
+            "session_id": session_id,
+        }
         started_trace = self.store.append_runtime_trace(
             session_id=session_id,
             event_type="llm.started",
@@ -1087,21 +1091,13 @@ class AlphaAgent:
                 ),
             },
         )
-        if request_log is not None:
-            self._append_llm_trace(
-                event="llm.request",
-                metadata={
-                    "turn_id": turn_context.turn_id,
-                    "llm_call_id": llm_call_id,
-                    "session_id": session_id,
-                    "request": request_log,
-                },
-            )
         try:
             completion = self.llm_completion.complete(
                 list(messages),
                 tools=tools,
                 tool_choice=tool_choice,
+                trace_logger=self.llm_trace_logger,
+                trace_metadata=trace_metadata,
             )
         except LLMCallError as exc:
             self.store.append_runtime_trace(
@@ -1119,16 +1115,6 @@ class AlphaAgent:
             )
             raise
         self._check_canceled(session_id, "after_llm")
-        if request_log is not None:
-            self._append_llm_trace(
-                event="llm.response",
-                metadata={
-                    "turn_id": turn_context.turn_id,
-                    "llm_call_id": llm_call_id,
-                    "session_id": session_id,
-                    "response": _llm_response_log(completion.response),
-                },
-            )
         completed_trace = self.store.append_runtime_trace(
             session_id=session_id,
             event_type="llm.completed",
@@ -1153,20 +1139,6 @@ class AlphaAgent:
             started_trace_id=started_trace.id,
             completed_trace_id=completed_trace.id,
         )
-
-    def _append_llm_trace(self, *, event: str, metadata: dict[str, Any]) -> None:
-        if not self.llm_debug_logging or self.llm_trace_log_path is None:
-            return
-        self.llm_trace_log_path.parent.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "timestamp": utc_now_iso(),
-            "level": "debug",
-            "event": event,
-            "metadata": _json_safe(metadata),
-        }
-        with self.llm_trace_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True))
-            handle.write("\n")
 
     def _write_assistant_message(
         self,
@@ -1500,74 +1472,6 @@ class AlphaAgent:
         return None
 
 
-def _llm_request_log(
-    *,
-    messages: list[ChatMessage],
-    tools: Sequence[LLMToolDefinitionInput] | None,
-    tool_choice: LLMToolChoice | None,
-) -> dict[str, Any]:
-    return {
-        "messages": _json_safe(messages),
-        "tools": _json_safe(list(tools)) if tools is not None else None,
-        "tool_choice": _json_safe(tool_choice),
-    }
-
-
-def _llm_request_summary(
-    *,
-    messages: list[ChatMessage],
-    tools: Sequence[LLMToolDefinitionInput] | None,
-    tool_choice: LLMToolChoice | None,
-) -> dict[str, Any]:
-    return {
-        "message_count": len(messages),
-        "roles": [str(message.get("role", "")) for message in messages],
-        "tool_count": len(tools) if tools is not None else 0,
-        "tool_names": [_llm_tool_name(tool) for tool in tools or []],
-        "tool_choice": _json_safe(tool_choice),
-    }
-
-
-def _llm_response_log(response: LLMResponse) -> dict[str, Any]:
-    response_payload = response.metadata.get("response_payload")
-    if isinstance(response_payload, dict):
-        return _json_safe(response_payload)
-
-    return {
-        "content": response.content,
-        "finish_reason": response.finish_reason,
-        "model": response.model,
-        "provider": response.provider,
-        "tool_calls": [tool_call.to_dict() for tool_call in response.tool_calls],
-    }
-
-
-def _llm_metadata_summary(metadata: dict[str, Any]) -> dict[str, Any]:
-    return _json_safe(
-        {
-            key: value
-            for key, value in metadata.items()
-            if key
-            not in {
-                "request_payload",
-                "response_payload",
-                "raw_tool_calls",
-                "normalized_tool_calls",
-                "tool_calls",
-            }
-        }
-    )
-
-
-def _llm_tool_name(tool: LLMToolDefinitionInput) -> str:
-    if isinstance(tool, Mapping):
-        function = tool.get("function")
-        if isinstance(function, Mapping) and function.get("name") is not None:
-            return str(function["name"])
-        return str(tool.get("name", ""))
-    return str(getattr(tool, "name", ""))
-
-
 def _default_max_context_tokens(provider_name: object) -> int:
     provider_key = str(provider_name or "openai-compatible")
     return DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS.get(
@@ -1614,15 +1518,3 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         return []
     return [str(item) for item in value if item is not None]
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, str | int | float | bool):
-        return value
-    if is_dataclass(value) and not isinstance(value, type):
-        return _json_safe(asdict(value))
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [_json_safe(item) for item in value]
-    return str(value)

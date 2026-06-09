@@ -24,6 +24,7 @@ from alpha_agent.cognition.loops.scheduler import (
     WorkerStatus,
     YieldingCoordinator,
 )
+from alpha_agent.cognition.loops.workers._common import background_llm_trace_metadata
 from alpha_agent.cognition.models import (
     AtomicBelief,
     BeliefLifecycle,
@@ -46,6 +47,7 @@ from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.llm.base import JSON_OBJECT_RESPONSE_FORMAT, ChatMessage, LLMProvider
+from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.utils.time import utc_now_iso
 
@@ -123,6 +125,7 @@ class MemorySummaryWorker:
         changed_source_min: int = 6,
         invalidated_source_min: int = 1,
         worker_id: str | None = None,
+        llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.state_service = state_service
         self.llm_provider = llm_provider
@@ -131,6 +134,7 @@ class MemorySummaryWorker:
         self.changed_source_min = max(1, int(changed_source_min))
         self.invalidated_source_min = max(1, int(invalidated_source_min))
         self.worker_id = worker_id or self.name
+        self.llm_trace_logger = llm_trace_logger
 
     def run_once(
         self,
@@ -151,6 +155,7 @@ class MemorySummaryWorker:
             initial_min_beliefs=self.initial_min_beliefs,
             changed_source_min=self.changed_source_min,
             invalidated_source_min=self.invalidated_source_min,
+            llm_trace_logger=self.llm_trace_logger,
         )
 
     def run(
@@ -199,6 +204,10 @@ class MemorySummaryWorker:
                     )
                 ),
             ),
+            llm_trace_logger=(
+                getattr(config, "llm_trace_logger", self.llm_trace_logger)
+                or self.llm_trace_logger
+            ),
         )
 
     def _run_with(
@@ -212,6 +221,7 @@ class MemorySummaryWorker:
         initial_min_beliefs: int,
         changed_source_min: int,
         invalidated_source_min: int,
+        llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
         del batch_size
         target = _next_summary_target(
@@ -294,8 +304,17 @@ class MemorySummaryWorker:
                 metadata={"last_window_id": window.window_id},
             )
         try:
-            response = llm_provider.complete(
+            response = traced_llm_complete(
+                llm_provider,
                 [_summary_instruction_message(state_service, target)],
+                trace_logger=llm_trace_logger,
+                trace_metadata=background_llm_trace_metadata(
+                    worker_name=self.name,
+                    worker_id=self.worker_id,
+                    stage=BackgroundStage.SUMMARY,
+                    window=window,
+                    run_id=run.run_id,
+                ),
                 tool_choice="none",
                 response_format=JSON_OBJECT_RESPONSE_FORMAT,
             )

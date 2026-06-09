@@ -23,6 +23,7 @@ from alpha_agent.cognition.loops.scheduler import (
     WorkerStatus,
     YieldingCoordinator,
 )
+from alpha_agent.cognition.loops.workers._common import background_llm_trace_metadata
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
     DerivationStage,
@@ -45,6 +46,7 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
 from alpha_agent.runtime.chat_messages import source_message_to_chat
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.runtime.context_handover import (
@@ -141,6 +143,7 @@ class MemoryExtractionWorker:
         source_batch_size: int = 12,
         extraction_version: str = DEFAULT_MEMORY_EXTRACTION_VERSION,
         worker_id: str | None = None,
+        llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.state_service = state_service
         self.llm_provider = llm_provider
@@ -150,6 +153,7 @@ class MemoryExtractionWorker:
         self.source_batch_size = max(1, int(source_batch_size))
         self.extraction_version = extraction_version
         self.worker_id = worker_id or self.name
+        self.llm_trace_logger = llm_trace_logger
 
     def run_once(
         self,
@@ -170,6 +174,7 @@ class MemoryExtractionWorker:
             active_session_ids=self.active_session_ids,
             inactive_session_ids=self.inactive_session_ids,
             source_batch_size=self.source_batch_size,
+            llm_trace_logger=self.llm_trace_logger,
         )
 
     def run_compact_job(
@@ -220,6 +225,7 @@ class MemoryExtractionWorker:
             checkpoint=checkpoint,
             coordinator=coordinator or _NeverYieldCoordinator(),
             candidate=candidate,
+            llm_trace_logger=self.llm_trace_logger,
         )
 
     def run(
@@ -252,6 +258,10 @@ class MemoryExtractionWorker:
             getattr(config, "inactive_session_ids", self.inactive_session_ids) or ()
         )
         source_batch_size = int(getattr(config, "source_batch_size", self.source_batch_size))
+        llm_trace_logger = (
+            getattr(config, "llm_trace_logger", self.llm_trace_logger)
+            or self.llm_trace_logger
+        )
         return self._run_with(
             state_service=state_service,
             llm_provider=provider,
@@ -261,6 +271,7 @@ class MemoryExtractionWorker:
             active_session_ids=active_session_ids,
             inactive_session_ids=inactive_session_ids,
             source_batch_size=max(1, source_batch_size),
+            llm_trace_logger=llm_trace_logger,
         )
 
     def _run_with(
@@ -274,6 +285,7 @@ class MemoryExtractionWorker:
         active_session_ids: frozenset[str],
         inactive_session_ids: frozenset[str],
         source_batch_size: int,
+        llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
         candidate = _next_source_window_candidate(
             state_service,
@@ -300,6 +312,7 @@ class MemoryExtractionWorker:
             checkpoint=checkpoint,
             coordinator=coordinator,
             candidate=candidate,
+            llm_trace_logger=llm_trace_logger,
         )
 
 
@@ -313,6 +326,7 @@ def _run_candidate(
     checkpoint: WorkerCheckpoint,
     coordinator: YieldingCoordinator,
     candidate: _SourceWindowCandidate,
+    llm_trace_logger: LLMTraceLogger | None,
 ) -> WorkerReport:
     if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
         return _worker_report(
@@ -373,11 +387,21 @@ def _run_candidate(
             metadata={"last_window_id": window.window_id},
         )
     try:
-        response = llm_provider.complete(
+        response = traced_llm_complete(
+            llm_provider,
             [
                 *candidate.prompt_prefix_messages,
                 _extraction_instruction_message(candidate.source_text),
             ],
+            trace_logger=llm_trace_logger,
+            trace_metadata=background_llm_trace_metadata(
+                worker_name=worker_name,
+                worker_id=worker_id,
+                stage=BackgroundStage.EXTRACTION,
+                window=window,
+                run_id=run.run_id,
+                session_id=candidate.session_id,
+            ),
             tools=list(tools) if tools else None,
             tool_choice=_tool_choice_for_extraction(tools),
             response_format=JSON_OBJECT_RESPONSE_FORMAT,

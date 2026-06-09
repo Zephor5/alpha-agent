@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -122,6 +123,24 @@ def test_daemon_handles_ask_with_session_guard_and_source_metadata(tmp_path: Pat
             },
         )
     ]
+
+
+def test_daemon_shares_single_llm_trace_logger_across_runtime_services(
+    tmp_path: Path,
+) -> None:
+    config = replace(_config(tmp_path), llm_debug_logging=True)
+    store = StateStore(config.db_path)
+    store.initialize()
+
+    daemon = AlphaDaemon(config, store=store)
+    factory_logger = daemon.agent_manager.factory.llm_trace_logger
+    agent = daemon.agent_manager.factory.create()
+
+    assert factory_logger is daemon.background_service.llm_trace_logger
+    assert factory_logger is daemon.direct_compact_extraction.llm_trace_logger
+    assert agent.llm_trace_logger is factory_logger
+    assert factory_logger.enabled
+    assert factory_logger.trace_log_path == config.log_dir / "llm.jsonl"
 
 
 def test_daemon_returns_unknown_request_type_for_invalid_payload(tmp_path: Path) -> None:

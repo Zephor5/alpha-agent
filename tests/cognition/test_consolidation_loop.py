@@ -58,6 +58,7 @@ from alpha_agent.cognition.projections.belief import BeliefRecallParams, BeliefS
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
 from alpha_agent.config import (
+    AlphaConfig,
     BackgroundConflictConfig,
     BackgroundConsolidationConfig,
     BackgroundExtractionConfig,
@@ -72,6 +73,7 @@ from alpha_agent.llm.base import (
     LLMToolDefinition,
     LLMToolDefinitionInput,
 )
+from alpha_agent.llm.tracing import LLMTraceLogger
 from alpha_agent.runtime.context_handover import (
     DEFAULT_MEMORY_EXTRACTION_VERSION,
     HandoverExtractionJob,
@@ -268,6 +270,68 @@ def test_background_service_tick_runs_bounded_intake_chunk(tmp_path) -> None:
     statuses = [intake_status(message.id) for message in messages]
     assert statuses == [BackgroundProgressStatus.PROCESSED, None, None]
     assert background.status().last_success is not None
+
+
+def test_background_service_writes_worker_llm_debug_trace(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    service = CognitionStateStore(store)
+    trace_logger = _llm_trace_logger(tmp_path, enabled=True)
+    assert trace_logger.trace_log_path is not None
+    provider = _RecordingLLMProvider(_llm_json())
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=1,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
+            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=1),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+        llm_provider=provider,
+        llm_trace_logger=trace_logger,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == [
+        "source_intake",
+        "memory_extraction",
+    ]
+    entries = [
+        json.loads(line)
+        for line in trace_logger.trace_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [entry["event"] for entry in entries] == ["llm.request", "llm.response"]
+    assert entries[0]["metadata"]["worker"]["name"] == "memory_extraction"
+
+
+def test_background_service_default_workers_share_service_llm_trace_logger(tmp_path) -> None:
+    store = _store(tmp_path)
+    trace_logger = _llm_trace_logger(tmp_path, enabled=True)
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(enabled=True),
+        llm_trace_logger=trace_logger,
+    )
+
+    worker_loggers = [
+        worker.llm_trace_logger
+        for worker in background._workers
+        if hasattr(worker, "llm_trace_logger")
+    ]
+
+    assert worker_loggers
+    assert all(logger is trace_logger for logger in worker_loggers)
 
 
 def test_background_service_ignores_handover_traces_as_scheduling_sources(
@@ -1845,6 +1909,49 @@ def test_memory_extraction_worker_selects_inactive_backlog_sources_and_runtime_t
     assert ("runtime_trace", trace.id) in evidence
 
 
+def test_memory_extraction_worker_writes_llm_debug_trace(tmp_path) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    trace_logger = _llm_trace_logger(tmp_path, enabled=True)
+    assert trace_logger.trace_log_path is not None
+    provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={"s1"},
+        llm_trace_logger=trace_logger,
+    ).run_once()
+
+    assert report.emitted == 1
+    entries = [
+        json.loads(line)
+        for line in trace_logger.trace_log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [entry["event"] for entry in entries] == ["llm.request", "llm.response"]
+    request_metadata = entries[0]["metadata"]
+    response_metadata = entries[1]["metadata"]
+    assert request_metadata["llm_call_id"].startswith("llm_")
+    assert response_metadata["llm_call_id"] == request_metadata["llm_call_id"]
+    assert request_metadata["worker"] == {
+        "name": "memory_extraction",
+        "worker_id": "memory_extraction",
+        "stage": "extraction",
+        "target_unit": "session:s1",
+        "session_id": "s1",
+        "window_id": request_metadata["worker"]["window_id"],
+        "run_id": request_metadata["worker"]["run_id"],
+    }
+    assert request_metadata["request"]["response_format"] == {"type": "json_object"}
+    assert response_metadata["response"]["content"] == _llm_json()
+
+
 def test_memory_extraction_worker_skips_inactive_backlog_for_active_session(
     tmp_path,
 ) -> None:
@@ -1956,6 +2063,17 @@ def _store(tmp_path) -> StateStore:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
     return store
+
+
+def _llm_trace_logger(tmp_path, *, enabled: bool = False) -> LLMTraceLogger:
+    return LLMTraceLogger.from_config(
+        AlphaConfig(
+            db_path=tmp_path / "trace-alpha.db",
+            log_dir=tmp_path / "logs",
+            gateway_status_path=tmp_path / "trace-gateway-status.json",
+            llm_debug_logging=enabled,
+        )
+    )
 
 
 def _atomic_belief(
