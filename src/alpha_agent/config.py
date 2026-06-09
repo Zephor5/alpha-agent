@@ -83,8 +83,8 @@ batch_size = 64
 min_sources = 1
 
 [cognition.background.extraction]
-batch_size = 12
 min_sources = 1
+inactivity_threshold_hours = 24
 
 [cognition.background.consolidation]
 batch_size = 12
@@ -162,8 +162,8 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "cognition.background.tick_timeout_seconds": int,
     "cognition.background.intake.batch_size": int,
     "cognition.background.intake.min_sources": int,
-    "cognition.background.extraction.batch_size": int,
     "cognition.background.extraction.min_sources": int,
+    "cognition.background.extraction.inactivity_threshold_hours": int,
     "cognition.background.consolidation.batch_size": int,
     "cognition.background.consolidation.min_drafts": int,
     "cognition.background.conflict.batch_size": int,
@@ -197,13 +197,17 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
     "deepseek.reasoning_effort": {"", "low", "medium", "high", "max", "xhigh"},
 }
 
+DEPRECATED_SECTION_FIELDS = {
+    ("cognition.background.extraction", "batch_size"),
+}
+
 POSITIVE_INT_CONFIG_KEYS = {
     "cognition.background.interval_seconds",
     "cognition.background.tick_timeout_seconds",
     "cognition.background.intake.batch_size",
     "cognition.background.intake.min_sources",
-    "cognition.background.extraction.batch_size",
     "cognition.background.extraction.min_sources",
+    "cognition.background.extraction.inactivity_threshold_hours",
     "cognition.background.consolidation.batch_size",
     "cognition.background.consolidation.min_drafts",
     "cognition.background.conflict.batch_size",
@@ -309,10 +313,10 @@ class BackgroundIntakeConfig:
 
 @dataclass(frozen=True)
 class BackgroundExtractionConfig:
-    """Memory extraction gating and batch size for daemon background cognition."""
+    """Memory extraction gating for daemon background cognition."""
 
-    batch_size: int = 12
     min_sources: int = 1
+    inactivity_threshold_hours: int = 24
 
 
 @dataclass(frozen=True)
@@ -791,11 +795,11 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         "cognition.background.intake.min_sources": (
             config.cognition_background.intake.min_sources
         ),
-        "cognition.background.extraction.batch_size": (
-            config.cognition_background.extraction.batch_size
-        ),
         "cognition.background.extraction.min_sources": (
             config.cognition_background.extraction.min_sources
+        ),
+        "cognition.background.extraction.inactivity_threshold_hours": (
+            config.cognition_background.extraction.inactivity_threshold_hours
         ),
         "cognition.background.consolidation.batch_size": (
             config.cognition_background.consolidation.batch_size
@@ -867,12 +871,12 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
             config.cognition_background.intake.min_sources,
         ),
         (
-            "cognition.background.extraction.batch_size",
-            config.cognition_background.extraction.batch_size,
-        ),
-        (
             "cognition.background.extraction.min_sources",
             config.cognition_background.extraction.min_sources,
+        ),
+        (
+            "cognition.background.extraction.inactivity_threshold_hours",
+            config.cognition_background.extraction.inactivity_threshold_hours,
         ),
         (
             "cognition.background.consolidation.batch_size",
@@ -1029,6 +1033,8 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         for field_name, value in section.items():
             if isinstance(value, dict):
                 continue
+            if (section_name, field_name) in DEPRECATED_SECTION_FIELDS:
+                continue
             lines.append(f"{field_name} = {_toml_literal(value)}")
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1125,13 +1131,13 @@ def _background_config(section: dict[str, Any]) -> CognitionBackgroundConfig:
             ),
         ),
         extraction=BackgroundExtractionConfig(
-            batch_size=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_EXTRACTION_BATCH_SIZE",
-                _int_value(extraction.get("batch_size"), 12),
-            ),
             min_sources=_int_env(
                 "ALPHA_COGNITION_BACKGROUND_EXTRACTION_MIN_SOURCES",
                 _int_value(extraction.get("min_sources"), 1),
+            ),
+            inactivity_threshold_hours=_int_env(
+                "ALPHA_COGNITION_BACKGROUND_EXTRACTION_INACTIVITY_THRESHOLD_HOURS",
+                _int_value(extraction.get("inactivity_threshold_hours"), 24),
             ),
         ),
         consolidation=BackgroundConsolidationConfig(

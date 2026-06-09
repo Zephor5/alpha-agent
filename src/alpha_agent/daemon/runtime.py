@@ -95,7 +95,6 @@ class AlphaDaemon:
             store=self.store,
             llm_provider=background_provider,
             tools=background_tools,
-            source_batch_size=config.cognition_background.extraction.batch_size,
             enabled=config.cognition_background.enabled,
             llm_trace_logger=llm_trace_logger,
         )

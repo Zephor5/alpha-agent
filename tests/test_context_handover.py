@@ -235,21 +235,9 @@ def test_compression_call_preserves_runtime_prefix_and_passes_tools(tmp_path) ->
         runtime_messages
     )
     assert traces[1].metadata["tools_schema_hash"] == handover_tools_schema_hash(tools)
-    assert traces[1].metadata["covered_source_message_ids"] == [user.id, assistant.id]
-    assert traces[1].metadata["covered_source_message_refs"] == [
-        {
-            "source_type": "session_message",
-            "source_id": user.id,
-            "ordinal": user.ordinal,
-            "kind": user.kind,
-        },
-        {
-            "source_type": "session_message",
-            "source_id": assistant.id,
-            "ordinal": assistant.ordinal,
-            "kind": assistant.kind,
-        },
-    ]
+    assert "covered_source_message_ids" not in traces[1].metadata
+    assert "covered_source_message_refs" not in traces[1].metadata
+    assert "context_source_message_refs" not in traces[1].metadata
     assert traces[1].metadata["covered_ordinal_start"] == user.ordinal
     assert traces[1].metadata["covered_ordinal_end"] == assistant.ordinal
     assert all(

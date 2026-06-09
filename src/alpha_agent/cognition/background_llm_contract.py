@@ -107,21 +107,6 @@ _SCOPE_REFERENCE_KINDS: dict[BeliefScope, frozenset[str]] = {
     BeliefScope.PROJECT: frozenset({"project"}),
     BeliefScope.SESSION: frozenset({"session"}),
 }
-_SOURCE_WINDOW_STOPWORDS = frozenset(
-    {
-        "about",
-        "agent",
-        "alpha",
-        "that",
-        "this",
-        "uses",
-        "user",
-        "with",
-        "project",
-    }
-)
-
-
 def extraction_output_json_schema() -> dict[str, Any]:
     """Return the LLM-facing JSON schema for extraction-stage outputs."""
 
@@ -399,7 +384,6 @@ class SourceWindowValidationContext:
     session_id: str | None = None
     ordinal_start: int | None = None
     ordinal_end: int | None = None
-    source_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -648,7 +632,6 @@ def _validate_atomic_draft(
         ) from exc
     scope, about, project_descriptor = _validate_scope_about(raw, context)
     content = _required_str(raw, "content")
-    _validate_source_window_content(content, context)
     return ValidatedAtomicBeliefDraft(
         memory_kind=memory_kind,
         scope=scope,
@@ -696,7 +679,6 @@ def _validate_summary_draft(
                 "summary about refs do not match selected summary target"
             )
     content = _required_str(raw, "content")
-    _validate_source_window_content(content, context)
     structure = _optional_dict(raw.get("structure"))
     if context.required_summary_target_domain is not None:
         target_domain = (structure or {}).get("target_domain")
@@ -879,32 +861,6 @@ def _reject_prompt_injection(value: object) -> None:
     normalized = value.casefold()
     if any(pattern in normalized for pattern in _PROMPT_INJECTION_PATTERNS):
         raise BackgroundLLMValidationError("prompt-injection content is not allowed")
-
-
-def _validate_source_window_content(
-    content: str,
-    context: BackgroundLLMValidationContext,
-) -> None:
-    source_text = context.source_window.source_text
-    if source_text is None:
-        return
-    content_tokens = _content_tokens(content)
-    if not content_tokens:
-        return
-    source_tokens = _content_tokens(source_text)
-    missing = content_tokens - source_tokens
-    if missing:
-        raise BackgroundLLMValidationError(
-            "output appears outside selected source window: " + ", ".join(sorted(missing))
-        )
-
-
-def _content_tokens(value: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[a-z0-9][a-z0-9_-]*", value.casefold())
-        if len(token) >= 4 and token not in _SOURCE_WINDOW_STOPWORDS
-    }
 
 
 def _required_str(raw: Mapping[str, Any], key: str) -> str:

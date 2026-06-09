@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, ClassVar
@@ -51,7 +51,7 @@ from alpha_agent.llm.base import (
     LLMToolDefinitionInput,
 )
 from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
-from alpha_agent.runtime.chat_messages import source_message_to_chat
+from alpha_agent.runtime.chat_messages import session_message_to_chat, source_message_to_chat
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.runtime.context_handover import (
     DEFAULT_MEMORY_EXTRACTION_VERSION,
@@ -60,7 +60,7 @@ from alpha_agent.runtime.context_handover import (
     handover_tools_schema_hash,
 )
 from alpha_agent.runtime.prompt_builder import default_runtime_system_message
-from alpha_agent.state.models import RuntimeTrace, SessionMessage
+from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.utils.time import utc_now_iso
 
@@ -74,7 +74,6 @@ _ACTIVE_WINDOW_STATUSES = {
     BackgroundProgressStatus.PENDING,
     BackgroundProgressStatus.CLAIMED,
 }
-_BACKLOG_TRACE_EVENT_TYPES = frozenset({"tool.completed", "tool.failed"})
 _EXTRACTION_INSTRUCTION = """Extract one atomic memory candidate from the selected source window.
 
 Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
@@ -98,15 +97,7 @@ Content rules:
 - requires_confirmation should be true when the memory is plausible but not safe to accept
   without human review.
 - Do not include belief ids, source ids, provenance, idempotency keys, confidence, scores,
-  numeric strength fields, or update/supersede decisions.
-
-Selected source window:
-{source_text}"""
-
-
-@dataclass(frozen=True)
-class _RuntimeTraceSource:
-    trace: RuntimeTrace
+  numeric strength fields, or update/supersede decisions."""
 
 
 @dataclass(frozen=True)
@@ -115,13 +106,10 @@ class _SourceWindowCandidate:
     session_id: str
     target_unit: str
     source_refs: tuple[BackgroundSourceRef, ...]
-    source_message_ids: tuple[str, ...]
-    source_trace_ids: tuple[str, ...]
     ordinal_start: int | None
     ordinal_end: int | None
     prompt_prefix_messages: tuple[ChatMessage, ...]
     metadata: dict[str, Any]
-    source_text: str
 
 
 class _NeverYieldCoordinator:
@@ -155,7 +143,6 @@ class MemoryExtractionWorker:
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         active_session_ids: Iterable[str] = (),
         inactive_session_ids: Iterable[str] = (),
-        source_batch_size: int = 12,
         extraction_version: str = DEFAULT_MEMORY_EXTRACTION_VERSION,
         worker_id: str | None = None,
         llm_trace_logger: LLMTraceLogger | None = None,
@@ -165,7 +152,6 @@ class MemoryExtractionWorker:
         self.tools = tuple(tools or ())
         self.active_session_ids = frozenset(active_session_ids)
         self.inactive_session_ids = frozenset(inactive_session_ids)
-        self.source_batch_size = max(1, int(source_batch_size))
         self.extraction_version = extraction_version
         self.worker_id = worker_id or self.name
         self.llm_trace_logger = llm_trace_logger
@@ -188,7 +174,6 @@ class MemoryExtractionWorker:
             coordinator=coordinator or _NeverYieldCoordinator(),
             active_session_ids=self.active_session_ids,
             inactive_session_ids=self.inactive_session_ids,
-            source_batch_size=self.source_batch_size,
             llm_trace_logger=self.llm_trace_logger,
         )
 
@@ -211,7 +196,6 @@ class MemoryExtractionWorker:
                 self.state_service,
                 job,
                 tools=self.tools,
-                source_batch_size=self.source_batch_size,
                 extraction_version=self.extraction_version,
             )
         except ValueError as exc:
@@ -272,7 +256,6 @@ class MemoryExtractionWorker:
         inactive_session_ids = frozenset(
             getattr(config, "inactive_session_ids", self.inactive_session_ids) or ()
         )
-        source_batch_size = int(getattr(config, "source_batch_size", self.source_batch_size))
         llm_trace_logger = (
             getattr(config, "llm_trace_logger", self.llm_trace_logger)
             or self.llm_trace_logger
@@ -285,7 +268,6 @@ class MemoryExtractionWorker:
             coordinator=coordinator,
             active_session_ids=active_session_ids,
             inactive_session_ids=inactive_session_ids,
-            source_batch_size=max(1, source_batch_size),
             llm_trace_logger=llm_trace_logger,
         )
 
@@ -299,7 +281,6 @@ class MemoryExtractionWorker:
         coordinator: YieldingCoordinator,
         active_session_ids: frozenset[str],
         inactive_session_ids: frozenset[str],
-        source_batch_size: int,
         llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
         candidate = _next_source_window_candidate(
@@ -307,7 +288,6 @@ class MemoryExtractionWorker:
             tools=tools,
             active_session_ids=active_session_ids,
             inactive_session_ids=inactive_session_ids,
-            source_batch_size=source_batch_size,
             extraction_version=self.extraction_version,
         )
         if candidate is None:
@@ -411,10 +391,7 @@ def _run_candidate(
             llm_provider,
             [
                 *candidate.prompt_prefix_messages,
-                _extraction_instruction_message(
-                    candidate.source_text,
-                    context=context,
-                ),
+                _extraction_instruction_message(context=context),
             ],
             trace_logger=llm_trace_logger,
             trace_metadata=background_llm_trace_metadata(
@@ -469,14 +446,12 @@ def _next_source_window_candidate(
     tools: Sequence[LLMToolDefinitionInput],
     active_session_ids: frozenset[str],
     inactive_session_ids: frozenset[str],
-    source_batch_size: int,
     extraction_version: str,
 ) -> _SourceWindowCandidate | None:
     return _inactive_backlog_candidate(
         state_service,
         active_session_ids=active_session_ids,
         inactive_session_ids=inactive_session_ids,
-        source_batch_size=source_batch_size,
         extraction_version=extraction_version,
         tools=tools,
     )
@@ -487,7 +462,6 @@ def _compact_job_candidate(
     job: HandoverExtractionJob,
     *,
     tools: Sequence[LLMToolDefinitionInput],
-    source_batch_size: int,
     extraction_version: str,
 ) -> _SourceWindowCandidate | None:
     store = state_service.store
@@ -501,47 +475,34 @@ def _compact_job_candidate(
     if job.tools_schema_hash != tools_hash:
         raise ValueError("tools schema hash mismatch")
 
-    source_records = _covered_source_records(
-        {"covered_source_message_refs": list(job.covered_source_message_refs)}
-    )
+    source_messages = _compact_job_source_messages(store, job)
     source_refs = tuple(
-        BackgroundSourceRef("session_message", record["source_id"])
-        for record in source_records
+        BackgroundSourceRef("session_message", message.id) for message in source_messages
     )
     selected_refs = _retryable_refs(
         state_service,
         source_refs,
         target_unit=f"session:{job.session_id}",
-    )[:source_batch_size]
+    )
     if not selected_refs:
         return None
     selected_ids = {ref.source_id for ref in selected_refs}
-    selected_records = [
-        record for record in source_records if record["source_id"] in selected_ids
-    ]
-    source_messages = store.list_session_messages_by_ids(
-        [ref.source_id for ref in selected_refs if ref.source_type == "session_message"]
-    )
-    source_text = _render_source_text(messages=source_messages, traces=())
-    ordinals = [int(record["ordinal"]) for record in selected_records]
+    selected_messages = [message for message in source_messages if message.id in selected_ids]
+    ordinals = [message.ordinal for message in selected_messages]
     return _SourceWindowCandidate(
         source_path=_COMPACT_SOURCE_PATH,
         session_id=job.session_id,
         target_unit=f"session:{job.session_id}",
         source_refs=tuple(selected_refs),
-        source_message_ids=tuple(ref.source_id for ref in selected_refs),
-        source_trace_ids=(),
         ordinal_start=min(ordinals) if ordinals else None,
         ordinal_end=max(ordinals) if ordinals else None,
         prompt_prefix_messages=prefix_messages,
-        source_text=source_text,
         metadata={
             "source_path": _COMPACT_SOURCE_PATH,
             "session_id": job.session_id,
             "ordinal_start": min(ordinals) if ordinals else None,
             "ordinal_end": max(ordinals) if ordinals else None,
             "source_message_ids": [ref.source_id for ref in selected_refs],
-            "source_trace_ids": [],
             "provider": job.provider,
             "model": job.model,
             "prompt_prefix_hash": job.prompt_prefix_hash,
@@ -562,7 +523,6 @@ def _inactive_backlog_candidate(
     *,
     active_session_ids: frozenset[str],
     inactive_session_ids: frozenset[str],
-    source_batch_size: int,
     extraction_version: str,
     tools: Sequence[LLMToolDefinitionInput],
 ) -> _SourceWindowCandidate | None:
@@ -577,37 +537,35 @@ def _inactive_backlog_candidate(
             continue
         if _has_active_extraction_window(state_service, target_unit=target_unit):
             continue
+        compressed = store.find_latest_compressed_message(session_id)
+        boundary_ordinal = compressed.ordinal if compressed is not None else 0
         messages = [
             message
-            for message in store.list_session_messages(session_id)
+            for message in store.list_session_messages(
+                session_id,
+                after_ordinal=boundary_ordinal,
+            )
             if message.kind != "compressed_message"
         ]
         message_refs = tuple(
             BackgroundSourceRef("session_message", message.id) for message in messages
         )
-        trace_sources = _backlog_runtime_trace_sources(store, session_id)
-        trace_refs = tuple(
-            BackgroundSourceRef("runtime_trace", item.trace.id) for item in trace_sources
-        )
         source_refs = _retryable_refs(
             state_service,
-            (*message_refs, *trace_refs),
+            message_refs,
             target_unit=target_unit,
-        )[:source_batch_size]
+        )
         if not source_refs:
             continue
         selected_message_ids = [
             ref.source_id for ref in source_refs if ref.source_type == "session_message"
         ]
-        selected_trace_ids = [
-            ref.source_id for ref in source_refs if ref.source_type == "runtime_trace"
-        ]
-        selected_messages = store.list_session_messages_by_ids(selected_message_ids)
-        selected_traces = _runtime_traces_by_ids(store, selected_trace_ids)
+        selected_ids = set(selected_message_ids)
+        selected_messages = [message for message in messages if message.id in selected_ids]
         ordinals = [message.ordinal for message in selected_messages]
-        source_text = _render_source_text(messages=selected_messages, traces=selected_traces)
         prompt_prefix_messages = [
             default_runtime_system_message(),
+            *([session_message_to_chat(compressed)] if compressed is not None else []),
             *[source_message_to_chat(message) for message in selected_messages],
         ]
         return _SourceWindowCandidate(
@@ -615,19 +573,17 @@ def _inactive_backlog_candidate(
             session_id=session_id,
             target_unit=target_unit,
             source_refs=tuple(source_refs),
-            source_message_ids=tuple(selected_message_ids),
-            source_trace_ids=tuple(selected_trace_ids),
             ordinal_start=min(ordinals) if ordinals else None,
             ordinal_end=max(ordinals) if ordinals else None,
             prompt_prefix_messages=tuple(prompt_prefix_messages),
-            source_text=source_text,
             metadata={
                 "source_path": _BACKLOG_SOURCE_PATH,
                 "session_id": session_id,
                 "ordinal_start": min(ordinals) if ordinals else None,
                 "ordinal_end": max(ordinals) if ordinals else None,
                 "source_message_ids": selected_message_ids,
-                "source_trace_ids": selected_trace_ids,
+                "compressed_message_id": compressed.id if compressed is not None else None,
+                "boundary_ordinal": boundary_ordinal,
                 "prompt_prefix_hash": handover_prompt_prefix_hash(prompt_prefix_messages),
                 "tools_schema_hash": handover_tools_schema_hash(tools),
                 "extraction_version": extraction_version,
@@ -636,33 +592,23 @@ def _inactive_backlog_candidate(
     return None
 
 
-def _covered_source_records(metadata: Mapping[str, Any]) -> list[dict[str, Any]]:
-    raw_records = metadata.get("covered_source_message_refs")
-    if isinstance(raw_records, list):
-        records: list[dict[str, Any]] = []
-        for item in raw_records:
-            if not isinstance(item, Mapping):
-                continue
-            source_id = item.get("source_id")
-            if not isinstance(source_id, str) or not source_id.strip():
-                continue
-            if item.get("kind") == "compressed_message":
-                continue
-            ordinal = item.get("ordinal")
-            records.append(
-                {
-                    "source_id": source_id,
-                    "ordinal": int(ordinal) if isinstance(ordinal, int) else 0,
-                }
-            )
-        return records
-    raw_ids = metadata.get("covered_source_message_ids")
-    if not isinstance(raw_ids, list):
-        return []
+def _compact_job_source_messages(
+    store: StateStore,
+    job: HandoverExtractionJob,
+) -> list[SessionMessage]:
+    previous_compressed = store.find_latest_compressed_message(
+        job.session_id,
+        before_ordinal=job.compressed_message_ordinal,
+    )
+    boundary_ordinal = previous_compressed.ordinal if previous_compressed is not None else 0
     return [
-        {"source_id": item, "ordinal": 0}
-        for item in raw_ids
-        if isinstance(item, str) and item.strip()
+        message
+        for message in store.list_session_messages(
+            job.session_id,
+            after_ordinal=boundary_ordinal,
+        )
+        if message.kind != "compressed_message"
+        and message.ordinal <= job.compression_point_ordinal
     ]
 
 
@@ -696,44 +642,6 @@ def _source_status(
         return None
 
 
-def _backlog_runtime_trace_sources(
-    store: StateStore,
-    session_id: str,
-) -> tuple[_RuntimeTraceSource, ...]:
-    return tuple(
-        _RuntimeTraceSource(trace)
-        for trace in store.list_runtime_traces(session_id)
-        if trace.event_type in _BACKLOG_TRACE_EVENT_TYPES
-    )
-
-
-def _runtime_traces_by_ids(store: StateStore, trace_ids: Sequence[str]) -> list[RuntimeTrace]:
-    if not trace_ids:
-        return []
-    placeholders = ",".join("?" for _ in trace_ids)
-    with store.connect() as conn:
-        rows = conn.execute(
-            f"""
-            SELECT *
-            FROM runtime_traces
-            WHERE id IN ({placeholders})
-            """,
-            list(trace_ids),
-        ).fetchall()
-    by_id = {
-        str(row["id"]): RuntimeTrace(
-            id=row["id"],
-            session_id=row["session_id"],
-            event_type=row["event_type"],
-            content=row["content"],
-            timestamp=row["timestamp"],
-            metadata=_loads_dict(row["metadata"]),
-        )
-        for row in rows
-    }
-    return [by_id[trace_id] for trace_id in trace_ids if trace_id in by_id]
-
-
 def _has_pending_handover(store: StateStore, session_id: str) -> bool:
     traces = store.list_runtime_traces(session_id)
     pending: set[int] = set()
@@ -763,22 +671,6 @@ def _has_active_extraction_window(
         ):
             return True
     return False
-
-
-def _render_source_text(
-    *,
-    messages: Sequence[SessionMessage],
-    traces: Sequence[RuntimeTrace],
-) -> str:
-    parts: list[str] = []
-    for message in messages:
-        parts.append(
-            f"[session_message:{message.ordinal}:{message.id}:{message.kind}] "
-            f"{message.raw_content}"
-        )
-    for trace in traces:
-        parts.append(f"[runtime_trace:{trace.id}:{trace.event_type}] {trace.content}")
-    return "\n".join(parts)
 
 
 def _window_idempotency_key(candidate: _SourceWindowCandidate) -> str:
@@ -846,7 +738,6 @@ def _validation_context(
             ordinal_start=candidate.ordinal_start,
             ordinal_end=candidate.ordinal_end,
             source_refs=window.source_refs,
-            source_text=candidate.source_text,
         ),
         allowed_about_refs=_allowed_about_refs(store, candidate.session_id),
         derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
@@ -902,7 +793,6 @@ def _mark_failed_if_needed(
 
 
 def _extraction_instruction_message(
-    source_text: str,
     *,
     context: BackgroundLLMValidationContext,
 ) -> ChatMessage:
@@ -911,7 +801,6 @@ def _extraction_instruction_message(
         "content": _EXTRACTION_INSTRUCTION.format(
             output_schema_json=_extraction_output_schema_json(),
             allowed_about_refs_json=_allowed_about_refs_json(context),
-            source_text=source_text,
         ),
     }
 
@@ -969,13 +858,6 @@ def _worker_report(
             metadata=metadata if metadata is not None else checkpoint.metadata,
         ),
     )
-
-
-def _loads_dict(value: str | None) -> dict[str, Any]:
-    if not value:
-        return {}
-    loaded = json.loads(value)
-    return loaded if isinstance(loaded, dict) else {}
 
 
 __all__ = ["MemoryExtractionWorker"]

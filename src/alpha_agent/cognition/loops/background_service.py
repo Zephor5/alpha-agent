@@ -385,17 +385,22 @@ class BackgroundCognitionService:
             return stamped
 
     def _worker_config(self) -> SimpleNamespace:
-        all_session_ids = tuple(self.store.list_session_ids())
         active_session_ids = tuple(str(item) for item in self.active_session_ids())
+        eligible_inactive_session_ids = _eligible_inactive_session_ids(
+            self.store,
+            active_session_ids=frozenset(active_session_ids),
+            inactivity_threshold=timedelta(
+                hours=self.config.extraction.inactivity_threshold_hours
+            ),
+        )
         return SimpleNamespace(
             dry_run=False,
             llm_provider=self.llm_provider,
             llm_trace_logger=self.llm_trace_logger,
             tools=self.tools,
             active_session_ids=active_session_ids,
-            inactive_session_ids=all_session_ids,
+            inactive_session_ids=eligible_inactive_session_ids,
             intake_batch_size=self.config.intake.batch_size,
-            source_batch_size=self.config.extraction.batch_size,
             consolidation_batch_size=self.config.consolidation.batch_size,
             conflict_batch_size=self.config.conflict.batch_size,
             summary_batch_size=self.config.summary.batch_size,
@@ -410,7 +415,18 @@ class BackgroundCognitionService:
         if _pending_intake_count(self.state_service) >= self.config.intake.min_sources:
             _append_if_present(eligible, workers_by_name, SourceIntakeWorker.name)
         if (
-            _pending_extraction_count(self.state_service)
+            _pending_extraction_count(
+                self.state_service,
+                inactive_session_ids=_eligible_inactive_session_ids(
+                    self.store,
+                    active_session_ids=frozenset(
+                        str(item) for item in self.active_session_ids()
+                    ),
+                    inactivity_threshold=timedelta(
+                        hours=self.config.extraction.inactivity_threshold_hours
+                    ),
+                ),
+            )
             >= self.config.extraction.min_sources
         ):
             _append_if_present(eligible, workers_by_name, MemoryExtractionWorker.name)
@@ -510,18 +526,91 @@ def _pending_intake_count(state_service: CognitionStateStore) -> int:
     )
 
 
-def _pending_extraction_count(state_service: CognitionStateStore) -> int:
-    return sum(
-        1
-        for source_ref, target_unit in _raw_sources(state_service.store)
-        if _source_status(
-            state_service,
-            source_ref,
-            stage=BackgroundStage.EXTRACTION,
-            target_unit=target_unit,
-        )
-        in _RETRYABLE_SOURCE_STATUSES
-    )
+def _eligible_inactive_session_ids(
+    store: StateStore,
+    *,
+    active_session_ids: frozenset[str],
+    inactivity_threshold: timedelta,
+) -> tuple[str, ...]:
+    cutoff = utc_now() - inactivity_threshold
+    eligible: list[str] = []
+    for session_id in store.list_session_ids():
+        if session_id in active_session_ids:
+            continue
+        latest_activity = _latest_session_message_activity(store, session_id)
+        if latest_activity is not None and latest_activity <= cutoff:
+            eligible.append(session_id)
+    return tuple(eligible)
+
+
+def _latest_session_message_activity(
+    store: StateStore,
+    session_id: str,
+) -> datetime | None:
+    latest: datetime | None = None
+    for message in store.list_session_messages(session_id):
+        for raw in (message.created_at, message.updated_at):
+            parsed = _parse_instant(raw)
+            if parsed is not None and (latest is None or parsed > latest):
+                latest = parsed
+    return latest
+
+
+def _parse_instant(raw: object | None) -> datetime | None:
+    if raw is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _pending_extraction_count(
+    state_service: CognitionStateStore,
+    *,
+    inactive_session_ids: Sequence[str],
+) -> int:
+    count = 0
+    store = state_service.store
+    for session_id in inactive_session_ids:
+        if _has_pending_handover(store, session_id):
+            continue
+        target_unit = f"session:{session_id}"
+        compressed = store.find_latest_compressed_message(session_id)
+        boundary_ordinal = compressed.ordinal if compressed is not None else 0
+        for message in store.list_session_messages(
+            session_id,
+            after_ordinal=boundary_ordinal,
+        ):
+            if message.kind == "compressed_message":
+                continue
+            source_ref = BackgroundSourceRef("session_message", message.id)
+            if _source_status(
+                state_service,
+                source_ref,
+                stage=BackgroundStage.EXTRACTION,
+                target_unit=target_unit,
+            ) in _RETRYABLE_SOURCE_STATUSES:
+                count += 1
+    return count
+
+
+def _has_pending_handover(store: StateStore, session_id: str) -> bool:
+    pending: set[int] = set()
+    for trace in store.list_runtime_traces(session_id):
+        if not trace.event_type.startswith("handover_compression."):
+            continue
+        point = _optional_int(trace.metadata.get("compression_point_ordinal"))
+        if point is None:
+            continue
+        if trace.event_type == "handover_compression.started":
+            pending.add(point)
+        elif trace.event_type in {"handover_compression.completed", "handover_compression.failed"}:
+            pending.discard(point)
+    return bool(pending)
 
 
 def _pending_consolidation_count(state_service: CognitionStateStore) -> int:
@@ -638,6 +727,16 @@ def _is_expired_instant(raw: object | None) -> bool:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed < datetime.now(UTC)
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
 
 
 def _worker_report(

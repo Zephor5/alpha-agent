@@ -676,7 +676,6 @@ def _validation_context(
             stage=BackgroundStage.SUMMARY,
             target_unit=window.target_unit,
             source_refs=window.source_refs,
-            source_text=target.source_text,
         ),
         input_belief_ids=frozenset(str(item.id) for item in target.source_beliefs),
         allowed_about_refs=frozenset((ref.kind, ref.id) for ref in target.about),

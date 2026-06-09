@@ -79,8 +79,8 @@ batch_size = 5
 min_sources = 2
 
 [cognition.background.extraction]
-batch_size = 6
 min_sources = 3
+inactivity_threshold_hours = 18
 
 [cognition.background.consolidation]
 batch_size = 7
@@ -164,8 +164,8 @@ api_key = "tvly-file-key"
     assert config.cognition_background.tick_timeout_seconds == 9
     assert config.cognition_background.intake.batch_size == 5
     assert config.cognition_background.intake.min_sources == 2
-    assert config.cognition_background.extraction.batch_size == 6
     assert config.cognition_background.extraction.min_sources == 3
+    assert config.cognition_background.extraction.inactivity_threshold_hours == 18
     assert config.cognition_background.consolidation.batch_size == 7
     assert config.cognition_background.consolidation.min_drafts == 4
     assert config.cognition_background.conflict.batch_size == 8
@@ -295,8 +295,11 @@ allowed_workdirs = ["."]
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_TICK_TIMEOUT_SECONDS", "3")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_INTAKE_BATCH_SIZE", "4")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_INTAKE_MIN_SOURCES", "5")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_EXTRACTION_BATCH_SIZE", "6")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_EXTRACTION_MIN_SOURCES", "7")
+    monkeypatch.setenv(
+        "ALPHA_COGNITION_BACKGROUND_EXTRACTION_INACTIVITY_THRESHOLD_HOURS",
+        "18",
+    )
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_BATCH_SIZE", "8")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MIN_DRAFTS", "9")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_CONFLICT_BATCH_SIZE", "10")
@@ -344,8 +347,8 @@ allowed_workdirs = ["."]
     assert config.cognition_background.tick_timeout_seconds == 3
     assert config.cognition_background.intake.batch_size == 4
     assert config.cognition_background.intake.min_sources == 5
-    assert config.cognition_background.extraction.batch_size == 6
     assert config.cognition_background.extraction.min_sources == 7
+    assert config.cognition_background.extraction.inactivity_threshold_hours == 18
     assert config.cognition_background.consolidation.batch_size == 8
     assert config.cognition_background.consolidation.min_drafts == 9
     assert config.cognition_background.conflict.batch_size == 10
@@ -685,6 +688,7 @@ interval_seconds = 7
 [cognition.background.extraction]
 batch_size = 3
 min_sources = 2
+inactivity_threshold_hours = 20
 
 [cognition.consolidation]
 enabled = true
@@ -703,8 +707,9 @@ interval_seconds = 11
     assert "[cognition.background.extraction]" in saved
     assert "[cognition.consolidation]" in saved
     assert "interval_seconds = 7" in saved
-    assert "batch_size = 3" in saved
+    assert "batch_size = 3" not in saved
     assert "min_sources = 2" in saved
+    assert "inactivity_threshold_hours = 20" in saved
     assert "interval_seconds = 11" in saved
 
 

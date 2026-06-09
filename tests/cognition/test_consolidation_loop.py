@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TypedDict
 
@@ -245,7 +245,7 @@ def test_background_service_tick_runs_bounded_intake_chunk(tmp_path) -> None:
             interval_seconds=1,
             tick_timeout_seconds=1,
             intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
-            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=99),
+            extraction=BackgroundExtractionConfig(min_sources=99),
             consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
             conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
@@ -292,7 +292,10 @@ def test_background_service_writes_worker_llm_debug_trace(tmp_path) -> None:
             interval_seconds=1,
             tick_timeout_seconds=1,
             intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
-            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=1),
+            extraction=BackgroundExtractionConfig(
+                min_sources=1,
+                inactivity_threshold_hours=0,
+            ),
             consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
             conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
@@ -313,6 +316,113 @@ def test_background_service_writes_worker_llm_debug_trace(tmp_path) -> None:
     ]
     assert [entry["event"] for entry in entries] == ["llm.request", "llm.response"]
     assert entries[0]["metadata"]["worker"]["name"] == "memory_extraction"
+
+
+def test_background_service_skips_extraction_for_session_under_inactivity_threshold(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    service = CognitionStateStore(store)
+    provider = _RecordingLLMProvider(_llm_json())
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=1,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=99),
+            extraction=BackgroundExtractionConfig(min_sources=1),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    reports = background.tick_once()
+
+    assert reports == []
+    assert provider.calls == []
+
+
+def test_background_service_runs_extraction_for_session_past_inactivity_threshold(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    created_at = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+        created_at=created_at,
+    )
+    service = CognitionStateStore(store)
+    provider = _RecordingLLMProvider(_llm_json())
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=1,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=99),
+            extraction=BackgroundExtractionConfig(min_sources=1),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == ["memory_extraction"]
+    assert provider.calls
+
+
+def test_background_service_excludes_active_session_from_extraction(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    created_at = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+        created_at=created_at,
+    )
+    service = CognitionStateStore(store)
+    provider = _RecordingLLMProvider(_llm_json())
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=1,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=99),
+            extraction=BackgroundExtractionConfig(min_sources=1),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+        llm_provider=provider,
+        active_session_ids=lambda: ("s1",),
+    )
+
+    reports = background.tick_once()
+
+    assert reports == []
+    assert provider.calls == []
 
 
 def test_background_service_default_workers_share_service_llm_trace_logger(tmp_path) -> None:
@@ -342,7 +452,7 @@ def test_background_service_ignores_handover_traces_as_scheduling_sources(
         session_id="s1",
         event_type="handover_compression.completed",
         content="Handover compression completed.",
-        metadata={"covered_source_message_ids": ["msg:missing"]},
+        metadata={"covered_ordinal_start": 1, "covered_ordinal_end": 1},
     )
     service = CognitionStateStore(store)
     intake = _RecordingScheduledWorker("source_intake")
@@ -355,7 +465,10 @@ def test_background_service_ignores_handover_traces_as_scheduling_sources(
             interval_seconds=1,
             tick_timeout_seconds=1,
             intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
-            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=1),
+            extraction=BackgroundExtractionConfig(
+                min_sources=1,
+                inactivity_threshold_hours=0,
+            ),
             consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
             conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
@@ -390,7 +503,7 @@ def test_background_service_does_not_start_worker_without_remaining_tick_budget(
             interval_seconds=1,
             tick_timeout_seconds=0,
             intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
-            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=99),
+            extraction=BackgroundExtractionConfig(min_sources=99),
             consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
             conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
@@ -434,7 +547,10 @@ def test_background_service_stops_before_subsequent_worker_after_deadline(
             interval_seconds=1,
             tick_timeout_seconds=1,
             intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
-            extraction=BackgroundExtractionConfig(batch_size=12, min_sources=1),
+            extraction=BackgroundExtractionConfig(
+                min_sources=1,
+                inactivity_threshold_hours=0,
+            ),
             consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
             conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
@@ -544,7 +660,6 @@ def test_background_llm_acceptance_attaches_program_provenance_and_checkpoints_a
         _validation_context(
             window_id=window.window_id,
             source_refs=(source,),
-            source_text=message.raw_content,
         ),
         window_id=window.window_id,
         run_id=run.run_id,
@@ -1351,7 +1466,6 @@ def test_consolidation_rejects_invalid_lifecycle_transition_without_partial_writ
                 window_id=window.window_id,
                 stage=BackgroundStage.CONSOLIDATION,
                 source_refs=(source,),
-                source_text=str(extracted.content),
                 target_unit="scope:global",
                 allowed_target_belief_ids=frozenset({str(target.id)}),
                 derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
@@ -1526,21 +1640,24 @@ def test_conflict_review_worker_prompt_includes_output_schema_and_valid_targets(
     assert f'"{target.id}"' in instruction
 
 
-def test_background_llm_contract_rejects_output_outside_source_window_when_determinable() -> None:
-    with pytest.raises(BackgroundLLMValidationError, match="source window"):
-        validate_background_llm_json(
-            _llm_json(
-                payload={
-                    "atomic_belief_draft": {
-                        "memory_kind": MemoryKind.PREFERENCE.value,
-                        "scope": BeliefScope.GLOBAL.value,
-                        "about": [],
-                        "content": "The project uses Poetry.",
-                    }
+def test_background_llm_contract_allows_content_without_source_text_validation() -> None:
+    validated = validate_background_llm_json(
+        _llm_json(
+            payload={
+                "atomic_belief_draft": {
+                    "memory_kind": MemoryKind.PREFERENCE.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "content": "The project uses Poetry.",
                 }
-            ),
-            _validation_context(source_text="Alpha Agent uses uv for package management."),
-        )
+            }
+        ),
+        _validation_context(),
+    )
+
+    draft = validated.payloads[0]
+    assert isinstance(draft, ValidatedAtomicBeliefDraft)
+    assert draft.content == "The project uses Poetry."
 
 
 def test_project_scoped_draft_rejects_invented_non_project_about_ref() -> None:
@@ -1948,21 +2065,36 @@ def test_memory_extraction_worker_normalizes_project_descriptor_from_llm_draft(
     assert belief.about == [service.project_reference("alpha agent")]
 
 
-def test_memory_extraction_worker_selects_inactive_backlog_sources_and_runtime_traces(
+def test_memory_extraction_worker_selects_backlog_after_compressed_boundary_unbatched(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
     service = CognitionStateStore(store)
-    message = store.append_session_message(
+    old = store.append_session_message(
         session_id="s1",
         kind="user_message",
         llm_role="user",
-        raw_content="Tool output should be checked for project facts.",
+        raw_content="Old context before compact should not be extracted.",
     )
+    compressed = store.append_compressed_message(
+        session_id="s1",
+        raw_content="Latest handover context.",
+        compression_point_ordinal=old.ordinal,
+        compression_version="handover-compression-v1",
+    )
+    messages = [
+        store.append_session_message(
+            session_id="s1",
+            kind="user_message",
+            llm_role="user",
+            raw_content=f"Post compact fact {index}.",
+        )
+        for index in range(13)
+    ]
     trace = store.append_runtime_trace(
         session_id="s1",
         event_type="tool.completed",
-        content="Tool confirmed Alpha Agent uses ruff checks.",
+        content="Runtime trace must not be an extraction source.",
     )
     provider = _RecordingLLMProvider(
         _llm_json(
@@ -1971,7 +2103,7 @@ def test_memory_extraction_worker_selects_inactive_backlog_sources_and_runtime_t
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "content": "Alpha Agent uses ruff checks.",
+                    "content": "Post compact fact 12.",
                 }
             }
         )
@@ -1989,15 +2121,22 @@ def test_memory_extraction_worker_selects_inactive_backlog_sources_and_runtime_t
         target_unit="session:s1",
     )[0]
     assert window.metadata["source_path"] == "inactive_backlog"
-    assert window.metadata["source_message_ids"] == [message.id]
-    assert window.metadata["source_trace_ids"] == [trace.id]
-    assert set(window.source_refs) == {
-        BackgroundSourceRef("session_message", message.id),
-        BackgroundSourceRef("runtime_trace", trace.id),
-    }
+    assert window.metadata["source_message_ids"] == [message.id for message in messages]
+    assert "source_trace_ids" not in window.metadata
+    assert window.metadata["compressed_message_id"] == compressed.id
+    assert window.metadata["boundary_ordinal"] == compressed.ordinal
+    assert window.source_refs == tuple(
+        BackgroundSourceRef("session_message", message.id) for message in messages
+    )
+    assert len(window.source_refs) == 13
     evidence = {(item.kind, item.id) for item in service.beliefs.list_active()[0].sources}
-    assert ("session_message", message.id) in evidence
-    assert ("runtime_trace", trace.id) in evidence
+    assert ("session_message", old.id) not in evidence
+    assert ("session_message", compressed.id) not in evidence
+    assert ("runtime_trace", trace.id) not in evidence
+    assert {("session_message", message.id) for message in messages}.issubset(evidence)
+    prompt_messages = provider.calls[0]["messages"]
+    assert "Latest handover context." in str(prompt_messages)
+    assert "Old context before compact should not be extracted." not in str(prompt_messages)
 
 
 def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs(
@@ -2049,6 +2188,8 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
     assert '{"id": "s1", "kind": "session"}' in instruction
     assert '{"id": "subject:self", "kind": "subject"}' in instruction
     assert "project_descriptor" in instruction
+    assert "Selected source window" not in instruction
+    assert "User prefers Chinese replies." not in instruction
 
 
 def test_memory_extraction_worker_writes_llm_debug_trace(tmp_path) -> None:
@@ -2373,7 +2514,6 @@ def _validation_context(
     source_refs: tuple[BackgroundSourceRef, ...] = (
         BackgroundSourceRef("session_message", "msg-1"),
     ),
-    source_text: str | None = "Alpha Agent uses uv.",
     target_unit: str | None = None,
     allowed_target_belief_ids: frozenset[str] = frozenset({"belief:allowed"}),
     derivation_stage: DerivationStage = DerivationStage.BACKGROUND_EXTRACTED,
@@ -2388,7 +2528,6 @@ def _validation_context(
             ordinal_start=1,
             ordinal_end=1,
             source_refs=source_refs,
-            source_text=source_text,
         ),
         allowed_target_belief_ids=allowed_target_belief_ids,
         allowed_about_refs=frozenset({("counterpart", "counterpart:user-a")}),

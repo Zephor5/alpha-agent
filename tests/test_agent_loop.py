@@ -1138,10 +1138,10 @@ def test_pre_user_compression_submits_direct_compact_extraction_job(tmp_path) ->
     assert job.session_id == "s1"
     assert job.compressed_message_id == store.list_session_messages("s1")[2].id
     assert handover_prompt_prefix_hash(job.prompt_prefix_messages) == job.prompt_prefix_hash
-    assert [item["source_id"] for item in job.covered_source_message_refs] == [
-        old_user.id,
-        old_assistant.id,
-    ]
+    assert old_user.ordinal < job.compression_point_ordinal
+    assert job.compression_point_ordinal == old_assistant.ordinal
+    assert "covered_source_message_refs" not in job.to_record()
+    assert "covered_source_message_ids" not in job.to_record()
 
 
 def test_failed_pre_user_compression_does_not_persist_pending_user(tmp_path) -> None:

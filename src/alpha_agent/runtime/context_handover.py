@@ -56,7 +56,6 @@ class HandoverExtractionJob:
     prompt_prefix_messages: Sequence[ChatMessage]
     prompt_prefix_hash: str
     tools_schema_hash: str
-    covered_source_message_refs: Sequence[Mapping[str, Any]]
     provider: str
     model: str | None
 
@@ -74,9 +73,6 @@ class HandoverExtractionJob:
             "prompt_prefix_messages": list(self.prompt_prefix_messages),
             "prompt_prefix_hash": self.prompt_prefix_hash,
             "tools_schema_hash": self.tools_schema_hash,
-            "covered_source_message_refs": [
-                dict(item) for item in self.covered_source_message_refs
-            ],
             "provider": self.provider,
             "model": self.model,
         }
@@ -259,11 +255,6 @@ def compress_session_context(
         prompt_prefix_messages=tuple(llm_messages),
         prompt_prefix_hash=str(completed_metadata["prompt_prefix_hash"]),
         tools_schema_hash=str(completed_metadata["tools_schema_hash"]),
-        covered_source_message_refs=tuple(
-            dict(item)
-            for item in completed_metadata.get("covered_source_message_refs", [])
-            if isinstance(item, Mapping)
-        ),
         provider=response.provider,
         model=response.model,
     )
@@ -292,33 +283,15 @@ def _covered_source_metadata(
     projection: SessionContextProjection,
     compression_point_ordinal: int,
 ) -> dict[str, Any]:
-    context_refs = [
-        _session_message_ref_record(message)
-        for message in projection.source_messages
-        if message.ordinal <= compression_point_ordinal
-    ]
-    covered_refs = [
-        _session_message_ref_record(message)
+    covered_ordinals = [
+        message.ordinal
         for message in projection.source_messages
         if message.kind != "compressed_message"
         and message.ordinal <= compression_point_ordinal
     ]
-    ordinals = [int(item["ordinal"]) for item in covered_refs]
     return {
-        "context_source_message_refs": context_refs,
-        "covered_source_message_refs": covered_refs,
-        "covered_source_message_ids": [str(item["source_id"]) for item in covered_refs],
-        "covered_ordinal_start": min(ordinals) if ordinals else None,
-        "covered_ordinal_end": max(ordinals) if ordinals else None,
-    }
-
-
-def _session_message_ref_record(message: SessionMessage) -> dict[str, Any]:
-    return {
-        "source_type": "session_message",
-        "source_id": message.id,
-        "ordinal": message.ordinal,
-        "kind": message.kind,
+        "covered_ordinal_start": min(covered_ordinals) if covered_ordinals else None,
+        "covered_ordinal_end": max(covered_ordinals) if covered_ordinals else None,
     }
 
 

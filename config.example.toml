@@ -76,8 +76,8 @@ batch_size = 64
 min_sources = 1
 
 [cognition.background.extraction]
-batch_size = 12
 min_sources = 1
+inactivity_threshold_hours = 24
 
 [cognition.background.consolidation]
 batch_size = 12

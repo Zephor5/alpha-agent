@@ -631,7 +631,6 @@ def _validation_context_for_candidate(
             stage=BackgroundStage.CONSOLIDATION,
             target_unit=window.target_unit,
             source_refs=window.source_refs,
-            source_text=candidate.source_text,
         ),
         allowed_target_belief_ids=target_ids,
         input_belief_ids=frozenset(
@@ -654,7 +653,6 @@ def _validation_context_for_conflict(
             stage=BackgroundStage.CONFLICT_REVIEW,
             target_unit=window.target_unit,
             source_refs=window.source_refs,
-            source_text=_source_text_from_window(window),
         ),
         allowed_target_belief_ids=target_ids,
         input_belief_ids=target_ids,
@@ -680,11 +678,6 @@ def _beliefs_by_ids(
         if isinstance(belief, AtomicBelief) and belief.lifecycle == BeliefLifecycle.ACTIVE:
             beliefs.append(belief)
     return tuple(beliefs)
-
-
-def _source_text_from_window(window: BackgroundSourceWindow) -> str | None:
-    raw = window.metadata.get("source_text")
-    return raw if isinstance(raw, str) and raw.strip() else None
 
 
 def _allowed_about_refs(beliefs: Sequence[AtomicBelief]) -> frozenset[tuple[str, str]]:
