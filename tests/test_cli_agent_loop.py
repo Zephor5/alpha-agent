@@ -331,8 +331,9 @@ class _MemoryTraceProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del messages, tools, tool_choice
+        del messages, tools, tool_choice, response_format
         self.calls += 1
         if self.calls == 1:
             arguments = {

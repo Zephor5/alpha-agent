@@ -216,8 +216,16 @@ class _RecordingLLMProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        self.calls.append({"messages": list(messages), "tools": tools, "tool_choice": tool_choice})
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "response_format": response_format,
+            }
+        )
         return LLMResponse(content=self.response, model="test-summary", provider=self.name)
 
 

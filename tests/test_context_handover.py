@@ -31,6 +31,7 @@ class _ProviderCall(TypedDict):
     messages: list[ChatMessage]
     tools: Sequence[LLMToolDefinitionInput] | None
     tool_choice: LLMToolChoice | None
+    response_format: object | None
 
 
 def _store(tmp_path) -> StateStore:
@@ -59,12 +60,14 @@ class _RecordingProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
         self.calls.append(
             {
                 "messages": list(messages),
                 "tools": tools,
                 "tool_choice": tool_choice,
+                "response_format": response_format,
             }
         )
         return LLMResponse(content=self.response, model="test-model", provider=self.name)
@@ -82,8 +85,9 @@ class _FailingProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del messages, tools, tool_choice
+        del messages, tools, tool_choice, response_format
         self.calls += 1
         raise RuntimeError("provider failed")
 

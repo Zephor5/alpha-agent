@@ -14,6 +14,7 @@ from alpha_agent.config import AlphaConfig
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
+    LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
@@ -45,9 +46,11 @@ class CodexResponsesProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: LLMResponseFormat | None = None,
     ) -> LLMResponse:
         """Call the Responses API and normalize the assistant text."""
 
+        del tools, tool_choice, response_format
         body = codex_responses_payload(model=self.model, messages=messages)
         response = httpx.post(
             f"{self.base_url}/responses",

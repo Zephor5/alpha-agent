@@ -533,8 +533,9 @@ class _MemoryProposeProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del messages, tool_choice
+        del messages, tool_choice, response_format
         self.calls += 1
         self.tool_names_seen.append([_tool_name(tool) for tool in tools or []])
         if self.calls == 1:

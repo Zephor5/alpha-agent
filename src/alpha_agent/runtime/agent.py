@@ -53,6 +53,7 @@ from alpha_agent.llm.base import (
     ChatMessage,
     LLMProvider,
     LLMResponse,
+    LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
@@ -215,12 +216,15 @@ class LLMCompletionService:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: LLMResponseFormat | None = None,
     ) -> RetriedLLMCompletion:
         kwargs: dict[str, Any] = {}
         if tools is not None:
             kwargs["tools"] = tools
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
+        if response_format is not None:
+            kwargs["response_format"] = response_format
 
         for attempt in range(self.max_retries + 1):
             try:

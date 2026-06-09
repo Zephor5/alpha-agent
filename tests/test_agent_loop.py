@@ -1259,7 +1259,9 @@ class _RecordingProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
+        del tools, tool_choice, response_format
         self.calls.append(messages)
         return LLMResponse(content=self.response, model="test", provider=self.name)
 
@@ -1382,8 +1384,9 @@ class _QueuedRecordingProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del tools, tool_choice
+        del tools, tool_choice, response_format
         self.calls.append(messages)
         response = self.responses.pop(0)
         return LLMResponse(content=response, model="test", provider=self.name)
@@ -1401,8 +1404,9 @@ class _FailingOnceProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del tools, tool_choice
+        del tools, tool_choice, response_format
         self.calls.append(messages)
         raise RuntimeError("provider failed")
 
@@ -1426,7 +1430,9 @@ class _RawMetadataProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
+        del messages, tools, tool_choice, response_format
         return LLMResponse(
             content="final answer",
             model="test",
@@ -1455,7 +1461,9 @@ class _ToolCallingProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
+        del messages, tools, tool_choice, response_format
         self.calls += 1
         if self.calls == 1:
             return LLMResponse(
@@ -1487,8 +1495,9 @@ class _ToolLoopCompressionProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del tools, tool_choice
+        del tools, tool_choice, response_format
         self.calls.append([_copy_chat_message(message) for message in messages])
         if len(self.calls) == 1:
             return LLMResponse(
@@ -1522,8 +1531,9 @@ class _StructuredToolCallingProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del tools, tool_choice
+        del tools, tool_choice, response_format
         self.calls.append([_copy_chat_message(message) for message in messages])
         if len(self.calls) == 1:
             return LLMResponse(
@@ -1557,8 +1567,9 @@ class _MemoryRecallCallingProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del tool_choice
+        del tool_choice, response_format
         self.call_count += 1
         self.calls.append([_copy_chat_message(message) for message in messages])
         self.tool_names_seen.append([_tool_name(tool) for tool in tools or []])
@@ -1689,8 +1700,9 @@ class _RepeatedToolCallingProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
     ) -> LLMResponse:
-        del tools, tool_choice
+        del tools, tool_choice, response_format
         self.call_count += 1
         self.calls.append([_copy_chat_message(message) for message in messages])
         if self.call_count <= 4 or self.call_count == 6:

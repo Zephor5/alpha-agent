@@ -41,7 +41,7 @@ from alpha_agent.cognition.processing_ledger import (
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionStateStore
-from alpha_agent.llm.base import ChatMessage, LLMProvider
+from alpha_agent.llm.base import JSON_OBJECT_RESPONSE_FORMAT, ChatMessage, LLMProvider
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.utils.time import utc_now_iso
 
@@ -260,6 +260,7 @@ class MemoryConsolidationWorker:
             response = llm_provider.complete(
                 [_consolidation_instruction_message(candidate)],
                 tool_choice="none",
+                response_format=JSON_OBJECT_RESPONSE_FORMAT,
             )
             written = state_service.accept_background_llm_json(
                 response.content,
@@ -431,6 +432,7 @@ class MemoryConflictReviewWorker:
             response = llm_provider.complete(
                 [_conflict_review_instruction_message(window, active_beliefs)],
                 tool_choice="none",
+                response_format=JSON_OBJECT_RESPONSE_FORMAT,
             )
             written = state_service.accept_background_llm_json(
                 response.content,

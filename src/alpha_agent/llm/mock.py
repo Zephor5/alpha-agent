@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
+    LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
@@ -23,7 +24,9 @@ class MockLLMProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: LLMResponseFormat | None = None,
     ) -> LLMResponse:
+        del tools, tool_choice, response_format
         user_message = _message_content(messages[-1]) if messages else ""
         current_message = self._extract_current_message(user_message)
         content = f"Mock response: I heard you say: {current_message}."

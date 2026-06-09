@@ -97,6 +97,15 @@ class LLMNamedToolChoice(TypedDict):
 LLMToolChoice = Literal["none", "auto", "required"] | LLMNamedToolChoice
 
 
+class LLMResponseFormat(TypedDict):
+    """Provider-neutral response format request."""
+
+    type: Literal["text", "json_object"]
+
+
+JSON_OBJECT_RESPONSE_FORMAT: LLMResponseFormat = {"type": "json_object"}
+
+
 @dataclass(frozen=True)
 class LLMToolDefinition:
     """Provider-neutral function tool definition."""
@@ -176,6 +185,14 @@ def openai_compatible_tool_choice_payload(
         "type": tool_choice["type"],
         "function": dict(tool_choice["function"]),
     }
+
+
+def openai_compatible_response_format_payload(
+    response_format: LLMResponseFormat,
+) -> dict[str, str]:
+    """Convert a neutral response format into OpenAI-compatible wire shape."""
+
+    return {"type": response_format["type"]}
 
 
 @dataclass(frozen=True)
@@ -336,5 +353,6 @@ class LLMProvider(Protocol):
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: LLMResponseFormat | None = None,
     ) -> LLMResponse:
         """Complete a chat-style prompt."""

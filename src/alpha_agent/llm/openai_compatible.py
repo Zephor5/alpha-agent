@@ -12,10 +12,12 @@ from alpha_agent.config import AlphaConfig
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
+    LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
     chat_completion_messages_payload,
     openai_compatible_response,
+    openai_compatible_response_format_payload,
     openai_compatible_tool_choice_payload,
     openai_compatible_tool_payload,
 )
@@ -44,6 +46,7 @@ class OpenAICompatibleProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: LLMResponseFormat | None = None,
     ) -> LLMResponse:
         """Call the configured compatible chat completions API."""
 
@@ -55,6 +58,10 @@ class OpenAICompatibleProvider:
             body["tools"] = [openai_compatible_tool_payload(tool) for tool in tools]
         if tool_choice is not None:
             body["tool_choice"] = openai_compatible_tool_choice_payload(tool_choice)
+        if response_format is not None:
+            body["response_format"] = openai_compatible_response_format_payload(
+                response_format
+            )
         response = httpx.post(
             f"{self.base_url}/chat/completions",
             headers={

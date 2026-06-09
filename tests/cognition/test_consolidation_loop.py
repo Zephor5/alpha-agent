@@ -67,6 +67,7 @@ from alpha_agent.config import (
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
+    LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinition,
     LLMToolDefinitionInput,
@@ -1541,6 +1542,7 @@ def test_memory_extraction_worker_processes_direct_compact_job_with_program_prov
     extraction_call = extraction_provider.calls[0]
     assert extraction_call["tools"] == tools
     assert extraction_call["tool_choice"] == "none"
+    assert extraction_call["response_format"] == {"type": "json_object"}
     assert handover_prompt_prefix_hash(extraction_call["messages"][:-1]) == (
         completed_trace.metadata["prompt_prefix_hash"]
     )
@@ -2061,6 +2063,7 @@ class _ProviderCall(TypedDict):
     messages: list[ChatMessage]
     tools: Sequence[LLMToolDefinitionInput] | None
     tool_choice: LLMToolChoice | None
+    response_format: LLMResponseFormat | None
 
 
 class _RecordingLLMProvider:
@@ -2081,8 +2084,16 @@ class _RecordingLLMProvider:
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
         tool_choice: LLMToolChoice | None = None,
+        response_format: LLMResponseFormat | None = None,
     ) -> LLMResponse:
-        self.calls.append({"messages": list(messages), "tools": tools, "tool_choice": tool_choice})
+        self.calls.append(
+            {
+                "messages": list(messages),
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "response_format": response_format,
+            }
+        )
         content = self.responses.pop(0) if self.responses else _llm_json()
         return LLMResponse(content=content, model=self.model, provider=self.name)
 

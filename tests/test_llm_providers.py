@@ -174,6 +174,33 @@ def test_deepseek_provider_sends_tools_and_tool_choice_wire_shape(
     }
 
 
+def test_deepseek_provider_sends_response_format_wire_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs["json"]
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-1",
+                "model": "deepseek-chat",
+                "choices": [{"message": {"content": '{"ok":true}'}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+
+    DeepSeekProvider(config).complete(
+        [{"role": "user", "content": "Return JSON."}],
+        response_format={"type": "json_object"},
+    )
+
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+
+
 def test_deepseek_provider_parses_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     raw_tool_calls = [
         {
@@ -535,6 +562,37 @@ def test_openai_compatible_provider_sends_tools_with_none_tool_choice(
     ]
 
 
+def test_openai_compatible_provider_sends_response_format_wire_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs["json"]
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-compat",
+                "model": "gpt-compatible",
+                "choices": [{"message": {"content": '{"ok":true}'}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(
+        compatible_base_url="https://compatible.example",
+        compatible_api_key="compatible-key",
+        llm_model="gpt-compatible",
+    )
+
+    OpenAICompatibleProvider(config).complete(
+        [{"role": "user", "content": "Return JSON."}],
+        response_format={"type": "json_object"},
+    )
+
+    assert captured["json"]["response_format"] == {"type": "json_object"}
+
+
 def test_codex_provider_uses_explicit_oauth_access_token() -> None:
     config = _config(codex_access_token="codex-token")
 
@@ -576,7 +634,8 @@ def test_codex_provider_uses_responses_payload(monkeypatch: pytest.MonkeyPatch) 
         [
             {"role": "system", "content": "You are Alpha."},
             {"role": "user", "content": "ping"},
-        ]
+        ],
+        response_format={"type": "json_object"},
     )
 
     assert response.content == "codex pong"
@@ -591,6 +650,7 @@ def test_codex_provider_uses_responses_payload(monkeypatch: pytest.MonkeyPatch) 
         {"role": "user", "content": [{"type": "input_text", "text": "ping"}]}
     ]
     assert captured["json"]["store"] is False
+    assert "response_format" not in captured["json"]
 
 
 def test_codex_responses_payload_strips_internal_assistant_reasoning_content() -> None:

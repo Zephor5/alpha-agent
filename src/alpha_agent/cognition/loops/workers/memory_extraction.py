@@ -39,6 +39,7 @@ from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.llm.base import (
+    JSON_OBJECT_RESPONSE_FORMAT,
     ChatMessage,
     LLMProvider,
     LLMToolChoice,
@@ -379,6 +380,7 @@ def _run_candidate(
             ],
             tools=list(tools) if tools else None,
             tool_choice=_tool_choice_for_extraction(tools),
+            response_format=JSON_OBJECT_RESPONSE_FORMAT,
         )
         context = _validation_context(
             state_service.store,
