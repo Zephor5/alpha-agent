@@ -40,7 +40,7 @@ _SUPPORTED_OPERATIONS = frozenset(
     }
 )
 _EXTRACTION_OPERATION = "create_atomic_belief"
-_EXTRACTION_PAYLOAD_KEYS = frozenset({"atomic_belief_draft"})
+_EXTRACTION_PAYLOAD_KEYS = frozenset({"atomic_belief_drafts"})
 _SEMANTIC_OPERATIONS = frozenset(
     {"create", "strengthen", "supersede", "retract", "archive", "pending-confirmation"}
 )
@@ -113,7 +113,12 @@ def extraction_output_json_schema() -> dict[str, Any]:
     return _background_output_schema(
         operation=_EXTRACTION_OPERATION,
         payload_schema=_payload_schema(
-            {"atomic_belief_draft": _atomic_belief_draft_schema()}
+            {
+                "atomic_belief_drafts": {
+                    "type": "array",
+                    "items": _atomic_belief_draft_schema(),
+                }
+            }
         ),
     )
 
@@ -525,6 +530,8 @@ def _validate_payloads(
     context: BackgroundLLMValidationContext,
 ) -> tuple[ValidatedPayload, ...]:
     if operation == "create_atomic_belief":
+        if BackgroundStage(context.source_window.stage) == BackgroundStage.EXTRACTION:
+            return _validate_atomic_drafts(payload.get("atomic_belief_drafts"), context)
         return (_validate_atomic_draft(payload.get("atomic_belief_draft"), context),)
     if operation == "create_summary_belief":
         return (_validate_summary_draft(payload.get("summary_belief_draft"), context),)
@@ -563,12 +570,19 @@ def _validate_stage_output_shape(
         raise BackgroundLLMValidationError(
             "extraction stage accepts only create_atomic_belief outputs"
         )
-    extra_payload_keys = {str(key) for key in payload} - _EXTRACTION_PAYLOAD_KEYS
-    if extra_payload_keys:
-        extra = ", ".join(sorted(extra_payload_keys))
+    payload_keys = {str(key) for key in payload}
+    if payload_keys != _EXTRACTION_PAYLOAD_KEYS:
+        unexpected = payload_keys - _EXTRACTION_PAYLOAD_KEYS
+        missing = _EXTRACTION_PAYLOAD_KEYS - payload_keys
+        details = []
+        if missing:
+            details.append(f"missing payload keys: {', '.join(sorted(missing))}")
+        if unexpected:
+            details.append(f"unexpected payload keys: {', '.join(sorted(unexpected))}")
+        detail_text = "; ".join(details)
         raise BackgroundLLMValidationError(
-            "extraction payload accepts only atomic_belief_draft; "
-            f"unexpected payload keys: {extra}"
+            "extraction payload must contain exactly atomic_belief_drafts"
+            + (f"; {detail_text}" if detail_text else "")
         )
 
 
@@ -643,6 +657,15 @@ def _validate_atomic_draft(
         update_policy=_optional_dict(raw.get("update_policy")) or {},
         project_descriptor=project_descriptor,
     )
+
+
+def _validate_atomic_drafts(
+    raw: object,
+    context: BackgroundLLMValidationContext,
+) -> tuple[ValidatedAtomicBeliefDraft, ...]:
+    if not isinstance(raw, list):
+        raise BackgroundLLMValidationError("atomic_belief_drafts must be an array")
+    return tuple(_validate_atomic_draft(item, context) for item in raw)
 
 
 def _validate_summary_draft(

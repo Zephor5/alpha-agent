@@ -74,13 +74,14 @@ _ACTIVE_WINDOW_STATUSES = {
     BackgroundProgressStatus.PENDING,
     BackgroundProgressStatus.CLAIMED,
 }
-_EXTRACTION_INSTRUCTION = """Extract one atomic memory candidate from the selected source window.
+_EXTRACTION_INSTRUCTION = """Extract atomic memory candidates from the previous messages.
 
-Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
-multiple candidates. The output must validate against this JSON Schema:
+Return only one JSON object. Do not return markdown, code fences, top-level arrays, or
+commentary. Put candidates in payload.atomic_belief_drafts, using an empty array when
+nothing should be extracted. The output must validate against this JSON Schema:
 {output_schema_json}
 
-Allowed about references for this selected source window:
+Allowed about references for this session:
 {allowed_about_refs_json}
 
 Scope and reference rules:
@@ -92,9 +93,9 @@ Scope and reference rules:
   string or object; do not invent project ids.
 
 Content rules:
-- content must be directly supported by the selected source window.
+- Each content value must be directly supported by the previous messages.
 - object should be the short subject of content; omit it if content is already short.
-- requires_confirmation should be true when the memory is plausible but not safe to accept
+- requires_confirmation should be true when a memory is plausible but not safe to accept
   without human review.
 - Do not include belief ids, source ids, provenance, idempotency keys, confidence, scores,
   numeric strength fields, or update/supersede decisions."""
