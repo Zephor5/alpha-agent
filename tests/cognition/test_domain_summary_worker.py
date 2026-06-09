@@ -154,6 +154,53 @@ def test_domain_summary_worker_runs_invalidated_source_gate(tmp_path) -> None:
     assert latest.content == "Memory proposal confirmation required."
 
 
+def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    first = _consolidated_belief(
+        "belief:domain-memory-propose-1",
+        "Memory proposal confirmation required for remembered preferences.",
+        target_domain="memory_propose",
+    )
+    second = _consolidated_belief(
+        "belief:domain-memory-propose-2",
+        "Memory proposal confirmation required before changing constraints.",
+        target_domain="memory_propose",
+    )
+    service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    provider = _RecordingLLMProvider(
+        _summary_json(
+            summary_kind=SummaryKind.DOMAIN_SUMMARY,
+            scope=BeliefScope.GLOBAL,
+            about=[],
+            content="Memory proposal confirmation required.",
+            structure={
+                "target_domain": "memory_propose",
+                "memory_propose": {"requires_confirmation": True},
+            },
+        )
+    )
+
+    report = MemorySummaryWorker(
+        service,
+        provider,
+        initial_min_beliefs=2,
+        changed_source_min=2,
+        invalidated_source_min=1,
+    ).run_once()
+
+    assert report.emitted == 1
+    instruction = provider.calls[0]["messages"][0]["content"]
+    assert isinstance(instruction, str)
+    assert '"summary_kind": {' in instruction
+    assert '"const": "domain_summary"' in instruction
+    assert '"scope": {' in instruction
+    assert '"const": "global"' in instruction
+    assert '"target_domain": {' in instruction
+    assert '"const": "memory_propose"' in instruction
+
+
 def _store(tmp_path) -> StateStore:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()

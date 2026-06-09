@@ -122,6 +122,47 @@ def test_self_memory_summary_worker_rejects_llm_supplied_provenance_before_write
     assert "source refs" in str(window.last_error)
 
 
+def test_self_memory_summary_worker_prompt_includes_output_schema_and_target(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    first = _self_consolidated_belief(
+        "belief:self-root-cause",
+        "Agent solves root causes.",
+    )
+    second = _self_consolidated_belief(
+        "belief:self-tests",
+        "Agent validates changes with tests.",
+    )
+    service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    provider = _RecordingLLMProvider(
+        _summary_json("Agent solves root causes and validates changes with tests.")
+    )
+
+    report = MemorySummaryWorker(
+        service,
+        provider,
+        initial_min_beliefs=2,
+        changed_source_min=2,
+        invalidated_source_min=1,
+    ).run_once()
+
+    assert report.emitted == 1
+    instruction = provider.calls[0]["messages"][0]["content"]
+    assert isinstance(instruction, str)
+    assert '"operation": {' in instruction
+    assert '"const": "create_summary_belief"' in instruction
+    assert '"summary_belief_draft"' in instruction
+    assert '"summary_kind": {' in instruction
+    assert '"const": "self_memory_summary"' in instruction
+    assert '"scope": {' in instruction
+    assert '"const": "self"' in instruction
+    assert '"about": {' in instruction
+    assert '{"id": "subject:self", "kind": "subject"}' in instruction
+
+
 def _store(tmp_path) -> StateStore:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()

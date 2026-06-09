@@ -13,6 +13,7 @@ from alpha_agent.cognition.authority import CognitionSourceKind
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     SourceWindowValidationContext,
+    summary_output_json_schema,
 )
 from alpha_agent.cognition.domain_guidance import active_domain_guidance, summary_target_domain
 from alpha_agent.cognition.emitter import EventEmitter
@@ -24,7 +25,10 @@ from alpha_agent.cognition.loops.scheduler import (
     WorkerStatus,
     YieldingCoordinator,
 )
-from alpha_agent.cognition.loops.workers._common import background_llm_trace_metadata
+from alpha_agent.cognition.loops.workers._common import (
+    background_llm_trace_metadata,
+    json_for_prompt,
+)
 from alpha_agent.cognition.models import (
     AtomicBelief,
     BeliefLifecycle,
@@ -57,16 +61,13 @@ _RETRYABLE_WINDOW_STATUSES = {
 }
 _SUMMARY_INSTRUCTION = """Synthesize one summary belief from selected consolidated memories.
 
-Return exactly one JSON object using the background cognition contract:
-- operation: "create_summary_belief"
-- authority: "background_synthesized"
-- rationale: short reason
-- requires_confirmation: false unless the summary itself must be held for confirmation
-- source_span_note: optional orientation
-- payload.summary_belief_draft: id-less draft with summary_kind, scope, about, object, content
+Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
+multiple summaries. The output must validate against this JSON Schema:
+{output_schema_json}
 
 Do not include belief ids, summary ids, source ids, provenance, idempotency keys,
 confidence, scores, or numeric strength fields. Preserve the selected summary target exactly.
+For domain summaries, structure.target_domain is required and must match the selected target.
 
 Selected summary target:
 {summary_target_json}
@@ -304,9 +305,10 @@ class MemorySummaryWorker:
                 metadata={"last_window_id": window.window_id},
             )
         try:
+            context = _validation_context(window=window, target=target)
             response = traced_llm_complete(
                 llm_provider,
-                [_summary_instruction_message(state_service, target)],
+                [_summary_instruction_message(state_service, target, context=context)],
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -320,7 +322,7 @@ class MemorySummaryWorker:
             )
             written = state_service.accept_background_llm_json(
                 response.content,
-                _validation_context(window=window, target=target),
+                context,
                 window_id=window.window_id,
                 run_id=run.run_id,
                 checkpoint_id=f"checkpoint:{self.name}:{window.window_id}",
@@ -610,6 +612,8 @@ def _build_summary_target(
 def _summary_instruction_message(
     state_service: CognitionStateStore,
     target: _SummaryTarget,
+    *,
+    context: BackgroundLLMValidationContext,
 ) -> ChatMessage:
     guidance = active_domain_guidance(
         state_service.beliefs,
@@ -618,6 +622,7 @@ def _summary_instruction_message(
     return {
         "role": "user",
         "content": _SUMMARY_INSTRUCTION.format(
+            output_schema_json=_summary_output_schema_json(context),
             summary_target_json=json.dumps(
                 target.metadata["summary_target"],
                 ensure_ascii=False,
@@ -642,6 +647,21 @@ def _summary_instruction_message(
             ),
         ),
     }
+
+
+def _summary_output_schema_json(context: BackgroundLLMValidationContext) -> str:
+    if context.allowed_summary_kinds is None or len(context.allowed_summary_kinds) != 1:
+        raise ValueError("summary worker prompt requires exactly one allowed summary kind")
+    if context.required_summary_scope is None:
+        raise ValueError("summary worker prompt requires a selected summary scope")
+    return json_for_prompt(
+        summary_output_json_schema(
+            summary_kind=next(iter(context.allowed_summary_kinds)),
+            scope=context.required_summary_scope,
+            about_refs=context.required_summary_about_refs or frozenset(),
+            target_domain=context.required_summary_target_domain,
+        )
+    )
 
 
 def _validation_context(

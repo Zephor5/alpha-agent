@@ -13,6 +13,7 @@ from alpha_agent.cognition.authority import CognitionSourceKind
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     SourceWindowValidationContext,
+    consolidation_output_json_schema,
 )
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
@@ -23,7 +24,10 @@ from alpha_agent.cognition.loops.scheduler import (
     WorkerStatus,
     YieldingCoordinator,
 )
-from alpha_agent.cognition.loops.workers._common import background_llm_trace_metadata
+from alpha_agent.cognition.loops.workers._common import (
+    background_llm_trace_metadata,
+    json_for_prompt,
+)
 from alpha_agent.cognition.models import (
     AtomicBelief,
     BeliefLifecycle,
@@ -50,18 +54,26 @@ from alpha_agent.utils.time import utc_now_iso
 _RETRYABLE_SOURCE_STATUSES = {None, BackgroundProgressStatus.FAILED}
 _CONSOLIDATION_INSTRUCTION = """Compare extracted atomic belief drafts with active beliefs.
 
-Return exactly one JSON object using the background cognition contract.
-Use only these semantic operations:
-- create: accept a draft as a new consolidated atomic belief
-- strengthen: reaffirm one active belief with corroborating evidence
-- supersede: replace one active belief with a new consolidated atomic belief
-- retract: mark one active belief retracted
-- archive: mark one active belief archived
-- pending-confirmation: create a pending atomic belief candidate for human confirmation
+Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
+multiple decisions. The output must validate against this JSON Schema:
+{output_schema_json}
 
-Update-like operations must target one of the active belief ids shown below. Do not include
-source ids, provenance, idempotency keys, generated ids, confidence, scores, or numeric
-strength fields.
+Allowed update target belief ids:
+{allowed_target_belief_ids_json}
+
+Allowed about references for newly created or superseding atomic drafts:
+{allowed_about_refs_json}
+
+Operation rules:
+- create: accept a draft as a new consolidated atomic belief.
+- strengthen: reaffirm one active belief with corroborating evidence.
+- supersede: replace one active belief with a new consolidated atomic belief.
+- retract: mark one active belief retracted.
+- archive: mark one active belief archived.
+- pending-confirmation: create a pending atomic belief candidate for human confirmation.
+- Update-like operations must target one of the allowed belief ids above.
+- Do not include source ids, provenance, idempotency keys, generated ids, confidence,
+  scores, or numeric strength fields.
 
 Extracted drafts:
 {drafts_json}
@@ -71,11 +83,20 @@ Active beliefs included as valid update targets:
 
 _CONFLICT_REVIEW_INSTRUCTION = """Review the queued memory conflict.
 
-Return exactly one JSON object using the background cognition contract. If resolving the
-conflict automatically is unsafe, use operation "pending-confirmation" and set
-requires_confirmation to true. Do not mutate active memory unless the conflict can be safely
-resolved from the supplied evidence. Do not include generated ids, source refs, provenance,
-idempotency keys, confidence, scores, or numeric strength fields.
+Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
+multiple decisions. The output must validate against this JSON Schema:
+{output_schema_json}
+
+Allowed update target belief ids:
+{allowed_target_belief_ids_json}
+
+Allowed about references for newly created or superseding atomic drafts:
+{allowed_about_refs_json}
+
+If resolving the conflict automatically is unsafe, use operation "pending-confirmation"
+and set requires_confirmation to true. Do not mutate active memory unless the conflict can
+be safely resolved from the supplied evidence. Do not include generated ids, source refs,
+provenance, idempotency keys, confidence, scores, or numeric strength fields.
 
 Conflict source:
 {conflict_json}
@@ -267,9 +288,10 @@ class MemoryConsolidationWorker:
                 metadata={"last_window_id": window.window_id},
             )
         try:
+            context = _validation_context_for_candidate(window, candidate)
             response = traced_llm_complete(
                 llm_provider,
-                [_consolidation_instruction_message(candidate)],
+                [_consolidation_instruction_message(candidate, context=context)],
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -283,7 +305,7 @@ class MemoryConsolidationWorker:
             )
             written = state_service.accept_background_llm_json(
                 response.content,
-                _validation_context_for_candidate(window, candidate),
+                context,
                 window_id=window.window_id,
                 run_id=run.run_id,
                 checkpoint_id=f"checkpoint:{self.name}:{window.window_id}",
@@ -456,9 +478,14 @@ class MemoryConflictReviewWorker:
                     notes=[message],
                     metadata={"last_window_id": window.window_id},
                 )
+            context = _validation_context_for_conflict(window, active_beliefs)
             response = traced_llm_complete(
                 llm_provider,
-                [_conflict_review_instruction_message(window, active_beliefs)],
+                [_conflict_review_instruction_message(
+                    window,
+                    active_beliefs,
+                    context=context,
+                )],
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -472,7 +499,7 @@ class MemoryConflictReviewWorker:
             )
             written = state_service.accept_background_llm_json(
                 response.content,
-                _validation_context_for_conflict(window, active_beliefs),
+                context,
                 window_id=window.window_id,
                 run_id=run.run_id,
                 checkpoint_id=f"checkpoint:{self.name}:{window.window_id}",
@@ -665,10 +692,17 @@ def _allowed_about_refs(beliefs: Sequence[AtomicBelief]) -> frozenset[tuple[str,
     return frozenset(refs) if refs else frozenset()
 
 
-def _consolidation_instruction_message(candidate: _ConsolidationCandidate) -> ChatMessage:
+def _consolidation_instruction_message(
+    candidate: _ConsolidationCandidate,
+    *,
+    context: BackgroundLLMValidationContext,
+) -> ChatMessage:
     return {
         "role": "user",
         "content": _CONSOLIDATION_INSTRUCTION.format(
+            output_schema_json=_consolidation_output_schema_json(context),
+            allowed_target_belief_ids_json=_allowed_target_belief_ids_json(context),
+            allowed_about_refs_json=_allowed_about_refs_json(context),
             drafts_json=json.dumps(
                 [_belief_prompt_record(item) for item in candidate.drafts],
                 ensure_ascii=False,
@@ -686,10 +720,15 @@ def _consolidation_instruction_message(candidate: _ConsolidationCandidate) -> Ch
 def _conflict_review_instruction_message(
     window: BackgroundSourceWindow,
     active_beliefs: Sequence[AtomicBelief],
+    *,
+    context: BackgroundLLMValidationContext,
 ) -> ChatMessage:
     return {
         "role": "user",
         "content": _CONFLICT_REVIEW_INSTRUCTION.format(
+            output_schema_json=_consolidation_output_schema_json(context),
+            allowed_target_belief_ids_json=_allowed_target_belief_ids_json(context),
+            allowed_about_refs_json=_allowed_about_refs_json(context),
             conflict_json=json.dumps(window.metadata, ensure_ascii=False, sort_keys=True),
             active_beliefs_json=json.dumps(
                 [_belief_prompt_record(item) for item in active_beliefs],
@@ -698,6 +737,30 @@ def _conflict_review_instruction_message(
             ),
         ),
     }
+
+
+def _consolidation_output_schema_json(context: BackgroundLLMValidationContext) -> str:
+    return json_for_prompt(
+        consolidation_output_json_schema(
+            allowed_target_belief_ids=context.allowed_target_belief_ids
+        )
+    )
+
+
+def _allowed_target_belief_ids_json(context: BackgroundLLMValidationContext) -> str:
+    return json.dumps(
+        sorted(context.allowed_target_belief_ids),
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _allowed_about_refs_json(context: BackgroundLLMValidationContext) -> str:
+    refs = [
+        {"kind": kind, "id": ref_id}
+        for kind, ref_id in sorted(context.allowed_about_refs or frozenset())
+    ]
+    return json.dumps(refs, ensure_ascii=False, sort_keys=True)
 
 
 def _belief_prompt_record(belief: AtomicBelief) -> dict[str, Any]:

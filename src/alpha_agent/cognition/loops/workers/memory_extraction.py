@@ -13,6 +13,7 @@ from alpha_agent.cognition.authority import CognitionSourceKind
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     SourceWindowValidationContext,
+    extraction_output_json_schema,
 )
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
@@ -23,7 +24,10 @@ from alpha_agent.cognition.loops.scheduler import (
     WorkerStatus,
     YieldingCoordinator,
 )
-from alpha_agent.cognition.loops.workers._common import background_llm_trace_metadata
+from alpha_agent.cognition.loops.workers._common import (
+    background_llm_trace_metadata,
+    json_for_prompt,
+)
 from alpha_agent.cognition.models import (
     CognitiveEventKind,
     DerivationStage,
@@ -71,19 +75,30 @@ _ACTIVE_WINDOW_STATUSES = {
     BackgroundProgressStatus.CLAIMED,
 }
 _BACKLOG_TRACE_EVENT_TYPES = frozenset({"tool.completed", "tool.failed"})
-_EXTRACTION_INSTRUCTION = """Extract atomic memory candidates from the selected source window.
+_EXTRACTION_INSTRUCTION = """Extract one atomic memory candidate from the selected source window.
 
-Return exactly one JSON object using the background cognition contract:
-- operation: "create_atomic_belief"
-- authority: "background_synthesized"
-- rationale: short reason
-- requires_confirmation: boolean
-- source_span_note: optional orientation
-- payload.atomic_belief_draft: id-less draft with memory_kind, scope, about, object, content
+Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
+multiple candidates. The output must validate against this JSON Schema:
+{output_schema_json}
 
-Do not include belief ids, source ids, provenance, idempotency keys, confidence, scores,
-or update/supersede decisions. Project-scoped drafts may include only project_descriptor;
-the program will normalize it into the project reference.
+Allowed about references for this selected source window:
+{allowed_about_refs_json}
+
+Scope and reference rules:
+- For scope "global", set about to [].
+- For scope "counterpart", use exactly one allowed reference with kind "counterpart".
+- For scope "self", use exactly one allowed reference with kind "subject" or "self".
+- For scope "session", use exactly one allowed reference with kind "session".
+- For scope "project", set about to [] and include project_descriptor as a resolvable
+  string or object; do not invent project ids.
+
+Content rules:
+- content must be directly supported by the selected source window.
+- object should be the short subject of content; omit it if content is already short.
+- requires_confirmation should be true when the memory is plausible but not safe to accept
+  without human review.
+- Do not include belief ids, source ids, provenance, idempotency keys, confidence, scores,
+  numeric strength fields, or update/supersede decisions.
 
 Selected source window:
 {source_text}"""
@@ -387,11 +402,19 @@ def _run_candidate(
             metadata={"last_window_id": window.window_id},
         )
     try:
+        context = _validation_context(
+            state_service.store,
+            window=window,
+            candidate=candidate,
+        )
         response = traced_llm_complete(
             llm_provider,
             [
                 *candidate.prompt_prefix_messages,
-                _extraction_instruction_message(candidate.source_text),
+                _extraction_instruction_message(
+                    candidate.source_text,
+                    context=context,
+                ),
             ],
             trace_logger=llm_trace_logger,
             trace_metadata=background_llm_trace_metadata(
@@ -405,11 +428,6 @@ def _run_candidate(
             tools=list(tools) if tools else None,
             tool_choice=_tool_choice_for_extraction(tools),
             response_format=JSON_OBJECT_RESPONSE_FORMAT,
-        )
-        context = _validation_context(
-            state_service.store,
-            window=window,
-            candidate=candidate,
         )
         written = state_service.accept_background_llm_json(
             response.content,
@@ -883,11 +901,31 @@ def _mark_failed_if_needed(
         )
 
 
-def _extraction_instruction_message(source_text: str) -> ChatMessage:
+def _extraction_instruction_message(
+    source_text: str,
+    *,
+    context: BackgroundLLMValidationContext,
+) -> ChatMessage:
     return {
         "role": "user",
-        "content": _EXTRACTION_INSTRUCTION.format(source_text=source_text),
+        "content": _EXTRACTION_INSTRUCTION.format(
+            output_schema_json=_extraction_output_schema_json(),
+            allowed_about_refs_json=_allowed_about_refs_json(context),
+            source_text=source_text,
+        ),
     }
+
+
+def _extraction_output_schema_json() -> str:
+    return json_for_prompt(extraction_output_json_schema())
+
+
+def _allowed_about_refs_json(context: BackgroundLLMValidationContext) -> str:
+    refs = [
+        {"kind": kind, "id": ref_id}
+        for kind, ref_id in sorted(context.allowed_about_refs or frozenset())
+    ]
+    return json.dumps(refs, ensure_ascii=False, sort_keys=True)
 
 
 def _tool_choice_for_extraction(

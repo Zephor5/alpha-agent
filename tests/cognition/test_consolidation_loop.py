@@ -1055,6 +1055,51 @@ def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation
     }
 
 
+def test_memory_consolidation_worker_prompt_includes_output_schema_and_valid_targets(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    target = _atomic_belief("belief:target-uv", "Alpha Agent uses uv.")
+    extracted = _atomic_belief(
+        "belief:extracted-uv",
+        "Alpha Agent uses uv for package management.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    service.write_atomic_belief(
+        extracted,
+        source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="strengthen",
+            payload={
+                "belief_update": {
+                    "target_belief_id": str(target.id),
+                    "rationale": "The draft corroborates the target belief.",
+                }
+            },
+        )
+    )
+
+    report = MemoryConsolidationWorker(service, provider).run_once()
+
+    assert report.emitted == 1
+    instruction = provider.calls[0]["messages"][0]["content"]
+    assert isinstance(instruction, str)
+    assert '"oneOf": [' in instruction
+    assert '"const": "create"' in instruction
+    assert '"const": "strengthen"' in instruction
+    assert '"const": "supersede"' in instruction
+    assert '"const": "pending-confirmation"' in instruction
+    assert '"belief_update"' in instruction
+    assert '"target_belief_id": {' in instruction
+    assert '"enum": [' in instruction
+    assert f'"{target.id}"' in instruction
+
+
 def test_memory_consolidation_worker_strengthens_target_with_program_evidence(
     tmp_path,
 ) -> None:
@@ -1433,6 +1478,52 @@ def test_conflict_review_rejects_invalid_output_without_mutating_target_and_rema
         status=BackgroundProgressStatus.FAILED,
     )
     assert [item.window_id for item in retryable] == [window.window_id]
+
+
+def test_conflict_review_worker_prompt_includes_output_schema_and_valid_targets(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    target = _atomic_belief("belief:target-python", "User prefers Python examples.")
+    service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    conflict = BackgroundSourceRef("conflict", "conflict:preference-change")
+    service.ledger.create_source_window(
+        stage=BackgroundStage.CONFLICT_REVIEW,
+        target_unit="scope:global",
+        source_refs=(conflict,),
+        idempotency_key="conflict:preference-change",
+        metadata={
+            "active_belief_ids": [str(target.id)],
+            "source_text": "User now prefers Rust examples instead of Python examples.",
+        },
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="pending-confirmation",
+            payload={
+                "atomic_belief_draft": {
+                    "memory_kind": MemoryKind.PREFERENCE.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "object": "example language preference",
+                    "content": "User now prefers Rust examples instead of Python examples.",
+                }
+            },
+            extra={"requires_confirmation": True},
+        )
+    )
+
+    report = MemoryConflictReviewWorker(service, provider).run_once()
+
+    assert report.emitted == 1
+    instruction = provider.calls[0]["messages"][0]["content"]
+    assert isinstance(instruction, str)
+    assert '"oneOf": [' in instruction
+    assert '"const": "pending-confirmation"' in instruction
+    assert '"belief_update"' in instruction
+    assert '"target_belief_id": {' in instruction
+    assert f'"{target.id}"' in instruction
 
 
 def test_background_llm_contract_rejects_output_outside_source_window_when_determinable() -> None:
@@ -1907,6 +1998,57 @@ def test_memory_extraction_worker_selects_inactive_backlog_sources_and_runtime_t
     evidence = {(item.kind, item.id) for item in service.beliefs.list_active()[0].sources}
     assert ("session_message", message.id) in evidence
     assert ("runtime_trace", trace.id) in evidence
+
+
+def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.create_session_counterpart(
+        session_id="s1",
+        counterpart_id="counterpart:user-a",
+    )
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="User prefers Chinese replies.",
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload={
+                "atomic_belief_draft": {
+                    "memory_kind": MemoryKind.PREFERENCE.value,
+                    "scope": BeliefScope.COUNTERPART.value,
+                    "about": [{"kind": "counterpart", "id": "counterpart:user-a"}],
+                    "content": "User prefers Chinese replies.",
+                }
+            }
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={"s1"},
+    ).run_once()
+
+    assert report.emitted == 1
+    instruction = provider.calls[0]["messages"][-1]["content"]
+    assert isinstance(instruction, str)
+    assert '"operation": {' in instruction
+    assert '"const": "create_atomic_belief"' in instruction
+    assert '"authority": {' in instruction
+    assert '"const": "background_synthesized"' in instruction
+    assert '"atomic_belief_draft"' in instruction
+    assert '"memory_kind": {' in instruction
+    assert '"scope": {' in instruction
+    assert '"enum": [' in instruction
+    assert '{"id": "counterpart:user-a", "kind": "counterpart"}' in instruction
+    assert '{"id": "s1", "kind": "session"}' in instruction
+    assert '{"id": "subject:self", "kind": "subject"}' in instruction
+    assert "project_descriptor" in instruction
 
 
 def test_memory_extraction_worker_writes_llm_debug_trace(tmp_path) -> None:

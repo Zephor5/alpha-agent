@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -120,6 +120,268 @@ _SOURCE_WINDOW_STOPWORDS = frozenset(
         "project",
     }
 )
+
+
+def extraction_output_json_schema() -> dict[str, Any]:
+    """Return the LLM-facing JSON schema for extraction-stage outputs."""
+
+    return _background_output_schema(
+        operation=_EXTRACTION_OPERATION,
+        payload_schema=_payload_schema(
+            {"atomic_belief_draft": _atomic_belief_draft_schema()}
+        ),
+    )
+
+
+def consolidation_output_json_schema(
+    *,
+    allowed_target_belief_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Return the LLM-facing JSON schema for consolidation-stage outputs."""
+
+    target_ids = tuple(sorted({item for item in allowed_target_belief_ids if item.strip()}))
+    atomic_payload = _payload_schema({"atomic_belief_draft": _atomic_belief_draft_schema()})
+    return {
+        "oneOf": [
+            _background_output_schema(operation="create", payload_schema=atomic_payload),
+            _background_output_schema(
+                operation="strengthen",
+                payload_schema=_belief_update_payload_schema(
+                    operation="strengthen",
+                    allowed_target_belief_ids=target_ids,
+                ),
+            ),
+            _background_output_schema(
+                operation="supersede",
+                payload_schema=_supersede_payload_schema(allowed_target_belief_ids=target_ids),
+            ),
+            _background_output_schema(
+                operation="retract",
+                payload_schema=_belief_update_payload_schema(
+                    operation="retract",
+                    allowed_target_belief_ids=target_ids,
+                ),
+            ),
+            _background_output_schema(
+                operation="archive",
+                payload_schema=_belief_update_payload_schema(
+                    operation="archive",
+                    allowed_target_belief_ids=target_ids,
+                ),
+            ),
+            _background_output_schema(
+                operation="pending-confirmation",
+                payload_schema=atomic_payload,
+                requires_confirmation=True,
+            ),
+        ]
+    }
+
+
+def summary_output_json_schema(
+    *,
+    summary_kind: SummaryKind,
+    scope: BeliefScope,
+    about_refs: Iterable[tuple[str, str]],
+    target_domain: str | None = None,
+) -> dict[str, Any]:
+    """Return the LLM-facing JSON schema for one selected summary target."""
+
+    required = ["summary_kind", "scope", "about", "content"]
+    structure_schema = _summary_structure_schema(target_domain)
+    if target_domain is not None:
+        required.append("structure")
+    summary_draft = _summary_belief_draft_schema(
+        summary_kind=summary_kind,
+        scope=scope,
+        about_refs=about_refs,
+        structure_schema=structure_schema,
+        required=required,
+    )
+    return _background_output_schema(
+        operation="create_summary_belief",
+        payload_schema=_payload_schema({"summary_belief_draft": summary_draft}),
+    )
+
+
+def _background_output_schema(
+    *,
+    operation: str,
+    payload_schema: dict[str, Any],
+    requires_confirmation: bool | None = None,
+) -> dict[str, Any]:
+    requires_confirmation_schema: dict[str, Any] = (
+        {"type": "boolean"}
+        if requires_confirmation is None
+        else {"const": requires_confirmation}
+    )
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "operation",
+            "authority",
+            "rationale",
+            "requires_confirmation",
+            "payload",
+        ],
+        "properties": {
+            "operation": {"const": operation},
+            "authority": {"const": Authority.BACKGROUND_SYNTHESIZED.value},
+            "rationale": {"type": "string", "minLength": 1},
+            "requires_confirmation": requires_confirmation_schema,
+            "source_span_note": {"type": ["string", "null"]},
+            "payload": payload_schema,
+        },
+    }
+
+
+def _payload_schema(properties: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(properties),
+        "properties": properties,
+    }
+
+
+def _atomic_belief_draft_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["memory_kind", "scope", "about", "content"],
+        "properties": {
+            "memory_kind": {"enum": [item.value for item in MemoryKind]},
+            "scope": {"enum": [item.value for item in BeliefScope]},
+            "about": _reference_array_schema(),
+            "object": {"type": "string", "minLength": 1},
+            "content": {"type": "string", "minLength": 1},
+            "structure": {"type": "object"},
+            "validity": {"type": "object"},
+            "update_policy": {"type": "object"},
+            "project_descriptor": {
+                "oneOf": [
+                    {"type": "string", "minLength": 1},
+                    {"type": "object"},
+                ],
+            },
+        },
+    }
+
+
+def _summary_belief_draft_schema(
+    *,
+    summary_kind: SummaryKind,
+    scope: BeliefScope,
+    about_refs: Iterable[tuple[str, str]],
+    structure_schema: dict[str, Any],
+    required: list[str],
+) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": required,
+        "properties": {
+            "summary_kind": {"const": summary_kind.value},
+            "scope": {"const": scope.value},
+            "about": _reference_array_schema(const_refs=about_refs),
+            "object": {"type": "string", "minLength": 1},
+            "content": {"type": "string", "minLength": 1},
+            "structure": structure_schema,
+            "validity": {"type": "object"},
+            "update_policy": {"type": "object"},
+            "project_descriptor": {
+                "oneOf": [
+                    {"type": "string", "minLength": 1},
+                    {"type": "object"},
+                ],
+            },
+        },
+    }
+
+
+def _belief_update_payload_schema(
+    *,
+    operation: str,
+    allowed_target_belief_ids: Iterable[str],
+) -> dict[str, Any]:
+    return _payload_schema(
+        {
+            "belief_update": _belief_update_schema(
+                operation=operation,
+                allowed_target_belief_ids=allowed_target_belief_ids,
+            )
+        }
+    )
+
+
+def _supersede_payload_schema(
+    *,
+    allowed_target_belief_ids: Iterable[str],
+) -> dict[str, Any]:
+    return _payload_schema(
+        {
+            "belief_update": _belief_update_schema(
+                operation="supersede",
+                allowed_target_belief_ids=allowed_target_belief_ids,
+            ),
+            "atomic_belief_draft": _atomic_belief_draft_schema(),
+        }
+    )
+
+
+def _belief_update_schema(
+    *,
+    operation: str,
+    allowed_target_belief_ids: Iterable[str],
+) -> dict[str, Any]:
+    target_id_schema: dict[str, Any] = {"type": "string", "minLength": 1}
+    target_ids = tuple(allowed_target_belief_ids)
+    if target_ids:
+        target_id_schema["enum"] = list(target_ids)
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["target_belief_id", "rationale"],
+        "properties": {
+            "target_belief_id": target_id_schema,
+            "rationale": {"type": "string", "minLength": 1},
+            "update_kind": {"const": operation},
+        },
+    }
+
+
+def _summary_structure_schema(target_domain: str | None) -> dict[str, Any]:
+    if target_domain is None:
+        return {"type": "object"}
+    return {
+        "type": "object",
+        "required": ["target_domain"],
+        "properties": {"target_domain": {"const": target_domain}},
+    }
+
+
+def _reference_array_schema(
+    *,
+    const_refs: Iterable[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    schema: dict[str, Any] = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["kind", "id"],
+            "properties": {
+                "kind": {"type": "string", "minLength": 1},
+                "id": {"type": "string", "minLength": 1},
+            },
+        },
+    }
+    if const_refs is not None:
+        schema["const"] = [
+            {"kind": kind, "id": ref_id} for kind, ref_id in sorted(const_refs)
+        ]
+    return schema
 
 
 class BackgroundLLMValidationError(ValueError):
