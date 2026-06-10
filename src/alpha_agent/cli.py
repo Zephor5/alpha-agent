@@ -278,6 +278,20 @@ def _displayable_chat_turn_messages(
     ]
 
 
+def _chat_turn_messages_include_response(
+    messages: list[SessionMessage],
+    response_text: str,
+) -> bool:
+    if not response_text:
+        return False
+    return any(
+        message.kind == "assistant_message"
+        and not message.tool_calls
+        and _chat_turn_content(message) == response_text
+        for message in messages
+    )
+
+
 def _render_chat_turn_progress(
     store: StateStore,
     session_id: str,
@@ -932,19 +946,31 @@ def chat(
         )
         response = _client_response_or_exit(response)
         session_id = str(response.get("session_id") or request_session_id)
-        turn_messages = (
+        response_text = str(response.get("response", ""))
+        all_turn_messages = (
             _displayable_chat_turn_messages(
                 store,
                 session_id,
-                after_ordinal=rendered_after_ordinal,
+                after_ordinal=before_ordinal,
             )
             if session_id == request_session_id
             else []
         )
-        _render_chat_turn_messages(
-            turn_messages,
-            fallback_response=str(response.get("response", "")),
+        turn_messages = [
+            message
+            for message in all_turn_messages
+            if message.ordinal > rendered_after_ordinal
+        ]
+        fallback_response = (
+            ""
+            if _chat_turn_messages_include_response(all_turn_messages, response_text)
+            else response_text
         )
+        if turn_messages or fallback_response:
+            _render_chat_turn_messages(
+                turn_messages,
+                fallback_response=fallback_response,
+            )
 
 
 @skills_app.command("list")

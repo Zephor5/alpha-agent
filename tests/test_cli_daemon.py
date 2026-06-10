@@ -266,6 +266,7 @@ def test_chat_renders_current_turn_tool_rounds(tmp_path: Path, monkeypatch) -> N
     assert '{"query":"second"}' in result.output
     assert '{"result":"second"}' in result.output
     assert "final answer" in result.output
+    assert result.output.count("final answer") == 1
 
 
 def test_chat_progress_renders_before_ipc_response_returns(
