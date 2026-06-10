@@ -46,6 +46,9 @@ max_context_tokens = 200000
 [llm.providers.deepseek]
 max_context_tokens = 900000
 
+[llm.providers.mimo]
+max_context_tokens = 1000000
+
 [tools.bash]
 enabled = true
 default_workdir = "."
@@ -101,6 +104,9 @@ api_key = "deepseek-key"
 reasoning_enabled = false
 reasoning_effort = "high"
 
+[mimo]
+api_key = "mimo-file-key"
+
 [tavily]
 api_key = "tvly-file-key"
 """,
@@ -126,6 +132,7 @@ api_key = "tvly-file-key"
     assert config.max_context_tokens_for_provider("openai") == 200000
     assert config.max_context_tokens_for_provider("compatible") == 200000
     assert config.max_context_tokens_for_provider("deepseek") == 900000
+    assert config.max_context_tokens_for_provider("mimo") == 1000000
     assert config.bash_tool.enabled is True
     assert config.bash_tool.default_workdir == Path("~/.alpha-agent").expanduser().resolve()
     assert config.bash_tool.allowed_workdirs == (
@@ -151,6 +158,7 @@ api_key = "tvly-file-key"
     assert config.file_tool.create_parent_dirs_enabled is True
     assert config.file_tool.max_output_chars == 555
     assert config.deepseek_api_key == "deepseek-key"
+    assert config.mimo_api_key == "mimo-file-key"
     assert config.llm_model == "deepseek-v4-pro"
     assert config.compatible_base_url == "https://compatible.example/v1"
     assert config.compatible_api_key == "compatible-key"
@@ -249,6 +257,9 @@ provider = "deepseek"
 [deepseek]
 api_key = "from-file"
 
+[mimo]
+api_key = "mimo-file-key"
+
 [compatible]
 base_url = "from-file"
 api_key = "compatible-file-key"
@@ -268,6 +279,7 @@ allowed_workdirs = ["."]
     monkeypatch.setenv("ALPHA_LLM_PROVIDER", "mock")
     monkeypatch.setenv("ALPHA_LLM_DEBUG_LOGGING", "true")
     monkeypatch.setenv("ALPHA_DEEPSEEK_API_KEY", "from-env")
+    monkeypatch.setenv("ALPHA_MIMO_API_KEY", "mimo-env-key")
     monkeypatch.setenv("ALPHA_COMPATIBLE_BASE_URL", "from-env")
     monkeypatch.setenv("ALPHA_COMPATIBLE_API_KEY", "compatible-env-key")
     monkeypatch.setenv("ALPHA_TAVILY_API_KEY", "tvly-env-key")
@@ -314,6 +326,7 @@ allowed_workdirs = ["."]
     assert config.llm_provider == "mock"
     assert config.llm_debug_logging is True
     assert config.deepseek_api_key == "from-env"
+    assert config.mimo_api_key == "mimo-env-key"
     assert config.compatible_base_url == "from-env"
     assert config.compatible_api_key == "compatible-env-key"
     assert config.tavily_api_key == "tvly-env-key"
@@ -370,6 +383,56 @@ def test_load_config_accepts_generic_tavily_env(
     config = load_config(env_file=None, config_file=config_path)
 
     assert config.tavily_api_key == "tvly-generic-key"
+
+
+def test_load_config_accepts_official_mimo_api_key_env_as_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("MIMO_API_KEY", "mimo-official-key")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.mimo_api_key == "mimo-official-key"
+
+
+def test_load_config_ignores_blank_mimo_api_keys_when_falling_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[mimo]
+api_key = "   "
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ALPHA_MIMO_API_KEY", "   ")
+    monkeypatch.setenv("MIMO_API_KEY", "\t\n")
+
+    missing_config = load_config(env_file=None, config_file=config_path)
+
+    assert missing_config.mimo_api_key is None
+
+    monkeypatch.setenv("MIMO_API_KEY", "mimo-official-key")
+    official_config = load_config(env_file=None, config_file=config_path)
+
+    assert official_config.mimo_api_key == "mimo-official-key"
+
+    config_path.write_text(
+        """
+[mimo]
+api_key = "mimo-file-key"
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MIMO_API_KEY", "   ")
+    file_config = load_config(env_file=None, config_file=config_path)
+
+    assert file_config.mimo_api_key == "mimo-file-key"
 
 
 def test_load_config_ignores_legacy_codex_api_key_env(
@@ -512,6 +575,11 @@ def test_config_cli_set_and_get(
         app,
         ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
     )
+    set_mimo_key = runner.invoke(app, ["config", "set", "mimo.api_key", "mimo-test"])
+    set_mimo_provider_limit = runner.invoke(
+        app,
+        ["config", "set", "llm.providers.mimo.max_context_tokens", "1000000"],
+    )
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
     get_home_dir = runner.invoke(app, ["config", "get", "runtime.home_dir"])
     get_bash_enabled = runner.invoke(app, ["config", "get", "tools.bash.enabled"])
@@ -537,6 +605,8 @@ def test_config_cli_set_and_get(
     assert set_files_read_lines.exit_code == 0
     assert set_files_create_parent_dirs.exit_code == 0
     assert set_provider_limit.exit_code == 0
+    assert set_mimo_key.exit_code == 0
+    assert set_mimo_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
     assert get_home_dir.exit_code == 0
     assert get_bash_enabled.exit_code == 0
@@ -553,6 +623,8 @@ def test_config_cli_set_and_get(
     assert config.llm_debug_logging is True
     assert config.llm_context.expected_output_reserve_tokens == 2048
     assert config.max_context_tokens_for_provider("deepseek") == 900000
+    assert config.max_context_tokens_for_provider("mimo") == 1000000
+    assert config.mimo_api_key == "mimo-test"
     assert config.tavily_api_key == "tvly-test"
     assert config.bash_tool.enabled is True
     assert config.bash_tool.allowed_workdirs == (
@@ -784,8 +856,10 @@ def test_config_set_rejects_unknown_key(
         "llm.base_url",
         "llm.api_key",
         "deepseek.base_url",
+        "mimo.base_url",
         "codex.base_url",
         "deepseek.model",
+        "mimo.model",
         "codex.model",
     ],
 )
@@ -1015,5 +1089,21 @@ def test_read_config_value_masks_tavily_secret(tmp_path: Path) -> None:
     assert result.exit_code == 0
 
     value = read_config_value("tavily.api_key", config_path=config_path, reveal_secret=False)
+
+    assert value == "***"
+
+
+def test_read_config_value_masks_mimo_secret(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    write_default_config(config_path)
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["config", "set", "mimo.api_key", "secret-value"],
+        env={"ALPHA_CONFIG_PATH": str(config_path)},
+    )
+    assert result.exit_code == 0
+
+    value = read_config_value("mimo.api_key", config_path=config_path, reveal_secret=False)
 
     assert value == "***"

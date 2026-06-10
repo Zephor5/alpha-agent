@@ -6,8 +6,6 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
-import httpx
-
 from alpha_agent.config import AlphaConfig
 from alpha_agent.llm.base import (
     ChatMessage,
@@ -15,12 +13,8 @@ from alpha_agent.llm.base import (
     LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
-    chat_completion_messages_payload,
-    openai_compatible_response,
-    openai_compatible_response_format_payload,
-    openai_compatible_tool_choice_payload,
-    openai_compatible_tool_payload,
 )
+from alpha_agent.llm.chat_completions import complete_chat_completions
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
@@ -52,52 +46,28 @@ class DeepSeekProvider:
     ) -> LLMResponse:
         """Call DeepSeek and normalize the chat completion response."""
 
-        body: dict[str, Any] = {
-            "model": self.model,
-            "messages": chat_completion_messages_payload(
-                messages,
-                include_reasoning_content=True,
-            ),
-        }
-        if tools is not None:
-            body["tools"] = [openai_compatible_tool_payload(tool) for tool in tools]
-        if tool_choice is not None:
-            body["tool_choice"] = openai_compatible_tool_choice_payload(tool_choice)
-        if response_format is not None:
-            body["response_format"] = openai_compatible_response_format_payload(
-                response_format
-            )
-        body.update(
-            deepseek_reasoning_parameters(
+        normalized = complete_chat_completions(
+            base_url=self.base_url,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            model=self.model,
+            provider=self.name,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            response_format=response_format,
+            timeout=self.timeout,
+            include_reasoning_content=True,
+            extra_body=deepseek_reasoning_parameters(
                 model=self.model,
                 enabled=self.reasoning_enabled,
                 effort=self.reasoning_effort,
-            )
-        )
-        response = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            json=body,
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
-        payload: dict[str, Any] = response.json()
-        normalized = openai_compatible_response(
-            payload=payload,
-            fallback_model=self.model,
-            provider=self.name,
+            ),
         )
         return replace(
             normalized,
-            reasoning_content=_deepseek_reasoning_content(payload),
-            metadata={
-                **normalized.metadata,
-                "request_payload": body,
-                "response_payload": payload,
-            },
+            reasoning_content=_deepseek_reasoning_content(
+                normalized.metadata["response_payload"]
+            ),
         )
 
 

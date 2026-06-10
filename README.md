@@ -21,7 +21,8 @@ when you're ready.
   — it is *not* a LangChain / LangGraph / LlamaIndex / AutoGen / CrewAI wrapper.
   Every turn is explicit, bounded, and auditable.
 - **Bring your own model.** Swap between a built-in `mock`, any
-  OpenAI-compatible API, DeepSeek, or Codex with a single config change.
+  OpenAI-compatible API, DeepSeek, Xiaomi MiMo, or Codex with a single config
+  change.
 - **Real tools, safely gated.** Built-in web search (via Tavily) and an opt-in
   local `bash` tool, plus an explicit memory recall/propose path the model calls
   on demand.
@@ -57,6 +58,11 @@ new settings:
 # DeepSeek
 uv run alpha config set llm.provider deepseek
 uv run alpha config set deepseek.api_key sk-...
+uv run alpha daemon restart
+
+# Xiaomi MiMo
+uv run alpha config set llm.provider mimo
+uv run alpha config set mimo.api_key sk-...
 uv run alpha daemon restart
 
 # Any OpenAI-compatible API
@@ -180,8 +186,9 @@ mode. Tool specs do not use a `group` field.
   `memory_recall` tool and writes updates via `memory_propose` — recall is never
   silently injected. Compact, stable self-memory and counterpart profile context
   are kept near the top of the prompt when available.
-- **Pluggable providers.** `mock`, `openai-compatible`, `deepseek`, and `codex`
-  share one interface; the rest of the runtime doesn't care which you use.
+- **Pluggable providers.** `mock`, `openai-compatible`, `deepseek`, `mimo`, and
+  `codex` share one interface; the rest of the runtime doesn't care which you
+  use.
 
 ## Configuration
 

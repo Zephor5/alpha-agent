@@ -36,6 +36,9 @@ max_context_tokens = 258400
 [llm.providers.deepseek]
 max_context_tokens = 1000000
 
+[llm.providers.mimo]
+max_context_tokens = 1000000
+
 [tools.bash]
 # Disabled by default because this executes local foreground shell commands.
 enabled = false
@@ -103,6 +106,11 @@ active_goal_limit = 8
 api_key = ""
 reasoning_enabled = true
 reasoning_effort = ""
+
+[mimo]
+# Xiaomi MiMo API key. Environment variables ALPHA_MIMO_API_KEY or MIMO_API_KEY
+# override this value.
+api_key = ""
 
 [codex]
 access_token = ""

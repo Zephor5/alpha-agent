@@ -14,6 +14,7 @@ from alpha_agent.llm.codex import (
     resolve_codex_access_token,
 )
 from alpha_agent.llm.deepseek import DEEPSEEK_BASE_URL, DeepSeekProvider
+from alpha_agent.llm.mimo import MIMO_BASE_URL, MIMO_DEFAULT_MODEL, MiMoProvider
 from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
 
 
@@ -43,6 +44,109 @@ def test_deepseek_provider_uses_deepseek_defaults_and_api_key() -> None:
     assert provider.base_url == DEEPSEEK_BASE_URL
     assert provider.model == "deepseek-chat"
     assert provider.api_key == "deepseek-key"
+
+
+def test_mimo_provider_uses_mimo_defaults_and_api_key() -> None:
+    config = _config(mimo_api_key="mimo-key")
+
+    provider = MiMoProvider(config)
+
+    assert provider.base_url == MIMO_BASE_URL
+    assert provider.model == MIMO_DEFAULT_MODEL
+    assert provider.api_key == "mimo-key"
+
+
+def test_mimo_provider_requires_api_key() -> None:
+    config = _config()
+
+    with pytest.raises(ValueError, match="mimo.api_key is required"):
+        MiMoProvider(config)
+
+
+def test_mimo_provider_uses_api_key_header_and_normalizes_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+    raw_tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "lookup_context",
+                "arguments": '{"query":"alpha"}',
+            },
+        }
+    ]
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        captured["url"] = args[0]
+        captured["headers"] = kwargs["headers"]
+        captured["json"] = kwargs["json"]
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-mimo",
+                "model": "mimo-v2.5-pro",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {"content": None, "tool_calls": raw_tool_calls},
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(mimo_api_key="mimo-key")
+
+    response = MiMoProvider(config).complete(
+        [{"role": "user", "content": "ping"}],
+        tools=[
+            LLMToolDefinition(
+                name="lookup_context",
+                description="Look up relevant context.",
+                parameters={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            )
+        ],
+        tool_choice={"type": "function", "function": {"name": "lookup_context"}},
+        response_format={"type": "json_object"},
+    )
+
+    assert response.provider == "mimo"
+    assert response.model == "mimo-v2.5-pro"
+    assert response.finish_reason == "tool_calls"
+    assert response.tool_calls[0].arguments == {"query": "alpha"}
+    assert response.metadata["request_payload"] == captured["json"]
+    assert response.metadata["response_payload"]["id"] == "chatcmpl-mimo"
+    assert captured["url"] == "https://api.xiaomimimo.com/v1/chat/completions"
+    assert captured["headers"]["api-key"] == "mimo-key"
+    assert "Authorization" not in captured["headers"]
+    assert captured["headers"]["Content-Type"] == "application/json"
+    assert captured["json"]["model"] == "mimo-v2.5-pro"
+    assert captured["json"]["messages"] == [{"role": "user", "content": "ping"}]
+    assert captured["json"]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_context",
+                "description": "Look up relevant context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+        }
+    ]
+    assert captured["json"]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "lookup_context"},
+    }
+    assert captured["json"]["response_format"] == {"type": "json_object"}
 
 
 def test_deepseek_provider_replays_assistant_reasoning_content(

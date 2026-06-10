@@ -46,6 +46,9 @@ max_context_tokens = 258400
 [llm.providers.deepseek]
 max_context_tokens = 1000000
 
+[llm.providers.mimo]
+max_context_tokens = 1000000
+
 [tools.bash]
 enabled = false
 default_workdir = "workspace"
@@ -111,6 +114,9 @@ api_key = ""
 reasoning_enabled = true
 reasoning_effort = ""
 
+[mimo]
+api_key = ""
+
 [codex]
 access_token = ""
 
@@ -136,6 +142,7 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "llm.context.safety_margin_tokens": int,
     "llm.providers.openai-compatible.max_context_tokens": int,
     "llm.providers.deepseek.max_context_tokens": int,
+    "llm.providers.mimo.max_context_tokens": int,
     "compatible.base_url": str,
     "compatible.api_key": str,
     "tools.bash.enabled": bool,
@@ -179,6 +186,7 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "deepseek.api_key": str,
     "deepseek.reasoning_enabled": bool,
     "deepseek.reasoning_effort": str,
+    "mimo.api_key": str,
     "codex.access_token": str,
     "tavily.api_key": str,
 }
@@ -190,6 +198,7 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
         "openai",
         "compatible",
         "deepseek",
+        "mimo",
         "codex",
         "openai-codex",
         "openai_codex",
@@ -225,6 +234,7 @@ POSITIVE_INT_CONFIG_KEYS = {
     "llm.context.safety_margin_tokens",
     "llm.providers.openai-compatible.max_context_tokens",
     "llm.providers.deepseek.max_context_tokens",
+    "llm.providers.mimo.max_context_tokens",
     "tools.bash.default_timeout_seconds",
     "tools.bash.max_timeout_seconds",
     "tools.bash.max_output_chars",
@@ -248,6 +258,7 @@ RATIO_CONFIG_KEYS = {
 SECRET_CONFIG_KEYS = {
     "compatible.api_key",
     "deepseek.api_key",
+    "mimo.api_key",
     "codex.access_token",
     "tavily.api_key",
 }
@@ -257,6 +268,7 @@ DEFAULT_PROVIDER_MAX_CONTEXT_TOKENS = {
     "mock": 258400,
     "openai-compatible": 258400,
     "deepseek": 1000000,
+    "mimo": 1000000,
     "codex": 258400,
 }
 
@@ -395,6 +407,7 @@ class AlphaConfig:
     deepseek_api_key: str | None = None
     deepseek_reasoning_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
+    mimo_api_key: str | None = None
     codex_access_token: str | None = None
     tavily_api_key: str | None = None
 
@@ -660,6 +673,12 @@ def load_config(
             config_data,
             "deepseek",
             "reasoning_effort",
+        ),
+        mimo_api_key=_env_fallbacks_or_config(
+            ("ALPHA_MIMO_API_KEY", "MIMO_API_KEY"),
+            config_data,
+            "mimo",
+            "api_key",
         ),
         codex_access_token=(
             os.getenv("ALPHA_CODEX_ACCESS_TOKEN")
@@ -1005,6 +1024,7 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         "llm.context",
         "llm.providers.openai-compatible",
         "llm.providers.deepseek",
+        "llm.providers.mimo",
         "compatible",
         "tools.bash",
         "tools.files",
@@ -1017,6 +1037,7 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         "cognition.background.summary",
         "cognition.drive",
         "deepseek",
+        "mimo",
         "codex",
         "tavily",
     )
@@ -1464,4 +1485,21 @@ def _env_or_config(
     env_value = os.getenv(env_name)
     if env_value is not None and env_value != "":
         return env_value
+    return _string_setting(config_data, section, key, default)
+
+
+def _env_fallbacks_or_config(
+    env_names: tuple[str, ...],
+    config_data: dict[str, Any],
+    section: str,
+    key: str,
+    default: str | None = None,
+) -> str | None:
+    for env_name in env_names:
+        env_value = os.getenv(env_name)
+        if env_value is None:
+            continue
+        stripped = env_value.strip()
+        if stripped:
+            return stripped
     return _string_setting(config_data, section, key, default)

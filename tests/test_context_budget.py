@@ -61,12 +61,15 @@ def test_provider_max_context_config_is_loaded_and_used(tmp_path) -> None:
     config_path.write_text(
         """
 [llm]
-provider = "deepseek"
+provider = "mimo"
 
 [llm.providers.openai-compatible]
 max_context_tokens = 258400
 
 [llm.providers.deepseek]
+max_context_tokens = 1000000
+
+[llm.providers.mimo]
 max_context_tokens = 1000000
 """,
         encoding="utf-8",
@@ -81,5 +84,15 @@ max_context_tokens = 1000000
 
     assert config.max_context_tokens_for_provider("openai") == 258400
     assert config.max_context_tokens_for_provider("compatible") == 258400
+    assert config.max_context_tokens_for_provider("mimo") == 1000000
     assert estimate.max_context_tokens == 1000000
     assert estimate.remaining_context_tokens == 1000000 - estimate.used_context_tokens
+
+
+def test_mimo_default_context_window_is_one_million_tokens(tmp_path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.max_context_tokens_for_provider("mimo") == 1000000

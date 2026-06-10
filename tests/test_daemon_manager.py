@@ -6,8 +6,10 @@ from pathlib import Path
 from alpha_agent.cognition.coordinator import LoopCoordinator
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.config import AlphaConfig, BashToolConfig
-from alpha_agent.daemon.manager import AgentFactory, AgentManager
+from alpha_agent.daemon.manager import AgentFactory, AgentManager, build_provider
+from alpha_agent.llm.mimo import MiMoProvider
 from alpha_agent.state.store import StateStore
+from alpha_agent.tools.bash import BashTool
 
 
 class _FakeFactory:
@@ -119,6 +121,43 @@ def test_agent_factory_registers_configured_default_tools(tmp_path: Path) -> Non
         "web_search",
         "web_fetch",
     ]
+
+
+def test_build_provider_dispatches_mimo() -> None:
+    config = AlphaConfig(
+        db_path=Path("alpha.db"),
+        log_dir=Path("logs"),
+        gateway_status_path=Path("gateway-status.json"),
+        llm_provider="mimo",
+        mimo_api_key="mimo-key",
+    )
+
+    provider = build_provider(config)
+
+    assert isinstance(provider, MiMoProvider)
+
+
+def test_agent_factory_redacts_mimo_key_from_bash_tool(tmp_path: Path) -> None:
+    config = AlphaConfig(
+        db_path=tmp_path / "alpha.db",
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway-status.json",
+        bash_tool=BashToolConfig(
+            enabled=True,
+            default_workdir=tmp_path,
+            allowed_workdirs=(tmp_path,),
+        ),
+        mimo_api_key="mimo-secret",
+    )
+    store = StateStore(config.db_path)
+    store.initialize()
+
+    agent = AgentFactory(config, store).create()
+    bash_tool = agent.tool_registry.get("bash")
+
+    assert isinstance(bash_tool, BashTool)
+    trace = bash_tool.trace_arguments({"command": "printf mimo-secret"})
+    assert trace["command"] == "printf [REDACTED]"
 
 
 def test_agent_factory_injects_shared_loop_coordinator(tmp_path: Path) -> None:

@@ -14,6 +14,7 @@ from alpha_agent.config import AlphaConfig
 from alpha_agent.llm.base import LLMProvider
 from alpha_agent.llm.codex import CodexResponsesProvider
 from alpha_agent.llm.deepseek import DeepSeekProvider
+from alpha_agent.llm.mimo import MiMoProvider
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
 from alpha_agent.llm.tracing import LLMTraceLogger
@@ -39,6 +40,8 @@ def build_provider(config: AlphaConfig) -> LLMProvider:
         return OpenAICompatibleProvider(config)
     if config.llm_provider in {"deepseek"}:
         return DeepSeekProvider(config)
+    if config.llm_provider in {"mimo"}:
+        return MiMoProvider(config)
     if config.llm_provider in {"codex", "openai-codex", "openai_codex"}:
         return CodexResponsesProvider(config)
     raise ValueError(f"Unknown ALPHA_LLM_PROVIDER: {config.llm_provider}")

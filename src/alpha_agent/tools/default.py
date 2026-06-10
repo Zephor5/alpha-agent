@@ -45,6 +45,7 @@ def _config_secrets(config: AlphaConfig) -> tuple[str, ...]:
     values = (
         config.compatible_api_key,
         config.deepseek_api_key,
+        config.mimo_api_key,
         config.codex_access_token,
         config.tavily_api_key,
     )

@@ -71,6 +71,7 @@ from alpha_agent.gateway.logging import append_gateway_log
 from alpha_agent.gateway.status import gateway_tables_available
 from alpha_agent.llm.codex import CODEX_DEFAULT_MODEL
 from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
+from alpha_agent.llm.mimo import MIMO_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.runtime.chat_messages import strip_system_reminder
@@ -128,6 +129,8 @@ def _display_model(config: AlphaConfig) -> str:
         return config.llm_model
     if config.llm_provider == "deepseek":
         return f"{DEEPSEEK_DEFAULT_MODEL} (provider default)"
+    if config.llm_provider == "mimo":
+        return f"{MIMO_DEFAULT_MODEL} (provider default)"
     if config.llm_provider in {"codex", "openai-codex", "openai_codex"}:
         return f"{CODEX_DEFAULT_MODEL} (provider default)"
     if config.llm_provider in {"openai-compatible", "openai", "compatible"}:
