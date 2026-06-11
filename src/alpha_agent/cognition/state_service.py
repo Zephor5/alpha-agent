@@ -9,6 +9,7 @@ import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from alpha_agent.cognition.authority import (
@@ -32,6 +33,7 @@ from alpha_agent.cognition.models import (
     BeliefScope,
     DerivationStage,
     DerivationTrace,
+    FeedbackEntry,
     Instant,
     MemoryKind,
     NLStatement,
@@ -45,6 +47,7 @@ from alpha_agent.cognition.models import (
 from alpha_agent.cognition.models.belief import unknown_subject_ref
 from alpha_agent.cognition.processing_ledger import (
     BackgroundSourceRef,
+    BackgroundSourceWindow,
     BackgroundStage,
     BackgroundStageRunStatus,
     ProcessingLedger,
@@ -69,6 +72,9 @@ CREATE INDEX IF NOT EXISTS idx_cognition_state_audit_kind_time
 """
 
 _BACKGROUND_LLM_RAW_OUTPUT_PREVIEW_CHARS = 2048
+_FEEDBACK_ENTRY_KINDS = frozenset({"confirmed", "contradicted", "corrected"})
+_FEEDBACK_CONFLICT_VERDICTS = frozenset({"contradicted", "corrected"})
+_FEEDBACK_CONFLICT_TARGET_UNIT = "scope:global"
 
 
 def _dumps(value: Any) -> str:
@@ -226,6 +232,132 @@ class CognitionStateStore:
             )
 
         self._write(conn, op)
+
+    def record_belief_feedback(
+        self,
+        belief_id: BeliefId | str,
+        *,
+        kind: str,
+        event_id: str,
+        at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> AtomicBelief | None:
+        """Append one compact feedback-history entry to an active atomic belief."""
+
+        feedback_kind = str(kind)
+        if feedback_kind not in _FEEDBACK_ENTRY_KINDS:
+            allowed = ", ".join(sorted(_FEEDBACK_ENTRY_KINDS))
+            raise ValueError(f"unsupported feedback kind {feedback_kind!r}; allowed: {allowed}")
+        feedback_event_id = str(event_id).strip()
+        if not feedback_event_id:
+            raise ValueError("event_id must be non-empty")
+        recorded_at = at or utc_now_iso()
+        target_date = _utc_date(recorded_at)
+
+        def op(db: sqlite3.Connection) -> AtomicBelief | None:
+            belief = self.beliefs.get_by_id(belief_id, conn=db)
+            if not isinstance(belief, AtomicBelief):
+                return None
+            if belief.lifecycle != BeliefLifecycle.ACTIVE:
+                return None
+            if any(
+                _feedback_entry_matches(entry, kind=feedback_kind, utc_date=target_date)
+                for entry in belief.feedback_history
+            ):
+                return None
+            entry = FeedbackEntry(
+                json.dumps(
+                    {
+                        "at": recorded_at,
+                        "event_id": feedback_event_id,
+                        "kind": feedback_kind,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+            record = belief.to_record()
+            record["feedback_history"] = [
+                *(str(item) for item in belief.feedback_history),
+                str(entry),
+            ]
+            updated = AtomicBelief.from_record(record)
+            self.beliefs.upsert_atomic(updated, conn=db)
+            self._insert_audit(
+                db,
+                kind="belief_feedback_recorded",
+                payload={
+                    "at": recorded_at,
+                    "belief_id": str(updated.id),
+                    "event_id": feedback_event_id,
+                    "kind": feedback_kind,
+                },
+                entity_refs=(
+                    Reference("belief", str(updated.id)),
+                    Reference("cognitive_event", feedback_event_id),
+                ),
+                created_at=utc_now_iso(),
+            )
+            return updated
+
+        return self._write(conn, op)
+
+    def enqueue_feedback_conflict_review(
+        self,
+        *,
+        belief_id: BeliefId | str,
+        verdict: str,
+        evidence_quote: str,
+        feedback_event_id: str,
+        session_id: str,
+        user_message_id: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> BackgroundSourceWindow | None:
+        """Create an idempotent conflict-review source window for feedback."""
+
+        verdict_value = str(verdict)
+        if verdict_value not in _FEEDBACK_CONFLICT_VERDICTS:
+            return None
+        raw_belief_id = str(belief_id).strip()
+        raw_user_message_id = str(user_message_id).strip()
+        if not raw_belief_id:
+            raise ValueError("belief_id must be non-empty")
+        if not raw_user_message_id:
+            raise ValueError("user_message_id must be non-empty")
+
+        def op(db: sqlite3.Connection) -> BackgroundSourceWindow | None:
+            belief = self.beliefs.get_by_id(raw_belief_id, conn=db)
+            if not isinstance(belief, AtomicBelief):
+                return None
+            if belief.lifecycle != BeliefLifecycle.ACTIVE:
+                return None
+            source_ref = BackgroundSourceRef(
+                "conflict",
+                f"belief_feedback:{raw_belief_id}:{raw_user_message_id}",
+            )
+            idempotency_key = (
+                f"conflict_review:belief_feedback:{raw_belief_id}:{raw_user_message_id}"
+            )
+            return self.ledger.create_source_window(
+                stage=BackgroundStage.CONFLICT_REVIEW,
+                target_unit=_FEEDBACK_CONFLICT_TARGET_UNIT,
+                source_refs=(source_ref,),
+                idempotency_key=idempotency_key,
+                metadata={
+                    "active_belief_ids": [raw_belief_id],
+                    "belief_id": raw_belief_id,
+                    "belief_content": str(belief.content),
+                    "verdict": verdict_value,
+                    "evidence_quote": str(evidence_quote),
+                    "feedback_event_id": str(feedback_event_id),
+                    "session_id": str(session_id),
+                    "user_message_id": raw_user_message_id,
+                },
+                conn=db,
+            )
+
+        return self._write(conn, op)
 
     def write_audit_record(
         self,
@@ -893,6 +1025,34 @@ def _target_unit_for_context(context: Any) -> str:
     if isinstance(session_id, str) and session_id:
         return f"session:{session_id}"
     return "global"
+
+
+def _feedback_entry_matches(
+    entry: FeedbackEntry | str,
+    *,
+    kind: str,
+    utc_date: str,
+) -> bool:
+    try:
+        loaded = json.loads(str(entry))
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(loaded, Mapping):
+        return False
+    if loaded.get("kind") != kind:
+        return False
+    at = loaded.get("at")
+    return isinstance(at, str) and _utc_date(at) == utc_date
+
+
+def _utc_date(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value[:10]
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).date().isoformat()
 
 
 def _program_attached_sources(context: Any, *, run_id: str | None) -> list[Reference]:

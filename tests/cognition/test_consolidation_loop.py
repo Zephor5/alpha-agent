@@ -1676,6 +1676,73 @@ def test_conflict_review_requires_confirmation_writes_pending_candidate_without_
     ).status == BackgroundProgressStatus.PROCESSED
 
 
+def test_conflict_review_worker_consumes_feedback_shaped_window_and_supersedes(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    target = _atomic_belief("belief:target-python", "User prefers Python examples.")
+    service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    window = service.enqueue_feedback_conflict_review(
+        belief_id=target.id,
+        verdict="corrected",
+        evidence_quote="I prefer Rust examples now",
+        feedback_event_id="cogevt_feedback_1",
+        session_id="s1",
+        user_message_id="msg_user_1",
+    )
+    assert window is not None
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="supersede",
+            payload={
+                "belief_update": {
+                    "target_belief_id": str(target.id),
+                    "rationale": "The user corrected the recalled preference.",
+                },
+                "atomic_belief_draft": {
+                    "memory_kind": MemoryKind.PREFERENCE.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "object": "example language preference",
+                    "content": "User prefers Rust examples.",
+                },
+            },
+        )
+    )
+
+    report = MemoryConflictReviewWorker(service, provider).run_once()
+
+    assert report.emitted == 1
+    superseded = service.beliefs.get_by_id(target.id)
+    assert isinstance(superseded, AtomicBelief)
+    assert superseded.lifecycle == BeliefLifecycle.SUPERSEDED
+    active = [
+        belief
+        for belief in service.beliefs.recall(
+            BeliefRecallParams(lifecycles=frozenset({BeliefLifecycle.ACTIVE}), limit=8)
+        )
+        if isinstance(belief, AtomicBelief)
+    ]
+    replacement = [belief for belief in active if str(belief.id) != str(target.id)]
+    assert len(replacement) == 1
+    assert replacement[0].content == "User prefers Rust examples."
+    assert replacement[0].supersedes == Reference("belief", str(target.id))
+    source_ref = BackgroundSourceRef(
+        "conflict",
+        f"belief_feedback:{target.id}:msg_user_1",
+    )
+    assert service.ledger.get_source_progress(
+        source_ref,
+        stage=BackgroundStage.CONFLICT_REVIEW,
+        target_unit="scope:global",
+    ).status == BackgroundProgressStatus.PROCESSED
+    instruction = provider.calls[0]["messages"][0]["content"]
+    assert isinstance(instruction, str)
+    assert '"feedback_event_id": "cogevt_feedback_1"' in instruction
+    assert '"evidence_quote": "I prefer Rust examples now"' in instruction
+
+
 def test_conflict_review_rejects_invalid_output_without_mutating_target_and_remains_retryable(
     tmp_path,
 ) -> None:

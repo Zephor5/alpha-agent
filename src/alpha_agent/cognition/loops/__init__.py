@@ -9,6 +9,8 @@ from alpha_agent.cognition.loops.compact_extraction import DirectCompactExtracti
 from alpha_agent.cognition.loops.consolidation import ConsolidationConfig, ConsolidationLoop
 from alpha_agent.cognition.loops.drive import DriveConfig, DriveLoop, DriveReport
 from alpha_agent.cognition.loops.feedback_attribution import (
+    FeedbackAttributionJob,
+    RealtimeFeedbackAttributionService,
     RecalledBeliefHandle,
     claim_feedback_attribution_sources,
     complete_feedback_attribution_sources,
@@ -36,7 +38,9 @@ __all__ = [
     "DriveConfig",
     "DriveLoop",
     "DriveReport",
+    "FeedbackAttributionJob",
     "InMemoryCheckpointStore",
+    "RealtimeFeedbackAttributionService",
     "RecalledBeliefHandle",
     "ScheduleTrigger",
     "Scheduler",
