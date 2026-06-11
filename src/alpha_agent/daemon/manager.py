@@ -18,7 +18,11 @@ from alpha_agent.llm.mimo import MiMoProvider
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.llm.openai_compatible import OpenAICompatibleProvider
 from alpha_agent.llm.tracing import LLMTraceLogger
-from alpha_agent.runtime.agent import AlphaAgent, CompactExtractionSubmitter
+from alpha_agent.runtime.agent import (
+    AlphaAgent,
+    CompactExtractionSubmitter,
+    FeedbackAttributionSubmitter,
+)
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.default import build_tool_registry
 
@@ -65,12 +69,14 @@ class AgentFactory:
         *,
         coordinator: LoopCoordinator | None = None,
         compact_extraction_submitter: CompactExtractionSubmitter | None = None,
+        feedback_attribution_submitter: FeedbackAttributionSubmitter | None = None,
         llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.config = config
         self.store = store
         self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
         self.compact_extraction_submitter = compact_extraction_submitter
+        self.feedback_attribution_submitter = feedback_attribution_submitter
         self.llm_trace_logger = llm_trace_logger or LLMTraceLogger.from_config(config)
         self._lock = Lock()
 
@@ -90,6 +96,7 @@ class AgentFactory:
             ),
             coordinator=self.coordinator,
             compact_extraction_submitter=self.compact_extraction_submitter,
+            feedback_attribution_submitter=self.feedback_attribution_submitter,
             llm_trace_logger=self.llm_trace_logger,
         )
 

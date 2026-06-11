@@ -11,6 +11,10 @@ import pytest
 from alpha_agent.cognition.coordinator import LockBusy, LoopAcquireRequest, LoopCoordinator
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.loops import BackgroundCognitionService
+from alpha_agent.cognition.loops.feedback_attribution import (
+    FeedbackAttributionJob,
+    RecalledBeliefHandle,
+)
 from alpha_agent.cognition.models import (
     SUBJECT_SELF,
     AtomicBelief,
@@ -50,6 +54,7 @@ from alpha_agent.llm.base import (
     ToolChatMessage,
 )
 from alpha_agent.llm.mock import MockLLMProvider
+from alpha_agent.llm.tracing import LLMTraceLogger
 from alpha_agent.runtime.agent import AlphaAgent, ContextWindowExceededError
 from alpha_agent.runtime.context_handover import (
     DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
@@ -120,6 +125,38 @@ def test_direct_agent_default_registry_uses_default_file_tool_config(tmp_path) -
     assert glob_tool.allowed_roots == tuple(
         root.expanduser().resolve() for root in agent.config.file_tool.allowed_roots
     )
+
+
+def test_alpha_agent_preserves_positional_llm_trace_logger_and_config(tmp_path) -> None:
+    store = _store(tmp_path)
+    trace_logger = LLMTraceLogger(trace_log_path=tmp_path / "custom-llm.jsonl")
+    config = AlphaConfig(
+        db_path=store.db_path,
+        log_dir=tmp_path / "logs",
+        gateway_status_path=tmp_path / "gateway-status.json",
+    )
+
+    agent = AlphaAgent(
+        store,
+        MockLLMProvider(),
+        None,
+        2,
+        0.0,
+        8,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        trace_logger,
+        config,
+    )
+
+    assert agent.llm_trace_logger is trace_logger
+    assert agent.config is config
+    assert agent.feedback_attribution_submitter is None
 
 
 def test_direct_agent_default_registry_respects_file_write_gates(tmp_path) -> None:
@@ -965,6 +1002,137 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
         "llm.started",
         "llm.completed",
     ]
+
+
+def test_feedback_attribution_submits_after_recall_bearing_turn(tmp_path) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    _seed_active_belief(
+        store,
+        log,
+        "belief:python",
+        "User prefers Python examples.",
+        object_="python",
+    )
+    submitted: list[FeedbackAttributionJob] = []
+    provider = _MemoryRecallCallingProvider()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        event_log=log,
+        feedback_attribution_submitter=submitted.append,
+    )
+
+    first = agent.respond("What examples do I prefer?", session_id="s1")
+    assert submitted == []
+    assert first.debug["feedback_attribution_submitted"] is False
+
+    second = agent.respond("Actually I prefer TypeScript examples.", session_id="s1")
+
+    assert len(submitted) == 1
+    job = submitted[0]
+    tool_messages = [
+        message
+        for message in store.list_session_messages("s1")
+        if message.kind == "tool_message"
+    ]
+    assert len(tool_messages) == 1
+    current_user = [
+        message
+        for message in store.list_session_messages("s1")
+        if message.id == second.debug["user_message_id"]
+    ][0]
+
+    assert job.session_id == "s1"
+    assert job.turn_id == second.debug["turn_id"]
+    assert job.turn_received_event_id == second.debug["turn_received_event_id"]
+    assert job.user_message_id == current_user.id
+    assert job.user_message_text == "Actually I prefer TypeScript examples."
+    assert tuple(job.recall_tool_message_ids) == (tool_messages[0].id,)
+    assert tuple(job.recalled_beliefs) == (
+        RecalledBeliefHandle(
+            belief_id="belief:python",
+            content="User prefers Python examples.",
+            memory_kind="preference",
+            scope="counterpart",
+            source_tool_message_ids=(tool_messages[0].id,),
+        ),
+    )
+    assert list(job.prompt_messages) == provider.calls[2]
+    assert job.prompt_messages[-1] == {
+        "role": "user",
+        "content": "Actually I prefer TypeScript examples.",
+    }
+    assert second.debug["feedback_attribution_submitted"] is True
+    assert second.debug["feedback_attribution_recalled_belief_count"] == 1
+    assert second.debug["feedback_attribution_belief_ids"] == ["belief:python"]
+    assert second.debug["feedback_attribution_recall_tool_message_ids"] == [
+        tool_messages[0].id
+    ]
+
+
+def test_feedback_attribution_skips_turns_without_prior_recall(tmp_path) -> None:
+    store = _store(tmp_path)
+    submitted: list[FeedbackAttributionJob] = []
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=_RecordingProvider("answer"),
+        feedback_attribution_submitter=submitted.append,
+    )
+
+    result = agent.respond("No recall has happened.", session_id="s1")
+
+    assert submitted == []
+    assert result.response == "answer"
+    assert result.debug["feedback_attribution_submitted"] is False
+    assert result.debug["feedback_attribution_recalled_belief_count"] == 0
+    assert "feedback_attribution_belief_ids" not in result.debug
+
+
+def test_feedback_attribution_submitter_failure_is_non_fatal_and_traced(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    _seed_active_belief(
+        store,
+        log,
+        "belief:python",
+        "User prefers Python examples.",
+        object_="python",
+    )
+
+    def fail_submit(_job: FeedbackAttributionJob) -> bool:
+        raise RuntimeError("queue unavailable")
+
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=_MemoryRecallCallingProvider(),
+        event_log=log,
+        feedback_attribution_submitter=fail_submit,
+    )
+    agent.respond("What examples do I prefer?", session_id="s1")
+    recall_message = [
+        message
+        for message in store.list_session_messages("s1")
+        if message.kind == "tool_message"
+    ][0]
+
+    result = agent.respond("Actually I prefer TypeScript.", session_id="s1")
+
+    assert result.response == "You prefer Python examples."
+    assert result.debug["feedback_attribution_submitted"] is False
+    assert result.debug["feedback_attribution_submit_error"] == "queue unavailable"
+    assert result.debug["feedback_attribution_recall_tool_message_ids"] == [
+        recall_message.id
+    ]
+    trace = store.list_runtime_traces(
+        "s1",
+        event_type="feedback_attribution.submit_failed",
+    )[0]
+    assert trace.metadata["turn_id"] == result.debug["turn_id"]
+    assert trace.metadata["error_type"] == "RuntimeError"
+    assert trace.metadata["error"] == "queue unavailable"
 
 
 def test_llm_debug_payloads_are_written_to_jsonl_not_database(tmp_path) -> None:

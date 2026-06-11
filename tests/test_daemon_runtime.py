@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from types import MethodType
 
 import pytest
 
@@ -138,7 +139,11 @@ def test_daemon_shares_single_llm_trace_logger_across_runtime_services(
 
     assert factory_logger is daemon.background_service.llm_trace_logger
     assert factory_logger is daemon.direct_compact_extraction.llm_trace_logger
+    assert factory_logger is daemon.feedback_attribution.llm_trace_logger
     assert agent.llm_trace_logger is factory_logger
+    submitter = agent.feedback_attribution_submitter
+    assert isinstance(submitter, MethodType)
+    assert submitter.__self__ is daemon.feedback_attribution
     assert factory_logger.enabled
     assert factory_logger.trace_log_path == config.log_dir / "llm.jsonl"
 
@@ -249,6 +254,7 @@ def test_daemon_stop_response_uses_current_graceful_stopping_status(tmp_path: Pa
     assert (
         response["status"]["message"] == "Daemon is draining the current request before stopping."
     )
+    assert daemon.feedback_attribution._closed is True
 
 
 def test_daemon_stop_response_accepts_immediate_policy(tmp_path: Path) -> None:
@@ -312,3 +318,4 @@ def test_daemon_disconnects_adapter_when_startup_connect_fails(
 
     assert adapter.connected is True
     assert adapter.disconnected is True
+    assert daemon.feedback_attribution._closed is True

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -22,6 +22,10 @@ from alpha_agent.cognition.coordinator import (
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
+from alpha_agent.cognition.loops.feedback_attribution import (
+    FeedbackAttributionJob,
+    recalled_beliefs_for_previous_turn,
+)
 from alpha_agent.cognition.models import (
     BeliefScope,
     CognitiveEvent,
@@ -153,6 +157,7 @@ CompactExtractionSubmitter = Callable[
     [HandoverExtractionJob, Sequence[LLMToolDefinitionInput] | None],
     object,
 ]
+FeedbackAttributionSubmitter = Callable[[FeedbackAttributionJob], object]
 
 
 _SESSION_TURN_LOCKS: dict[str, RLock] = {}
@@ -276,6 +281,7 @@ class AlphaAgent:
         compact_extraction_submitter: CompactExtractionSubmitter | None = None,
         llm_trace_logger: LLMTraceLogger | None = None,
         config: AlphaConfig | None = None,
+        feedback_attribution_submitter: FeedbackAttributionSubmitter | None = None,
     ):
         self.store = store
         self.llm_provider = llm_provider
@@ -316,6 +322,7 @@ class AlphaAgent:
         )
         self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
         self.compact_extraction_submitter = compact_extraction_submitter
+        self.feedback_attribution_submitter = feedback_attribution_submitter
         self._canceled_sessions: set[str] = set()
 
     def cancel(self, session_id: str) -> None:
@@ -414,6 +421,13 @@ class AlphaAgent:
             messages = self._rebuild_runtime_llm_messages(
                 session_id=session_id,
                 prompt_frame=prompt_frame,
+            )
+            self._submit_feedback_attribution(
+                turn_context=agent_turn,
+                user_record=user_record,
+                user_message=user_message,
+                prompt_messages=messages,
+                debug=debug,
             )
             prompt_token_estimate = estimate_chat_tokens(messages, tools=model_tools or None)
             debug["prompt_token_estimate"] = prompt_token_estimate
@@ -687,6 +701,104 @@ class AlphaAgent:
                 )
             except Exception:
                 return
+
+    def _submit_feedback_attribution(
+        self,
+        *,
+        turn_context: AgentTurnContext,
+        user_record: SessionMessage,
+        user_message: str,
+        prompt_messages: Sequence[ChatMessage],
+        debug: dict[str, Any],
+    ) -> None:
+        recalled_beliefs = recalled_beliefs_for_previous_turn(
+            self.store,
+            turn_context.session_id,
+            user_record.ordinal,
+        )
+        debug["feedback_attribution_recalled_belief_count"] = len(recalled_beliefs)
+        if not recalled_beliefs:
+            debug["feedback_attribution_submitted"] = False
+            return
+
+        recall_tool_message_ids = _stable_unique_strings(
+            message_id
+            for handle in recalled_beliefs
+            for message_id in handle.source_tool_message_ids
+        )
+        debug["feedback_attribution_belief_ids"] = [
+            handle.belief_id for handle in recalled_beliefs
+        ]
+        debug["feedback_attribution_recall_tool_message_ids"] = list(
+            recall_tool_message_ids
+        )
+        debug["feedback_attribution_prompt_message_count"] = len(prompt_messages)
+
+        submitter = self.feedback_attribution_submitter
+        if submitter is None:
+            debug["feedback_attribution_submitted"] = False
+            debug["feedback_attribution_submitter_configured"] = False
+            return
+
+        job = FeedbackAttributionJob(
+            session_id=turn_context.session_id,
+            turn_id=turn_context.turn_id,
+            turn_received_event_id=turn_context.turn_received_event_id or "",
+            user_message_id=user_record.id,
+            user_message_text=user_message,
+            prompt_messages=prompt_messages,
+            recalled_beliefs=tuple(recalled_beliefs),
+            recall_tool_message_ids=recall_tool_message_ids,
+        )
+        debug["feedback_attribution_submitter_configured"] = True
+        try:
+            submitted = submitter(job)
+        except Exception as exc:
+            debug["feedback_attribution_submitted"] = False
+            debug["feedback_attribution_submit_error"] = str(exc)
+            self._append_feedback_attribution_submit_trace(
+                job,
+                reason="submitter_exception",
+                error=exc,
+            )
+            return
+
+        submitted_bool = submitted if isinstance(submitted, bool) else True
+        debug["feedback_attribution_submitted"] = submitted_bool
+        if not submitted_bool:
+            debug["feedback_attribution_submit_error"] = "submitter returned false"
+            self._append_feedback_attribution_submit_trace(
+                job,
+                reason="submitter_returned_false",
+            )
+
+    def _append_feedback_attribution_submit_trace(
+        self,
+        job: FeedbackAttributionJob,
+        *,
+        reason: str,
+        error: Exception | None = None,
+    ) -> None:
+        metadata: dict[str, Any] = {
+            "turn_id": job.turn_id,
+            "turn_received_event_id": job.turn_received_event_id,
+            "user_message_id": job.user_message_id,
+            "belief_ids": [handle.belief_id for handle in job.recalled_beliefs],
+            "recall_tool_message_ids": list(job.recall_tool_message_ids),
+            "reason": reason,
+        }
+        if error is not None:
+            metadata["error_type"] = type(error).__name__
+            metadata["error"] = str(error)
+        try:
+            self.store.append_runtime_trace(
+                session_id=job.session_id,
+                event_type="feedback_attribution.submit_failed",
+                content="Feedback attribution submit failed.",
+                metadata=metadata,
+            )
+        except Exception:
+            return
 
     def _source_prompt_messages(
         self,
@@ -1518,3 +1630,14 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
         return []
     return [str(item) for item in value if item is not None]
+
+
+def _stable_unique_strings(values: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if not value.strip() or value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return tuple(unique)

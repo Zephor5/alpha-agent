@@ -14,6 +14,7 @@ from alpha_agent.cognition.coordinator import LoopCoordinator
 from alpha_agent.cognition.loops import (
     BackgroundCognitionService,
     DirectCompactExtractionService,
+    RealtimeFeedbackAttributionService,
 )
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
 from alpha_agent.config import AlphaConfig
@@ -98,12 +99,19 @@ class AlphaDaemon:
             enabled=config.cognition_background.enabled,
             llm_trace_logger=llm_trace_logger,
         )
+        self.feedback_attribution = RealtimeFeedbackAttributionService(
+            store=self.store,
+            llm_provider=background_provider,
+            enabled=config.cognition_background.enabled,
+            llm_trace_logger=llm_trace_logger,
+        )
         self.agent_manager = agent_manager or AgentManager(
             AgentFactory(
                 config,
                 self.store,
                 coordinator=self.loop_coordinator,
                 compact_extraction_submitter=self.direct_compact_extraction.submit,
+                feedback_attribution_submitter=self.feedback_attribution.submit,
                 llm_trace_logger=llm_trace_logger,
             )
         )
@@ -202,6 +210,10 @@ class AlphaDaemon:
                 wait=self._stop_policy is not StopPolicy.IMMEDIATE,
                 timeout=self.config.cognition_background.tick_timeout_seconds + 1,
             )
+            self.feedback_attribution.shutdown(
+                wait=self._stop_policy is not StopPolicy.IMMEDIATE,
+                timeout=self.config.cognition_background.tick_timeout_seconds + 1,
+            )
             gateway_runtime = gateway_runtime_config(self.config)
             self._disconnect_adapters(connected_adapters, gateway_runtime.log_paths["errors.log"])
             self.agent_manager.evict_all()
@@ -236,6 +248,7 @@ class AlphaDaemon:
             wait=False,
         )
         self.direct_compact_extraction.shutdown(wait=False)
+        self.feedback_attribution.shutdown(wait=False)
         write_daemon_status(
             self.runtime.status_path,
             self._set_status(
