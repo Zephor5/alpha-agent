@@ -73,9 +73,17 @@ memory scopes.
 
 Imported conversation extraction should not intentionally produce `SESSION`
 scope memory. Durable outputs should naturally land in user, self, counterpart,
-or project cognition through the existing pipeline. The first implementation
-does not change the extraction prompt for this rule; it relies on existing
-behavior unless a later task explicitly changes cognition semantics.
+or project cognition through the existing pipeline.
+
+First-version import extraction must adjust the extraction prompt and validation
+context for import sessions:
+
+- Do not allow `SESSION` scope for imported conversation extraction.
+- Do not include the import session itself as an allowed `about` reference.
+- Treat imported assistant output as evidence only when the surrounding user
+  response adopts, corrects, or otherwise makes that assistant output evidence
+  about the user.
+- Keep ordinary session extraction semantics unchanged.
 
 ### Time Model
 
@@ -86,7 +94,11 @@ Rules:
 - Use external message `created_at` as the persisted session message time.
 - Do not replace original message time with import time.
 - Store import time separately in import batch/message records.
-- Time affects conflict handling through existing cognition behavior.
+- Target cognition behavior should have access to source message time, not just
+  processing time, when extracting and consolidating memories. The exact
+  project-wide representation of message-time evidence remains an open design
+  detail because current background cognition also loses accurate per-message
+  time information.
 - More recent user expressions can supersede older ones, especially for volatile
   preferences, active projects, tools, and short-term plans.
 - Stable long-term values, quality standards, working style, and repeated
@@ -208,10 +220,12 @@ First version rejects:
 
 First version uses a 50 MB payload size limit.
 
-The limit must be enforced on both sides:
+The limit is enforced at the earliest practical first-version boundary:
 
-- CLI checks file size before sending.
-- Daemon/service checks received payload size before parsing.
+- CLI checks file size before sending content through IPC.
+- Daemon/service may defensively reject an oversized received payload, but first
+  version does not require the daemon to solve raw IPC framing limits before JSON
+  parsing.
 
 Future streaming or chunked import can relax this, but first version should keep
 the boundary simple.
@@ -343,6 +357,12 @@ Content ownership:
 - unique key on `source_provider, external_conversation_id, external_message_id`
 - unique key on `session_message_id`
 
+`imported_messages` records inserted external messages. Deduped messages do not
+create new `imported_messages` or `session_messages` rows; their counts are
+recorded on the import batch summary. If verbose status needs per-conversation
+dedup details for a past batch, store those attempt-level counts in
+`import_batches.metadata` or an equivalent batch-result structure.
+
 ### Session Message Changes
 
 Persistent session messages need to support external system messages.
@@ -397,7 +417,6 @@ ConversationImportService
 
 Responsibilities:
 
-- Enforce payload size limit.
 - Parse JSON.
 - Validate normalized import contract.
 - Plan writes and dedup counts.
@@ -515,23 +534,31 @@ Rules:
 - Do not add a first-version `--process-now` path.
 - Let daemon/background cognition process imported messages after import.
 
-### Extraction Prefix For Import Sessions
+### Extraction Prompt For Import Sessions
 
-Import sessions require one narrow special case.
+Import sessions require a narrow extraction specialization.
 
 Current background extraction for inactive sessions prepends Alpha's runtime
 system prompt before session messages. For imported sessions, that prompt is not
-part of the external conversation and should not be added.
+part of the external conversation and should not be added. Current extraction
+also allows `SESSION` scope, which is not appropriate for imported evidence
+containers.
 
 Target behavior:
 
 - Ordinary sessions keep existing extraction prefix behavior.
 - Import sessions do not prepend Alpha runtime system prompt.
 - Import sessions do not introduce local summary or compressed context.
-- Import sessions replay imported source messages only, then the existing
+- Import sessions replay imported source messages only, then an import-aware
   extraction instruction.
 - Imported `role=system` messages remain part of the imported message sequence.
-- The extraction prompt/contract itself is not changed in first version.
+- Import-aware extraction does not allow `SESSION` scope and does not include
+  the import session as an allowed `about` reference.
+- Import-aware extraction must not treat assistant output as user
+  self-description unless a user message adopts, corrects, or otherwise makes
+  the assistant output evidence.
+- The general background extraction contract remains unchanged for ordinary
+  sessions.
 
 ### Processing Priority
 
@@ -542,6 +569,10 @@ Desired scheduling behavior:
 - Foreground/current sessions remain highest priority.
 - Ordinary recent inactive sessions come before bulk imported history.
 - Imported sessions are lower priority and can be rate-limited later.
+- Among imported sessions, extraction selects conversations in ascending
+  original-time order (oldest first), so consolidation supersede chains
+  terminate at the user's most recent expression instead of an older
+  conversation arriving late and "contradicting" newer state.
 
 First version can use the existing worker flow with import-session detection,
 but must not let imported history break ordinary chat responsiveness.
@@ -595,7 +626,8 @@ Verbose status can include:
 - external conversation id
 - title, if present
 - import status per conversation
-- message inserted/deduped counts per conversation
+- message inserted/deduped counts per conversation when those attempt-level
+  details were persisted for the batch
 - internal hidden session id for troubleshooting
 - extraction counts per conversation
 
@@ -603,10 +635,13 @@ Default status should not show hidden session ids.
 
 ## Validation Strategy
 
-Validation happens in the daemon service.
+File-size validation happens in the CLI before IPC. Structural validation
+happens in the daemon service.
 
 Rules:
 
+- Reject files larger than the first-version size limit before sending them to
+  the daemon.
 - Parse the entire JSON payload before writing.
 - Validate the entire normalized structure before writing.
 - Default behavior is whole-batch failure for invalid input.
@@ -640,6 +675,8 @@ Rules:
 
 - Do not persist local machine-specific absolute input paths.
 - `input_name` may be a filename or user-facing label.
+- Imported conversation content is owner-supplied trusted source material in
+  first version.
 - Do not treat metadata as trusted cognition semantics.
 - Do not run tools from imported tool records.
 - Imported tool calls/results are historical text/context only.
@@ -686,7 +723,9 @@ logic without IPC wiring yet.
 Tasks:
 
 - [ ] Implement normalized JSON parser in service/application layer.
-- [ ] Enforce 50 MB service payload limit.
+- [ ] Treat payloads that reached the service as already CLI size-checked; add a
+      defensive service-side size rejection only if it fits the existing IPC
+      boundary cleanly.
 - [ ] Validate required fields and rejected fields.
 - [ ] Validate role-specific rules for `system`, `user`, `assistant`, `tool`.
 - [ ] Validate assistant tool calls and tool result matching.
@@ -788,6 +827,7 @@ Tasks:
 
 Acceptance criteria:
 
+- [ ] CLI rejects files larger than 50 MB before sending an IPC request.
 - [ ] CLI dry-run displays validation/plan summary.
 - [ ] CLI real import displays batch id and counts.
 - [ ] CLI status displays aggregate extraction progress.
@@ -828,8 +868,8 @@ Verification:
 
 ### Phase 7: Cognition Extraction Integration
 
-**Goal:** Let existing extraction process imported sessions without adding the
-local Alpha runtime system prompt.
+**Goal:** Let extraction process imported sessions without adding the local
+Alpha runtime system prompt and without producing session-scoped memories.
 
 Tasks:
 
@@ -841,13 +881,23 @@ Tasks:
 - [ ] Do not prepend Alpha runtime system prompt for import sessions.
 - [ ] Do not include local summary snapshots or compressed handover context for
       import sessions.
-- [ ] Keep ordinary session extraction prefix unchanged.
-- [ ] Keep extraction instruction/prompt contract unchanged.
+- [ ] Use an import-aware extraction instruction that excludes `SESSION` scope.
+- [ ] Build import-session allowed `about` refs without a session reference.
+- [ ] Instruct extraction that assistant output is evidence about the user only
+      when adopted, corrected, or otherwise made evidence by user messages.
+- [ ] Keep ordinary session extraction prefix and instruction unchanged.
+- [ ] Select imported-session extraction candidates in ascending original
+      conversation time order (oldest first).
 
 Acceptance criteria:
 
 - [ ] Ordinary session extraction still includes existing runtime prefix.
 - [ ] Import session extraction does not include Alpha runtime system prompt.
+- [ ] Import session extraction cannot emit `SESSION` scope memory.
+- [ ] Import session extraction does not convert standalone assistant output
+      into user self-description.
+- [ ] Imported sessions are extracted oldest-first by original conversation
+      time.
 - [ ] Imported `system/user/assistant/tool` messages are converted into LLM
       source messages as intended.
 - [ ] Import extraction source refs still use existing background ledger source
@@ -855,8 +905,8 @@ Acceptance criteria:
 
 Verification:
 
-- [ ] Memory extraction worker tests for ordinary and import session prefix
-      behavior.
+- [ ] Memory extraction worker tests for ordinary and import session prompt,
+      prefix, and allowed-scope behavior.
 - [ ] Status tests that aggregate extraction progress for imported messages.
 
 ### Phase 8: Documentation And Final Validation
@@ -886,6 +936,29 @@ Verification:
 - [ ] `uv run mypy src tests`
 - [ ] `uv run pytest -q`
 
+## Rollout Guidance
+
+Run the rollout in two stages after implementation lands.
+
+### Pilot Batch Before Bulk Import
+
+- Import a small pilot batch (10-20 conversations) first.
+- Manually review the extracted drafts and consolidation decisions produced
+  from the pilot before importing full history.
+- Verify on pilot output that external assistant statements were not extracted
+  as user self-description unless the user adopted or responded to them.
+- Tune source data or extraction behavior before bulk import if pilot quality
+  is poor; batch idempotency makes incremental rollout safe.
+
+### Backlog Watch During Bulk Import
+
+- Watch `background_source_progress` pending depth for the `extraction` and
+  `consolidation` stages during and after bulk import.
+- Sustained consolidation backlog or visibly duplicated active beliefs after
+  bulk import is the trigger signal to execute
+  `docs/todo/consolidation_reconciliation_plan.md`. Do not start that plan on
+  a calendar basis; start it when this signal appears.
+
 ## Dependency Order
 
 Recommended sequence:
@@ -896,7 +969,7 @@ Recommended sequence:
 4. Daemon IPC.
 5. CLI.
 6. Chat isolation guards.
-7. Extraction prefix special case.
+7. Extraction prompt special case.
 8. Docs and final verification.
 
 Rationale:
@@ -904,27 +977,37 @@ Rationale:
 - Store and domain models are prerequisites for service and status.
 - Service must own validation before daemon/CLI expose it.
 - IPC comes before CLI because CLI must not write directly.
-- Isolation guards should land before users can accidentally continue import
-  sessions.
-- Extraction prefix behavior depends on import-session detection.
+- Chat isolation guards rely on import-session detection and are implemented as
+  their own verification phase.
+- Extraction prompt behavior depends on import-session detection.
 
 ## Risks And Mitigations
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
 | Imported sessions leak into normal chat | High | Use import mapping table as authoritative session classifier and reject at runtime. |
-| External system messages override local extraction behavior | Medium | Do not prepend Alpha runtime system prompt for import sessions; keep imported system messages as source sequence only. |
-| Large imports block normal daemon work | Medium | Enforce 50 MB limit, parse before write transaction, serialize import writes only. |
+| Import extraction creates session-scoped memories | High | Use import-aware extraction instructions and validation context that exclude `SESSION` scope and session `about` refs. |
+| Assistant statements become user self-description without user adoption | High | Import-aware extraction must treat assistant output as evidence only when user messages adopt, correct, or otherwise make it evidence. |
+| Large imports block normal daemon work | Medium | Enforce 50 MB CLI file limit, parse before write transaction, serialize import writes only. |
 | Duplicate imports create duplicate memories | High | External message id is required; dedup before writing session messages. |
 | Existing local DB has old CHECK constraints | Medium | No compatibility migration; document local state rebuild requirement. |
 | Tool messages cannot replay because of missing tool calls | Medium | Require tool_call_id and assistant tool_calls with matching ids. |
+| Out-of-order extraction lets older expressions supersede newer ones | Medium | Extract imported sessions oldest-first by original time so supersede chains end at the most recent expression. |
 | First version status overpromises cognition completion | Medium | Track only import completion and extraction source progress. |
 
 ## Open Decisions
 
-None required before implementation. Low-level details not explicitly specified
-in this plan should follow existing project patterns and the architectural
-decisions above.
+### Source-Time Propagation Through Cognition
+
+Imported messages persist original `created_at`, but current background
+cognition primarily uses processing time when materializing extracted beliefs.
+Before relying on time-based supersession quality, decide how source message
+time should be represented in extraction prompts, validation context, belief
+validity, and consolidation inputs. This likely affects ordinary sessions too,
+not only external imports.
+
+Low-level details not explicitly specified in this plan should follow existing
+project patterns and the architectural decisions above.
 
 ## First-Version Acceptance Checklist
 
@@ -943,4 +1026,7 @@ decisions above.
 - [ ] Import status reports aggregate import counts.
 - [ ] Import status reports extraction progress for imported session messages.
 - [ ] Import extraction does not prepend Alpha runtime system prompt.
+- [ ] Import extraction does not produce `SESSION` scope memories.
+- [ ] Import extraction does not treat standalone assistant output as user
+      self-description.
 - [ ] First-version limitations are documented.
