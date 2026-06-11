@@ -25,6 +25,7 @@ class BackgroundStage(StrEnum):
     CONSOLIDATION = "consolidation"
     CONFLICT_REVIEW = "conflict_review"
     SUMMARY = "summary"
+    FEEDBACK_ATTRIBUTION = "feedback_attribution"
 
 
 class BackgroundProgressStatus(StrEnum):

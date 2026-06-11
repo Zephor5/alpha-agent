@@ -45,6 +45,9 @@ _SEMANTIC_OPERATIONS = frozenset(
     {"create", "strengthen", "supersede", "retract", "archive", "pending-confirmation"}
 )
 _SEMANTIC_OPERATION_ALIASES = {"pending_confirmation": "pending-confirmation"}
+_FEEDBACK_ATTRIBUTION_VERDICTS = frozenset(
+    {"confirmed", "contradicted", "corrected", "irrelevant"}
+)
 _CONSOLIDATION_STAGES = frozenset(
     {BackgroundStage.CONSOLIDATION, BackgroundStage.CONFLICT_REVIEW}
 )
@@ -192,6 +195,58 @@ def summary_output_json_schema(
         operation="create_summary_belief",
         payload_schema=_payload_schema({"summary_belief_draft": summary_draft}),
     )
+
+
+def feedback_attribution_output_json_schema() -> dict[str, Any]:
+    """Return the LLM-facing JSON schema for feedback attribution outputs."""
+
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["payload"],
+        "properties": {
+            "payload": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["verdicts"],
+                "properties": {
+                    "verdicts": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["belief_id", "verdict", "evidence_quote"],
+                            "properties": {
+                                "belief_id": {"type": "string", "minLength": 1},
+                                "verdict": {
+                                    "enum": sorted(_FEEDBACK_ATTRIBUTION_VERDICTS)
+                                },
+                                "evidence_quote": {"type": "string"},
+                            },
+                            "allOf": [
+                                {
+                                    "if": {
+                                        "properties": {
+                                            "verdict": {"const": "irrelevant"}
+                                        }
+                                    },
+                                    "else": {
+                                        "properties": {
+                                            "evidence_quote": {
+                                                "type": "string",
+                                                "minLength": 1,
+                                            }
+                                        }
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                },
+            }
+        },
+    }
 
 
 def _background_output_schema(
@@ -408,6 +463,14 @@ class BackgroundLLMValidationContext:
 
 
 @dataclass(frozen=True)
+class FeedbackAttributionValidationContext:
+    """Program-selected attribution inputs used to validate one LLM output."""
+
+    allowed_belief_ids: frozenset[str]
+    user_message_content: str
+
+
+@dataclass(frozen=True)
 class ValidatedAtomicBeliefDraft:
     """Id-less atomic belief draft accepted from a background LLM output."""
 
@@ -446,6 +509,15 @@ class ValidatedBeliefUpdate:
     rationale: str
 
 
+@dataclass(frozen=True)
+class ValidatedFeedbackAttributionVerdict:
+    """Feedback verdict accepted from an attribution LLM output."""
+
+    belief_id: str
+    verdict: str
+    evidence_quote: str
+
+
 ValidatedPayload = (
     ValidatedAtomicBeliefDraft | ValidatedSummaryBeliefDraft | ValidatedBeliefUpdate
 )
@@ -476,6 +548,107 @@ def validate_background_llm_json(
     if not isinstance(decoded, dict):
         raise BackgroundLLMValidationError("malformed background LLM output must be an object")
     return validate_background_llm_output(decoded, context)
+
+
+def validate_feedback_attribution_json(
+    raw_output: str,
+    context: FeedbackAttributionValidationContext,
+) -> tuple[ValidatedFeedbackAttributionVerdict, ...]:
+    """Parse and validate a fixture or provider JSON string for attribution."""
+
+    try:
+        decoded = json.loads(raw_output)
+    except json.JSONDecodeError as exc:
+        raise BackgroundLLMValidationError(
+            f"malformed feedback attribution JSON: {exc}"
+        ) from exc
+    if not isinstance(decoded, dict):
+        raise BackgroundLLMValidationError(
+            "malformed feedback attribution output must be an object"
+        )
+    return validate_feedback_attribution_output(decoded, context)
+
+
+def validate_feedback_attribution_output(
+    output: Mapping[str, Any],
+    context: FeedbackAttributionValidationContext,
+) -> tuple[ValidatedFeedbackAttributionVerdict, ...]:
+    """Validate decoded feedback attribution structured output."""
+
+    _reject_numeric_strength_fields(output)
+    _validate_exact_keys(output, {"payload"}, "feedback attribution output")
+    _reject_prompt_injection_except_evidence_quote(output)
+
+    payload = output.get("payload")
+    if not isinstance(payload, Mapping):
+        raise BackgroundLLMValidationError("payload must be an object")
+    _validate_exact_keys(payload, {"verdicts"}, "feedback attribution payload")
+    raw_verdicts = payload.get("verdicts")
+    if not isinstance(raw_verdicts, list) or not raw_verdicts:
+        raise BackgroundLLMValidationError("payload.verdicts must be a non-empty array")
+
+    allowed_ids = frozenset(item for item in context.allowed_belief_ids if item.strip())
+    if not allowed_ids:
+        raise BackgroundLLMValidationError("allowed belief id whitelist must be non-empty")
+
+    seen: set[str] = set()
+    verdicts: list[ValidatedFeedbackAttributionVerdict] = []
+    for index, raw_verdict in enumerate(raw_verdicts):
+        if not isinstance(raw_verdict, Mapping):
+            raise BackgroundLLMValidationError(
+                f"payload.verdicts[{index}] must be an object"
+            )
+        _validate_exact_keys(
+            raw_verdict,
+            {"belief_id", "verdict", "evidence_quote"},
+            f"payload.verdicts[{index}]",
+        )
+        raw_belief_id = raw_verdict.get("belief_id")
+        if not isinstance(raw_belief_id, str) or not raw_belief_id.strip():
+            raise BackgroundLLMValidationError("belief_id is required")
+        belief_id = raw_belief_id
+        if belief_id in seen:
+            raise BackgroundLLMValidationError(f"duplicate belief id: {belief_id}")
+        seen.add(belief_id)
+        if belief_id not in allowed_ids:
+            raise BackgroundLLMValidationError(
+                f"belief id {belief_id!r} is outside the attribution whitelist"
+            )
+        raw_verdict_value = raw_verdict.get("verdict")
+        if not isinstance(raw_verdict_value, str) or not raw_verdict_value.strip():
+            raise BackgroundLLMValidationError("verdict is required")
+        verdict = raw_verdict_value
+        if verdict not in _FEEDBACK_ATTRIBUTION_VERDICTS:
+            allowed = ", ".join(sorted(_FEEDBACK_ATTRIBUTION_VERDICTS))
+            raise BackgroundLLMValidationError(
+                f"unsupported feedback attribution verdict {verdict!r}; allowed: {allowed}"
+            )
+        quote = raw_verdict.get("evidence_quote")
+        if not isinstance(quote, str):
+            raise BackgroundLLMValidationError("evidence_quote must be a string")
+        if verdict != "irrelevant" and not quote.strip():
+            raise BackgroundLLMValidationError(
+                "evidence_quote is required for non-irrelevant verdicts"
+            )
+        if quote and quote not in context.user_message_content:
+            raise BackgroundLLMValidationError(
+                "evidence_quote must be a verbatim substring of the user message"
+            )
+        verdicts.append(
+            ValidatedFeedbackAttributionVerdict(
+                belief_id=belief_id,
+                verdict=verdict,
+                evidence_quote=quote,
+            )
+        )
+
+    missing = allowed_ids - seen
+    if missing:
+        raise BackgroundLLMValidationError(
+            "missing feedback attribution verdicts for belief ids: "
+            + ", ".join(sorted(missing))
+        )
+    return tuple(verdicts)
 
 
 def validate_background_llm_output(
@@ -884,6 +1057,44 @@ def _reject_prompt_injection(value: object) -> None:
     normalized = value.casefold()
     if any(pattern in normalized for pattern in _PROMPT_INJECTION_PATTERNS):
         raise BackgroundLLMValidationError("prompt-injection content is not allowed")
+
+
+def _reject_prompt_injection_except_evidence_quote(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if str(key) == "evidence_quote":
+                continue
+            _reject_prompt_injection_except_evidence_quote(nested)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _reject_prompt_injection_except_evidence_quote(item)
+        return
+    if not isinstance(value, str):
+        return
+    normalized = value.casefold()
+    if any(pattern in normalized for pattern in _PROMPT_INJECTION_PATTERNS):
+        raise BackgroundLLMValidationError("prompt-injection content is not allowed")
+
+
+def _validate_exact_keys(
+    raw: Mapping[str, Any],
+    expected: set[str],
+    label: str,
+) -> None:
+    keys = {str(key) for key in raw}
+    if keys == expected:
+        return
+    missing = expected - keys
+    unexpected = keys - expected
+    details = []
+    if missing:
+        details.append(f"missing keys: {', '.join(sorted(missing))}")
+    if unexpected:
+        details.append(f"unknown keys: {', '.join(sorted(unexpected))}")
+    raise BackgroundLLMValidationError(
+        f"{label} must contain exactly {sorted(expected)}; {'; '.join(details)}"
+    )
 
 
 def _required_str(raw: Mapping[str, Any], key: str) -> str:
