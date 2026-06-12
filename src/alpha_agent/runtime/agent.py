@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
@@ -93,7 +93,7 @@ from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_CONTEXT_KEY
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_CONTEXT_KEY
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
-from alpha_agent.utils.time import utc_now_iso
+from alpha_agent.utils.time import local_now, utc_now_iso
 
 _SELF_MEMORY_SUMMARY_REF = Reference("subject", "subject:self")
 
@@ -118,6 +118,16 @@ class AgentTurnResult:
     response: str
     session_id: str
     debug: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SessionTimeReminder:
+    """Pending local-time reminder to anchor the next runtime input."""
+
+    kind: str
+    local_datetime: str
+    local_date: str
+    raw_content: str
 
 
 class AgentCanceledError(RuntimeError):
@@ -282,6 +292,7 @@ class AlphaAgent:
         llm_trace_logger: LLMTraceLogger | None = None,
         config: AlphaConfig | None = None,
         feedback_attribution_submitter: FeedbackAttributionSubmitter | None = None,
+        local_clock: Callable[[], datetime] | None = None,
     ):
         self.store = store
         self.llm_provider = llm_provider
@@ -323,6 +334,7 @@ class AlphaAgent:
         self.coordinator = coordinator or LoopCoordinator(SUBJECT_SELF)
         self.compact_extraction_submitter = compact_extraction_submitter
         self.feedback_attribution_submitter = feedback_attribution_submitter
+        self.local_clock = local_clock or local_now
         self._canceled_sessions: set[str] = set()
 
     def cancel(self, session_id: str) -> None:
@@ -384,22 +396,41 @@ class AlphaAgent:
             self._check_canceled(session_id, "before_user_event")
             model_tools = self.tool_registry.to_llm_tool_definitions()
             self._session_summary_snapshots(session_id, counterpart)
+            time_reminder = self._pending_time_reminder(session_id)
+            pending_source_messages = self._pending_runtime_input_messages(
+                user_message,
+                time_reminder=time_reminder,
+            )
             self._run_pre_user_context_maintenance(
                 turn_context=agent_turn,
                 session_id=session_id,
-                pending_user_message=user_message,
+                pending_source_messages=pending_source_messages,
                 model_tools=model_tools or None,
                 model_tool_choice="auto" if model_tools else None,
                 debug=debug,
             )
-            user_record = self.store.append_session_message(
-                session_id=session_id,
-                kind="user_message",
-                llm_role="user",
-                raw_content=user_message,
-                source_metadata=dict(source_metadata or {}),
-                metadata=_turn_metadata(agent_turn),
-            )
+            with self.store.immediate_transaction() as conn:
+                if time_reminder is not None:
+                    reminder_record = self.store.append_session_time_reminder(
+                        session_id=session_id,
+                        raw_content=time_reminder.raw_content,
+                        reminder_kind=time_reminder.kind,
+                        local_datetime=time_reminder.local_datetime,
+                        local_date=time_reminder.local_date,
+                        conn=conn,
+                    )
+                    debug["time_reminder_message_id"] = reminder_record.id
+                    debug["time_reminder_message_ordinal"] = reminder_record.ordinal
+                    debug["time_reminder_kind"] = time_reminder.kind
+                user_record = self.store.append_session_message(
+                    session_id=session_id,
+                    kind="user_message",
+                    llm_role="user",
+                    raw_content=user_message,
+                    source_metadata=dict(source_metadata or {}),
+                    metadata=_turn_metadata(agent_turn),
+                    conn=conn,
+                )
             debug["user_message_id"] = user_record.id
             debug["user_message_ordinal"] = user_record.ordinal
             received_event = self._emit_turn_received(
@@ -523,18 +554,17 @@ class AlphaAgent:
         *,
         turn_context: AgentTurnContext,
         session_id: str,
-        pending_user_message: str,
+        pending_source_messages: Sequence[ChatMessage],
         model_tools: Sequence[LLMToolDefinitionInput] | None,
         model_tool_choice: LLMToolChoice | None,
         debug: dict[str, Any],
     ) -> None:
-        pending_message: ChatMessage = {"role": "user", "content": pending_user_message}
         summary_snapshots = self.store.list_session_summary_snapshots(session_id)
         pending_only_estimate = self._estimate_context_budget(
             build_answer_prompt_messages(
                 summary_snapshots=summary_snapshots,
                 session_history=[],
-                current_turn_messages=[pending_message],
+                current_turn_messages=pending_source_messages,
                 system_message=self._default_system_message(),
             ),
             tools=model_tools,
@@ -545,12 +575,12 @@ class AlphaAgent:
         planning_messages = build_answer_prompt_messages(
             summary_snapshots=summary_snapshots,
             session_history=[],
-            current_turn_messages=[pending_message],
+            current_turn_messages=pending_source_messages,
             system_message=self._default_system_message(),
         )
         projected_messages = self._source_prompt_messages(
             session_id=session_id,
-            extra_source_messages=[pending_message],
+            extra_source_messages=pending_source_messages,
         )
         estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
         debug["pre_user_context_used_tokens"] = estimate.used_context_tokens
@@ -570,7 +600,7 @@ class AlphaAgent:
             )
             projected_messages = self._source_prompt_messages(
                 session_id=session_id,
-                extra_source_messages=[pending_message],
+                extra_source_messages=pending_source_messages,
             )
             estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
 
@@ -597,7 +627,7 @@ class AlphaAgent:
             )
             projected_messages = self._source_prompt_messages(
                 session_id=session_id,
-                extra_source_messages=[pending_message],
+                extra_source_messages=pending_source_messages,
             )
             estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
 
@@ -812,6 +842,37 @@ class AlphaAgent:
             current_turn_messages=extra_source_messages or (),
             system_message=self._default_system_message(),
         )
+
+    def _pending_time_reminder(self, session_id: str) -> SessionTimeReminder | None:
+        local_datetime, local_date = _local_minute_timestamp(self.local_clock())
+        latest = self.store.find_latest_session_time_reminder(session_id)
+        if latest is None:
+            return SessionTimeReminder(
+                kind="started_at",
+                local_datetime=local_datetime,
+                local_date=local_date,
+                raw_content=wrap_system_reminder(f"currently start at: {local_datetime}"),
+            )
+        if latest.metadata.get("local_date") == local_date:
+            return None
+        return SessionTimeReminder(
+            kind="time_update",
+            local_datetime=local_datetime,
+            local_date=local_date,
+            raw_content=wrap_system_reminder(f"time update: {local_datetime}"),
+        )
+
+    def _pending_runtime_input_messages(
+        self,
+        user_message: str,
+        *,
+        time_reminder: SessionTimeReminder | None,
+    ) -> list[ChatMessage]:
+        pending: list[ChatMessage] = []
+        if time_reminder is not None:
+            pending.append({"role": "user", "content": time_reminder.raw_content})
+        pending.append({"role": "user", "content": user_message})
+        return pending
 
     def _rebuild_runtime_llm_messages(
         self,
@@ -1607,6 +1668,11 @@ def _turn_metadata(turn_context: AgentTurnContext) -> dict[str, Any]:
 
 def _content_digest(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _local_minute_timestamp(value: datetime) -> tuple[str, str]:
+    local_value = value.astimezone().replace(second=0, microsecond=0)
+    return local_value.isoformat(timespec="minutes"), local_value.date().isoformat()
 
 
 def _stimulus_kind_from_metadata(source_metadata: Mapping[str, Any] | None) -> StimulusKind:

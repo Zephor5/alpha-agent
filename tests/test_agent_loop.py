@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from datetime import datetime
 from typing import cast
 
 import pytest
@@ -63,6 +64,7 @@ from alpha_agent.runtime.context_handover import (
 )
 from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID
 from alpha_agent.runtime.prompt_builder import default_runtime_system_message
+from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.base import (
     Tool,
@@ -93,6 +95,30 @@ def _store(tmp_path) -> StateStore:
 
 def _copy_chat_message(message: ChatMessage) -> ChatMessage:
     return cast(ChatMessage, dict(message))
+
+
+def _without_time_reminders(messages: Sequence[SessionMessage]) -> list[SessionMessage]:
+    return [message for message in messages if message.kind != "system_reminder"]
+
+
+def _without_time_reminder_chats(messages: Sequence[ChatMessage]) -> list[ChatMessage]:
+    return [
+        message
+        for message in messages
+        if not _is_time_reminder_chat(message)
+    ]
+
+
+def _is_time_reminder_chat(message: ChatMessage) -> bool:
+    if message.get("role") != "user":
+        return False
+    content = str(message.get("content", ""))
+    return content.startswith(
+        (
+            "<system-reminder>started at:",
+            "<system-reminder>time update:",
+        )
+    )
 
 
 def test_default_runtime_system_message_states_context_memory_and_tool_boundaries() -> None:
@@ -237,14 +263,87 @@ def test_agent_responds_and_persists_session_messages(tmp_path) -> None:
     assert result.response == "Mock response: I heard you say: hello."
     assert result.debug["note"] == "runtime-owned foreground turn"
     messages = store.list_session_messages("s1")
-    assert [message.kind for message in messages] == ["user_message", "assistant_message"]
-    assert [message.llm_role for message in messages] == ["user", "assistant"]
-    assert messages[0].raw_content == "hello"
-    assert messages[1].raw_content == result.response
+    assert [message.kind for message in messages] == [
+        "system_reminder",
+        "user_message",
+        "assistant_message",
+    ]
+    assert [message.llm_role for message in messages] == ["user", "user", "assistant"]
+    assert messages[0].raw_content.startswith("<system-reminder>started at: ")
+    assert messages[1].raw_content == "hello"
+    assert messages[2].raw_content == result.response
     assert [trace.event_type for trace in store.list_runtime_traces("s1")] == [
         "llm.started",
         "llm.completed",
     ]
+
+
+def test_agent_inserts_session_start_time_reminder_before_first_input(tmp_path) -> None:
+    store = _store(tmp_path)
+    provider = _RecordingProvider("done")
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        local_clock=lambda: datetime.fromisoformat("2026-06-11T21:37:45+08:00"),
+    )
+
+    result = agent.respond("hello", session_id="s1")
+
+    messages = store.list_session_messages("s1")
+    assert result.debug["time_reminder_message_id"] == messages[0].id
+    assert result.debug["user_message_id"] == messages[1].id
+    assert [message.kind for message in messages] == [
+        "system_reminder",
+        "user_message",
+        "assistant_message",
+    ]
+    assert messages[0].raw_content == (
+        "<system-reminder>started at: 2026-06-11T21:37+08:00</system-reminder>"
+    )
+    assert messages[0].metadata == {
+        "reminder_type": "session_time",
+        "time_reminder_kind": "started_at",
+        "local_date": "2026-06-11",
+        "local_datetime": "2026-06-11T21:37+08:00",
+    }
+    assert provider.calls[0][1:] == [
+        {
+            "role": "user",
+            "content": "<system-reminder>started at: 2026-06-11T21:37+08:00</system-reminder>",
+        },
+        {"role": "user", "content": "hello"},
+    ]
+
+
+def test_agent_inserts_time_update_only_when_local_day_changes(tmp_path) -> None:
+    store = _store(tmp_path)
+    provider = _QueuedRecordingProvider(["first", "second", "third"])
+    clock = _sequence_datetime_clock(
+        [
+            "2026-06-11T21:37:45+08:00",
+            "2026-06-11T23:59:00+08:00",
+            "2026-06-12T09:03:22+08:00",
+        ]
+    )
+    agent = AlphaAgent(store=store, llm_provider=provider, local_clock=clock)
+
+    agent.respond("one", session_id="s1")
+    agent.respond("two", session_id="s1")
+    agent.respond("three", session_id="s1")
+
+    messages = store.list_session_messages("s1")
+    reminders = [message for message in messages if message.kind == "system_reminder"]
+    assert [message.raw_content for message in reminders] == [
+        "<system-reminder>started at: 2026-06-11T21:37+08:00</system-reminder>",
+        "<system-reminder>time update: 2026-06-12T09:03+08:00</system-reminder>",
+    ]
+    assert [message.raw_content for message in messages if message.kind == "user_message"] == [
+        "one",
+        "two",
+        "three",
+    ]
+    third_user = [message for message in messages if message.raw_content == "three"][0]
+    assert reminders[1].ordinal == third_user.ordinal - 1
 
 
 def test_agent_replays_source_stream_without_foreground_duplicate_for_llm_input(
@@ -263,7 +362,7 @@ def test_agent_replays_source_stream_without_foreground_duplicate_for_llm_input(
     result = agent.respond("I'm bored", session_id="s1")
 
     assert result.response == "Let's find something interesting to do."
-    second_call = provider.calls[-1]
+    second_call = _without_time_reminder_chats(provider.calls[-1])
     assert [message["role"] for message in second_call] == [
         "system",
         "user",
@@ -295,7 +394,7 @@ def test_agent_two_turn_prompt_is_append_only_without_fixed_tail(tmp_path) -> No
     agent.respond("new turn", session_id="s1")
 
     first_call = provider.calls[0]
-    contents = [message.get("content") for message in first_call]
+    contents = [message.get("content") for message in _without_time_reminder_chats(first_call)]
     assert contents[1:] == [*(f"old {index}" for index in range(1, 12)), "new turn"]
 
 
@@ -323,12 +422,12 @@ def test_agent_reuses_session_profile_snapshot_before_history(tmp_path) -> None:
     )
     agent.respond("second turn", session_id="s1")
 
-    first_call = provider.calls[0]
+    first_call = _without_time_reminder_chats(provider.calls[0])
     assert [message["role"] for message in first_call] == ["system", "user", "user"]
     assert "Counterpart profile: Stable profile v1." in str(first_call[1]["content"])
     assert first_call[2]["content"] == "first turn"
 
-    second_call = provider.calls[1]
+    second_call = _without_time_reminder_chats(provider.calls[1])
     assert [message["role"] for message in second_call] == [
         "system",
         "user",
@@ -387,7 +486,7 @@ def test_agent_injects_self_memory_summary_before_counterpart_profile_as_separat
     )
     agent.respond("second turn", session_id="s1")
 
-    first_call = provider.calls[0]
+    first_call = _without_time_reminder_chats(provider.calls[0])
     assert [message["role"] for message in first_call] == ["system", "user", "user", "user"]
     assert "Self memory summary: Agent solves root causes" in str(first_call[1]["content"])
     assert "Counterpart profile: User prefers concise answers." in str(first_call[2]["content"])
@@ -395,7 +494,7 @@ def test_agent_injects_self_memory_summary_before_counterpart_profile_as_separat
     assert "Self memory summary:" not in str(first_call[2]["content"])
     assert first_call[3]["content"] == "first turn"
 
-    second_call = provider.calls[1]
+    second_call = _without_time_reminder_chats(provider.calls[1])
     assert [message["role"] for message in second_call] == [
         "system",
         "user",
@@ -750,7 +849,7 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
     turn_id = result.debug["turn_id"]
     assert isinstance(turn_id, str) and turn_id.startswith("turn_")
     assert result.debug["tool_call_count"] == 1
-    messages = store.list_session_messages("s1")
+    messages = _without_time_reminders(store.list_session_messages("s1"))
     assert [message.kind for message in messages] == [
         "user_message",
         "assistant_message",
@@ -877,7 +976,11 @@ def test_agent_sends_only_structured_tool_output_to_llm_context(tmp_path) -> Non
     assert "structured" not in tool_message["content"]
     assert "metadata" not in tool_message["content"]
 
-    persisted = store.list_session_messages("s1")[2]
+    persisted = [
+        message
+        for message in store.list_session_messages("s1")
+        if message.kind == "tool_message"
+    ][0]
     assert json.loads(persisted.raw_content) == {
         "items": [{"title": "Alpha"}],
         "ok": True,
@@ -968,7 +1071,7 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
         ]
     }
 
-    messages = store.list_session_messages("s1")
+    messages = _without_time_reminders(store.list_session_messages("s1"))
     assert [message.kind for message in messages] == [
         "user_message",
         "assistant_message",
@@ -1251,12 +1354,13 @@ def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path)
         "user_message",
         "assistant_message",
         "compressed_message",
+        "system_reminder",
         "user_message",
         "assistant_message",
     ]
     assert persisted[2].raw_content.startswith("<system-reminder>")
-    assert persisted[2].ordinal < persisted[3].ordinal
-    assert persisted[3].raw_content == "pending user must stay out of compression"
+    assert persisted[2].ordinal < persisted[3].ordinal < persisted[4].ordinal
+    assert persisted[4].raw_content == "pending user must stay out of compression"
     assert all(
         DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in message.raw_content
         for message in persisted
@@ -1362,12 +1466,12 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
 
     assert result.response == "final answer"
     assert len(provider.calls) == 3
-    first_call = provider.calls[0]
+    first_call = _without_time_reminder_chats(provider.calls[0])
     assert [message["role"] for message in first_call] == ["system", "user"]
     assert "Identity: Alpha Agent" in str(first_call[0]["content"])
     assert first_call[1]["content"] == "use tool"
 
-    compression_call = provider.calls[1]
+    compression_call = _without_time_reminder_chats(provider.calls[1])
     assert [message["role"] for message in compression_call] == [
         "system",
         "user",
@@ -1385,7 +1489,7 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
     assert compression_call[-1]["role"] == "user"
     assert DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in str(compression_call[-1]["content"])
 
-    next_call = provider.calls[2]
+    next_call = _without_time_reminder_chats(provider.calls[2])
     assert [message["role"] for message in next_call] == ["system", "user"]
     assert next_call[0] == first_call[0]
     assert next_call[1]["role"] == "user"
@@ -1397,21 +1501,22 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
 
     persisted = store.list_session_messages("s1")
     assert [message.kind for message in persisted] == [
+        "system_reminder",
         "user_message",
         "assistant_message",
         "tool_message",
         "compressed_message",
         "assistant_message",
     ]
-    assert persisted[1].tool_calls[0]["id"] == "call_1"
-    assert persisted[2].tool_call_id == "call_1"
-    assert persisted[2].raw_content == "complete tool result: hello"
-    assert persisted[2].provider_metadata == {"tool_name": "echo"}
-    assert persisted[2].metadata["result_metadata"] == {}
-    assert persisted[2].metadata["tool_output_kind"] == "text"
-    assert persisted[3].raw_content.startswith("<system-reminder>")
-    assert persisted[3].raw_content.endswith("</system-reminder>")
-    assert persisted[3].compression_point_ordinal == persisted[2].ordinal
+    assert persisted[2].tool_calls[0]["id"] == "call_1"
+    assert persisted[3].tool_call_id == "call_1"
+    assert persisted[3].raw_content == "complete tool result: hello"
+    assert persisted[3].provider_metadata == {"tool_name": "echo"}
+    assert persisted[3].metadata["result_metadata"] == {}
+    assert persisted[3].metadata["tool_output_kind"] == "text"
+    assert persisted[4].raw_content.startswith("<system-reminder>")
+    assert persisted[4].raw_content.endswith("</system-reminder>")
+    assert persisted[4].compression_point_ordinal == persisted[3].ordinal
     assert all(
         DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in message.raw_content
         for message in persisted
@@ -1467,6 +1572,18 @@ def _seed_active_digest(
 def _routed_counterpart_id(platform: str, user_id: str) -> str:
     digest = hashlib.sha1(f"{platform}:{user_id}".encode()).hexdigest()[:16]
     return f"counterpart:{digest}"
+
+
+def _sequence_datetime_clock(values: Sequence[str]):
+    index = 0
+
+    def now() -> datetime:
+        nonlocal index
+        value = values[min(index, len(values) - 1)]
+        index += 1
+        return datetime.fromisoformat(value)
+
+    return now
 
 
 def _seed_active_belief(

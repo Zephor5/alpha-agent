@@ -3,7 +3,13 @@ CREATE TABLE IF NOT EXISTS session_messages (
     session_id TEXT NOT NULL,
     ordinal INTEGER NOT NULL,
     kind TEXT NOT NULL CHECK (
-        kind IN ('user_message', 'assistant_message', 'tool_message', 'compressed_message')
+        kind IN (
+            'system_reminder',
+            'user_message',
+            'assistant_message',
+            'tool_message',
+            'compressed_message'
+        )
     ),
     llm_role TEXT CHECK (llm_role IN ('user', 'assistant', 'tool')),
     raw_content TEXT NOT NULL,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 from alpha_agent.cognition.coordinator import LockBusy, LoopAcquireRequest, LoopCoordinator
@@ -52,9 +53,16 @@ def test_drive_loop_triggers_runtime_self_signal_turn_and_updates_goal_progress(
 
     assert report.triggered is True
     assert str(report.selected_goal_id) == "goal:pending"
-    assert [message.kind for message in messages] == ["user_message", "assistant_message"]
-    assert messages[0].raw_content.startswith("[self_signal]")
-    assert "goal_id: goal:pending" in messages[0].raw_content
+    assert [message.kind for message in messages] == [
+        "system_reminder",
+        "user_message",
+        "assistant_message",
+    ]
+    assert messages[0].raw_content == (
+        "<system-reminder>started at: 2026-01-01T08:00+08:00</system-reminder>"
+    )
+    assert messages[1].raw_content.startswith("[self_signal]")
+    assert "goal_id: goal:pending" in messages[1].raw_content
     assert perceived.payload["stimulus_kind"] == "self_signal"
     assert perceived.payload["session_id"] == "internal:goal:goal:pending"
     assert perceived.payload["from_counterpart"] is None
@@ -121,7 +129,7 @@ def test_drive_loop_carries_goal_counterpart_into_self_signal_turn(
     binding = store.get_session_counterpart("internal:goal:goal:user-a")
 
     assert report.triggered is True
-    assert "for_counterpart: counterpart:user-a" in messages[0].raw_content
+    assert "for_counterpart: counterpart:user-a" in messages[1].raw_content
     assert perceived.payload["stimulus_kind"] == "self_signal"
     assert perceived.payload["from_counterpart"] == {
         "kind": "counterpart",
@@ -195,6 +203,7 @@ def _drive_runtime(
         llm_provider=MockLLMProvider(),
         event_log=log,
         coordinator=coordinator,
+        local_clock=lambda: datetime.fromisoformat("2026-01-01T08:00:10+08:00"),
     )
     clock = _sequence_clock(now_values or ["2026-01-01T00:00:10+00:00"])
     loop = DriveLoop(

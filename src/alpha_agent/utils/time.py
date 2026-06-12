@@ -5,6 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 
+def local_now() -> datetime:
+    """Return the current timezone-aware local datetime."""
+
+    return datetime.now().astimezone()
+
+
 def utc_now() -> datetime:
     """Return the current timezone-aware UTC datetime."""
 

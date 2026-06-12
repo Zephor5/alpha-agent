@@ -195,6 +195,34 @@ class StateStore:
             conn=conn,
         )
 
+    def append_session_time_reminder(
+        self,
+        *,
+        session_id: str,
+        raw_content: str,
+        reminder_kind: str,
+        local_datetime: str,
+        local_date: str,
+        created_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionMessage:
+        """Append a local-time system reminder to the session source stream."""
+
+        return self.append_session_message(
+            session_id=session_id,
+            kind="system_reminder",
+            llm_role="user",
+            raw_content=raw_content,
+            created_at=created_at,
+            metadata={
+                "reminder_type": "session_time",
+                "time_reminder_kind": reminder_kind,
+                "local_date": local_date,
+                "local_datetime": local_datetime,
+            },
+            conn=conn,
+        )
+
     def insert_session_message(
         self,
         message: SessionMessage,
@@ -289,6 +317,29 @@ class StateStore:
 
         with self.connect() as conn:
             return self._latest_session_ordinal(conn, session_id)
+
+    def find_latest_session_time_reminder(
+        self,
+        session_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionMessage | None:
+        """Return the newest local-time reminder in a session, if any."""
+
+        def op(db: sqlite3.Connection) -> SessionMessage | None:
+            row = db.execute(
+                """
+                SELECT * FROM session_messages
+                WHERE session_id = ?
+                  AND kind = 'system_reminder'
+                ORDER BY ordinal DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+            return self._session_message_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
 
     def find_latest_compressed_message(
         self,
@@ -710,6 +761,7 @@ class StateStore:
                 raise ValueError("compressed_message must use llm_role='user'")
             return
         expected_roles: dict[SessionMessageKind, LLMRole] = {
+            "system_reminder": "user",
             "user_message": "user",
             "assistant_message": "assistant",
             "tool_message": "tool",

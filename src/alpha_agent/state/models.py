@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 SessionMessageKind = Literal[
+    "system_reminder",
     "user_message",
     "assistant_message",
     "tool_message",

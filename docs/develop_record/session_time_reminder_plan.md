@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned.
+Implemented.
 
 ## Date
 
@@ -30,14 +30,14 @@ This applies to inputs handled through `AlphaAgent.respond()`, including local
 Before the first runtime input message in a session, insert:
 
 ```text
-<system-reminder>started at: {local_datetime}</system-reminder>
+<system-reminder>currently start at: {local_datetime}</system-reminder>
 ```
 
 `local_datetime` is local time, precise to the minute, with timezone offset.
 Example:
 
 ```text
-<system-reminder>started at: 2026-06-11T21:37+08:00</system-reminder>
+<system-reminder>currently start at: 2026-06-11T21:37+08:00</system-reminder>
 ```
 
 ### New Day Reminder
@@ -70,13 +70,13 @@ Detailed storage and code structure should be decided during implementation.
 
 ## Acceptance Checklist
 
-- [ ] The first runtime input in a session is preceded by a `started at`
+- [x] The first runtime input in a session is preceded by a `started at`
       reminder.
-- [ ] Same-day later runtime inputs do not create duplicate time reminders.
-- [ ] First runtime input on a later local day is preceded by a `time update`
+- [x] Same-day later runtime inputs do not create duplicate time reminders.
+- [x] First runtime input on a later local day is preceded by a `time update`
       reminder.
-- [ ] Reminder timestamps use local time with minute precision and timezone
+- [x] Reminder timestamps use local time with minute precision and timezone
       offset.
-- [ ] Reminder messages appear in the session stream before the input message
+- [x] Reminder messages appear in the session stream before the input message
       they describe.
-- [ ] Drive Loop `self_signal` turns follow the same reminder rules.
+- [x] Drive Loop `self_signal` turns follow the same reminder rules.

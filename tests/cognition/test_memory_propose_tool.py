@@ -82,7 +82,15 @@ def test_memory_propose_append_writes_atomic_belief_directly_in_runtime_turn(tmp
 
     assert result.response == "好的，以后我会用中文回答。"
     assert MEMORY_PROPOSE_TOOL_NAME in provider.tool_names_seen[0]
-    messages = store.list_session_messages("s1")
+    all_messages = store.list_session_messages("s1")
+    assert [message.kind for message in all_messages] == [
+        "system_reminder",
+        "user_message",
+        "assistant_message",
+        "tool_message",
+        "assistant_message",
+    ]
+    messages = [message for message in all_messages if message.kind != "system_reminder"]
     assert [message.kind for message in messages] == [
         "user_message",
         "assistant_message",
