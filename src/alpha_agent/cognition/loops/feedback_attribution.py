@@ -18,7 +18,13 @@ from alpha_agent.cognition.background_llm_contract import (
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.loops.workers._common import json_for_prompt
-from alpha_agent.cognition.models import CognitiveEvent, CognitiveEventKind, EventId, Reference
+from alpha_agent.cognition.models import (
+    CognitiveEvent,
+    CognitiveEventKind,
+    EventId,
+    Instant,
+    Reference,
+)
 from alpha_agent.cognition.processing_ledger import (
     BackgroundProgressStatus,
     BackgroundSourceProgress,
@@ -87,6 +93,7 @@ class FeedbackAttributionJob:
     turn_id: str
     turn_received_event_id: str
     user_message_id: str
+    user_message_created_at: str
     user_message_text: str
     prompt_messages: Sequence[ChatMessage]
     recalled_beliefs: Sequence[RecalledBeliefHandle]
@@ -223,7 +230,7 @@ class RealtimeFeedbackAttributionService:
                     verdict.belief_id,
                     kind=verdict.verdict,
                     event_id=str(event.id),
-                    at=str(event.timestamp),
+                    at=job.user_message_created_at,
                 )
                 if verdict.verdict in _CONFLICT_VERDICTS:
                     state_service.enqueue_feedback_conflict_review(
@@ -233,6 +240,7 @@ class RealtimeFeedbackAttributionService:
                         feedback_event_id=str(event.id),
                         session_id=job.session_id,
                         user_message_id=job.user_message_id,
+                        user_message_created_at=job.user_message_created_at,
                     )
             complete_feedback_attribution_sources(
                 state_service.ledger,
@@ -670,6 +678,7 @@ def _emit_feedback_event(
             "user_message_id": job.user_message_id,
             "recall_tool_message_ids": list(job.recall_tool_message_ids),
         },
+        timestamp=Instant(job.user_message_created_at),
     )
 
 
@@ -679,6 +688,7 @@ def _job_audit_payload(job: FeedbackAttributionJob) -> dict[str, object]:
         "turn_id": job.turn_id,
         "turn_received_event_id": job.turn_received_event_id,
         "user_message_id": job.user_message_id,
+        "user_message_created_at": job.user_message_created_at,
         "belief_ids": [handle.belief_id for handle in job.recalled_beliefs],
         "recall_tool_message_ids": list(job.recall_tool_message_ids),
     }

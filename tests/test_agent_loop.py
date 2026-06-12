@@ -56,7 +56,12 @@ from alpha_agent.llm.base import (
 )
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.llm.tracing import LLMTraceLogger
-from alpha_agent.runtime.agent import AlphaAgent, ContextWindowExceededError
+from alpha_agent.runtime.agent import (
+    AgentLoopResult,
+    AgentTurnContext,
+    AlphaAgent,
+    ContextWindowExceededError,
+)
 from alpha_agent.runtime.context_handover import (
     DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
     HandoverExtractionJob,
@@ -1009,6 +1014,112 @@ def test_agent_executes_provider_tool_calls_and_stores_tool_round(tmp_path) -> N
     assert source_recorded.payload["provider_tool_trace_ids"] == [traces[3].id]
 
 
+def test_foreground_events_use_source_message_time_without_moving_bookkeeping(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=_RecordingProvider("unused"),
+        event_log=SQLiteEventLog(store),
+    )
+    agent.emitter.clock = lambda: "2026-06-12T12:00:00+00:00"
+    user_record = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="old delayed input",
+        created_at="2026-06-01T01:02:03+00:00",
+    )
+    assistant_record = store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="old delayed answer",
+        created_at="2026-06-01T01:02:05+00:00",
+    )
+    turn_context = AgentTurnContext(
+        turn_id="turn_source_time",
+        session_id="s1",
+        started_at=Instant("2026-06-12T12:00:00+00:00"),
+        source=Reference("session", "s1"),
+        counterpart=None,
+    )
+    loop_result = AgentLoopResult(
+        response=LLMResponse(
+            content=assistant_record.raw_content,
+            model="test",
+            provider="test",
+        ),
+        provider_tool_messages=[],
+        provider_tool_calls=[],
+        tool_results=[],
+        llm_round_count=1,
+        llm_retry_count=0,
+        tool_iteration_count=0,
+        tool_call_count=0,
+        provider_tool_call_count=0,
+        provider_tool_trace_ids=[],
+        llm_call_ids=[],
+        llm_trace_ids=[],
+        tool_cognitive_event_ids=[],
+    )
+
+    perceived = agent._emit_turn_received(
+        turn_context=turn_context,
+        user_message=user_record.raw_content,
+        user_record=user_record,
+        source_metadata=None,
+    )
+    acted = agent._emit_turn_acted(
+        turn_context=AgentTurnContext(
+            turn_id=turn_context.turn_id,
+            session_id=turn_context.session_id,
+            started_at=turn_context.started_at,
+            source=turn_context.source,
+            counterpart=turn_context.counterpart,
+            user_message_id=user_record.id,
+            turn_received_event_id=str(perceived.id),
+        ),
+        assistant_record=assistant_record,
+        loop_result=loop_result,
+    )
+    sources_recorded = agent._emit_turn_sources_recorded(
+        turn_context=turn_context,
+        user_record=user_record,
+        assistant_record=assistant_record,
+        loop_result=loop_result,
+        cognitive_event_ids=[str(perceived.id), str(acted.id)],
+    )
+
+    assert str(perceived.timestamp) == user_record.created_at
+    assert str(acted.timestamp) == assistant_record.created_at
+    assert str(sources_recorded.timestamp) == "2026-06-12T12:00:00+00:00"
+
+
+def test_counterpart_observation_events_stay_on_processing_time(tmp_path) -> None:
+    store = _store(tmp_path)
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=_RecordingProvider("unused"),
+        event_log=SQLiteEventLog(store),
+    )
+    agent.emitter.clock = lambda: "2026-06-12T12:00:00+00:00"
+
+    agent._session_counterpart_ref(
+        "s1",
+        {"platform": "slack", "user_id": "u1", "display_name": "User One"},
+    )
+
+    events = list(
+        SQLiteEventLog(store).iter(
+            kinds=[CognitiveEventKind.COUNTERPART_FIRST_OBSERVED]
+        )
+    )
+    assert len(events) == 1
+    assert str(events[0].timestamp) == "2026-06-12T12:00:00+00:00"
+
+
 def test_busy_attempt_does_not_allocate_completed_turn_audit(tmp_path) -> None:
     store = _store(tmp_path)
     agent = AlphaAgent(
@@ -1228,6 +1339,7 @@ def test_feedback_attribution_submits_after_recall_bearing_turn(tmp_path) -> Non
     assert job.turn_id == second.debug["turn_id"]
     assert job.turn_received_event_id == second.debug["turn_received_event_id"]
     assert job.user_message_id == current_user.id
+    assert job.user_message_created_at == current_user.created_at
     assert job.user_message_text == "Actually I prefer TypeScript examples."
     assert tuple(job.recall_tool_message_ids) == (tool_messages[0].id,)
     assert tuple(job.recalled_beliefs) == (

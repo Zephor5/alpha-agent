@@ -32,6 +32,7 @@ from alpha_agent.cognition.models import (
     CognitiveEventKind,
     DerivationStage,
     Instant,
+    Reference,
 )
 from alpha_agent.cognition.processing_ledger import (
     BackgroundProgressStatus,
@@ -42,6 +43,10 @@ from alpha_agent.cognition.processing_ledger import (
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
+from alpha_agent.cognition.source_time import (
+    render_source_time_line,
+    resolve_source_time_range,
+)
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.llm.base import (
     JSON_OBJECT_RESPONSE_FORMAT,
@@ -85,6 +90,8 @@ nothing should be extracted. The output must validate against this JSON Schema:
 Allowed about references for this session:
 {allowed_about_refs_json}
 
+{source_time_line}
+
 Scope and reference rules:
 - For scope "global", set about to [].
 - For scope "counterpart", use exactly one allowed reference with kind "counterpart".
@@ -115,6 +122,7 @@ class _SourceWindowCandidate:
     ordinal_start: int | None
     ordinal_end: int | None
     prompt_prefix_messages: tuple[ChatMessage, ...]
+    source_time_line: str
     metadata: dict[str, Any]
 
 
@@ -397,7 +405,10 @@ def _run_candidate(
             llm_provider,
             [
                 *candidate.prompt_prefix_messages,
-                _extraction_instruction_message(context=context),
+                _extraction_instruction_message(
+                    context=context,
+                    source_time_line=candidate.source_time_line,
+                ),
             ],
             trace_logger=llm_trace_logger,
             trace_metadata=background_llm_trace_metadata(
@@ -498,6 +509,7 @@ def _compact_job_candidate(
         message for message in extractable_messages if message.id in selected_ids
     ]
     ordinals = [message.ordinal for message in selected_messages]
+    source_time_metadata, source_time_line = _source_time_context(store, selected_refs)
     return _SourceWindowCandidate(
         source_path=_COMPACT_SOURCE_PATH,
         session_id=job.session_id,
@@ -506,6 +518,7 @@ def _compact_job_candidate(
         ordinal_start=min(ordinals) if ordinals else None,
         ordinal_end=max(ordinals) if ordinals else None,
         prompt_prefix_messages=prefix_messages,
+        source_time_line=source_time_line,
         metadata={
             "source_path": _COMPACT_SOURCE_PATH,
             "session_id": job.session_id,
@@ -526,6 +539,7 @@ def _compact_job_candidate(
             "compression_trace_id": job.compression_trace_id,
             "compressed_message_id": job.compressed_message_id,
             "extraction_version": extraction_version,
+            **source_time_metadata,
         },
     )
 
@@ -588,6 +602,7 @@ def _inactive_backlog_candidate(
             *([session_message_to_chat(compressed)] if compressed is not None else []),
             *[source_message_to_chat(message) for message in prompt_source_messages],
         ]
+        source_time_metadata, source_time_line = _source_time_context(store, source_refs)
         return _SourceWindowCandidate(
             source_path=_BACKLOG_SOURCE_PATH,
             session_id=session_id,
@@ -596,6 +611,7 @@ def _inactive_backlog_candidate(
             ordinal_start=min(ordinals) if ordinals else None,
             ordinal_end=max(ordinals) if ordinals else None,
             prompt_prefix_messages=tuple(prompt_prefix_messages),
+            source_time_line=source_time_line,
             metadata={
                 "source_path": _BACKLOG_SOURCE_PATH,
                 "session_id": session_id,
@@ -610,6 +626,7 @@ def _inactive_backlog_candidate(
                 "prompt_prefix_hash": handover_prompt_prefix_hash(prompt_prefix_messages),
                 "tools_schema_hash": handover_tools_schema_hash(tools),
                 "extraction_version": extraction_version,
+                **source_time_metadata,
             },
         )
     return None
@@ -828,16 +845,31 @@ def _mark_failed_if_needed(
 def _extraction_instruction_message(
     *,
     context: BackgroundLLMValidationContext,
+    source_time_line: str,
 ) -> ChatMessage:
     return {
         "role": "user",
         "content": _EXTRACTION_INSTRUCTION.format(
             output_schema_json=_extraction_output_schema_json(),
             allowed_about_refs_json=_allowed_about_refs_json(context),
+            source_time_line=source_time_line,
             system_reminder_placeholder=SYSTEM_REMINDER_PLACEHOLDER,
             system_reminder_open=SYSTEM_REMINDER_OPEN,
         ),
     }
+
+
+def _source_time_context(
+    store: StateStore,
+    source_refs: Sequence[BackgroundSourceRef],
+) -> tuple[dict[str, str], str]:
+    source_time = resolve_source_time_range(
+        store,
+        (Reference(ref.source_type, ref.source_id) for ref in source_refs),
+    )
+    if source_time is None:
+        raise ValueError("extraction source window has no session-message evidence time")
+    return source_time.to_metadata(), render_source_time_line(store, source_time)
 
 
 def _extraction_output_schema_json() -> str:

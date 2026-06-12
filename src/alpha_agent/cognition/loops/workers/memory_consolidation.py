@@ -45,10 +45,15 @@ from alpha_agent.cognition.processing_ledger import (
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
+from alpha_agent.cognition.source_time import (
+    render_source_time_line,
+    resolve_belief_source_time_range,
+)
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.llm.base import JSON_OBJECT_RESPONSE_FORMAT, ChatMessage, LLMProvider
 from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
 from alpha_agent.runtime.context_budget import stable_json
+from alpha_agent.state.store import StateStore
 from alpha_agent.utils.time import utc_now_iso
 
 _RETRYABLE_SOURCE_STATUSES = {None, BackgroundProgressStatus.FAILED}
@@ -74,6 +79,11 @@ Operation rules:
 - Update-like operations must target one of the allowed belief ids above.
 - Do not include source ids, provenance, idempotency keys, generated ids, confidence,
   scores, or numeric strength fields.
+
+Time rules:
+- Recency decisions prefer source message time over held_since when source_time_line is present.
+- held_since is Alpha holding time, not evidence time.
+- Supersede, retract, and archive decisions must not infer source recency from held_since.
 
 Extracted drafts:
 {drafts_json}
@@ -291,7 +301,13 @@ class MemoryConsolidationWorker:
             context = _validation_context_for_candidate(window, candidate)
             response = traced_llm_complete(
                 llm_provider,
-                [_consolidation_instruction_message(candidate, context=context)],
+                [
+                    _consolidation_instruction_message(
+                        state_service.store,
+                        candidate,
+                        context=context,
+                    )
+                ],
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -481,11 +497,14 @@ class MemoryConflictReviewWorker:
             context = _validation_context_for_conflict(window, active_beliefs)
             response = traced_llm_complete(
                 llm_provider,
-                [_conflict_review_instruction_message(
-                    window,
-                    active_beliefs,
-                    context=context,
-                )],
+                [
+                    _conflict_review_instruction_message(
+                        state_service.store,
+                        window,
+                        active_beliefs,
+                        context=context,
+                    )
+                ],
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -686,6 +705,7 @@ def _allowed_about_refs(beliefs: Sequence[AtomicBelief]) -> frozenset[tuple[str,
 
 
 def _consolidation_instruction_message(
+    store: StateStore,
     candidate: _ConsolidationCandidate,
     *,
     context: BackgroundLLMValidationContext,
@@ -697,12 +717,12 @@ def _consolidation_instruction_message(
             allowed_target_belief_ids_json=_allowed_target_belief_ids_json(context),
             allowed_about_refs_json=_allowed_about_refs_json(context),
             drafts_json=json.dumps(
-                [_belief_prompt_record(item) for item in candidate.drafts],
+                [_belief_prompt_record(store, item) for item in candidate.drafts],
                 ensure_ascii=False,
                 sort_keys=True,
             ),
             active_beliefs_json=json.dumps(
-                [_belief_prompt_record(item) for item in candidate.active_beliefs],
+                [_belief_prompt_record(store, item) for item in candidate.active_beliefs],
                 ensure_ascii=False,
                 sort_keys=True,
             ),
@@ -711,6 +731,7 @@ def _consolidation_instruction_message(
 
 
 def _conflict_review_instruction_message(
+    store: StateStore,
     window: BackgroundSourceWindow,
     active_beliefs: Sequence[AtomicBelief],
     *,
@@ -724,7 +745,10 @@ def _conflict_review_instruction_message(
             allowed_about_refs_json=_allowed_about_refs_json(context),
             conflict_json=json.dumps(window.metadata, ensure_ascii=False, sort_keys=True),
             active_beliefs_json=json.dumps(
-                [_belief_prompt_record(item) for item in active_beliefs],
+                [
+                    _belief_prompt_record(store, item, include_source_time=False)
+                    for item in active_beliefs
+                ],
                 ensure_ascii=False,
                 sort_keys=True,
             ),
@@ -756,8 +780,13 @@ def _allowed_about_refs_json(context: BackgroundLLMValidationContext) -> str:
     return json.dumps(refs, ensure_ascii=False, sort_keys=True)
 
 
-def _belief_prompt_record(belief: AtomicBelief) -> dict[str, Any]:
-    return {
+def _belief_prompt_record(
+    store: StateStore,
+    belief: AtomicBelief,
+    *,
+    include_source_time: bool = True,
+) -> dict[str, Any]:
+    record = {
         "id": str(belief.id),
         "memory_kind": belief.memory_kind.value,
         "scope": belief.scope.value,
@@ -767,7 +796,13 @@ def _belief_prompt_record(belief: AtomicBelief) -> dict[str, Any]:
         "derivation_stage": belief.derivation_stage.value,
         "authority": belief.authority.value,
         "lifecycle": belief.lifecycle.value,
+        "held_since": str(belief.held_since),
     }
+    if include_source_time:
+        source_time = resolve_belief_source_time_range(store, belief)
+        if source_time is not None:
+            record["source_time_line"] = render_source_time_line(store, source_time)
+    return record
 
 
 def _target_unit_for_belief(belief: AtomicBelief) -> str:

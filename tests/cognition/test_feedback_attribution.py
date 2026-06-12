@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import TypedDict
 
 import pytest
@@ -641,11 +641,13 @@ def test_realtime_feedback_attribution_success_emits_events_and_consequences(
         max_workers=1,
     )
 
+    feedback_time = "2026-06-01T01:02:03+00:00"
     assert service.submit(
         _job(
             user_message_text=(
                 "I still prefer Python examples, but for this project use pnpm instead of uv."
             ),
+            user_message_created_at=feedback_time,
             recall_tool_message_ids=("msg_recall_1", "msg_recall_2"),
             recalled_beliefs=(
                 _handle("belief:python", "User prefers Python examples.", "msg_recall_1"),
@@ -665,6 +667,7 @@ def test_realtime_feedback_attribution_success_emits_events_and_consequences(
     assert "belief:uv" in instruction
 
     events = list(SQLiteEventLog(store).iter(kinds=[CognitiveEventKind.RECEIVED_FEEDBACK]))
+    assert [str(event.timestamp) for event in events] == [feedback_time, feedback_time]
     assert [event.payload["feedback_kind"] for event in events] == [
         "belief_confirmed",
         "belief_contradicted",
@@ -699,6 +702,155 @@ def test_realtime_feedback_attribution_success_emits_events_and_consequences(
     assert windows[0].metadata["active_belief_ids"] == ["belief:uv"]
     assert windows[0].metadata["belief_content"] == "Alpha Agent uses uv."
     assert windows[0].metadata["feedback_event_id"] == str(events[1].id)
+    assert windows[0].metadata["user_message_created_at"] == feedback_time
+
+
+def test_realtime_feedback_attribution_uses_message_time_when_processing_is_delayed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feedback_time = "2026-06-01T01:02:03+00:00"
+    processing_time = "2026-06-12T12:00:00+00:00"
+    monkeypatch.setattr(
+        "alpha_agent.cognition.emitter.utc_now_iso",
+        lambda: processing_time,
+    )
+    monkeypatch.setattr(
+        "alpha_agent.cognition.processing_ledger.utc_now_iso",
+        lambda: processing_time,
+    )
+    monkeypatch.setattr(
+        "alpha_agent.cognition.state_service.utc_now_iso",
+        lambda: processing_time,
+    )
+    store = _store(tmp_path)
+    state = CognitionStateStore(store)
+    state.write_atomic_belief(
+        _atomic_belief("belief:python", "User prefers Python examples."),
+        source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
+    )
+    provider = _RecordingFeedbackProvider(
+        _feedback_json(
+            {
+                "belief_id": "belief:python",
+                "verdict": "confirmed",
+                "evidence_quote": "I still prefer Python examples",
+            }
+        )
+    )
+    service = RealtimeFeedbackAttributionService(
+        store=store,
+        llm_provider=provider,
+        max_workers=1,
+    )
+
+    assert service.submit(_job(user_message_created_at=feedback_time))
+    service.shutdown(wait=True)
+
+    events = list(SQLiteEventLog(store).iter(kinds=[CognitiveEventKind.RECEIVED_FEEDBACK]))
+    assert len(events) == 1
+    assert str(events[0].timestamp) == feedback_time
+    stored = state.beliefs.get_by_id("belief:python")
+    assert isinstance(stored, AtomicBelief)
+    assert [json.loads(entry) for entry in stored.feedback_history] == [
+        {
+            "at": feedback_time,
+            "event_id": str(events[0].id),
+            "kind": "confirmed",
+        }
+    ]
+    feedback_audit = state.audit_records(kind="belief_feedback_recorded")[0]
+    assert feedback_audit.payload["at"] == feedback_time
+    assert feedback_audit.created_at == processing_time
+    attribution_audit = state.audit_records(kind="feedback_attribution_completed")[0]
+    assert attribution_audit.created_at == processing_time
+    rows = state.ledger.list_source_progress(stage=BackgroundStage.FEEDBACK_ATTRIBUTION)
+    assert [(row.claimed_at, row.processed_at) for row in rows] == [
+        (processing_time, processing_time)
+    ]
+
+
+def test_same_day_feedback_dedupe_uses_feedback_message_date_not_processing_date(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feedback_time_1 = "2026-06-01T10:00:00+00:00"
+    feedback_time_2 = "2026-06-01T23:30:00+00:00"
+    monkeypatch.setattr(
+        "alpha_agent.cognition.emitter.utc_now_iso",
+        _sequence_clock(
+            [
+                "2026-06-12T12:00:00+00:00",
+                "2026-06-13T12:00:00+00:00",
+            ]
+        ),
+    )
+    store = _store(tmp_path)
+    state = CognitionStateStore(store)
+    state.write_atomic_belief(
+        _atomic_belief("belief:python", "User prefers Python examples."),
+        source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
+    )
+    provider = _RecordingFeedbackProvider(
+        _feedback_json(
+            {
+                "belief_id": "belief:python",
+                "verdict": "confirmed",
+                "evidence_quote": "I still prefer Python examples",
+            }
+        ),
+        _feedback_json(
+            {
+                "belief_id": "belief:python",
+                "verdict": "confirmed",
+                "evidence_quote": "Still Python today",
+            }
+        ),
+    )
+
+    first_service = RealtimeFeedbackAttributionService(
+        store=store,
+        llm_provider=provider,
+        max_workers=1,
+    )
+    assert first_service.submit(
+        _job(
+            user_message_id="msg_user_1",
+            user_message_text="I still prefer Python examples.",
+            user_message_created_at=feedback_time_1,
+            recall_tool_message_ids=("msg_recall_1",),
+        )
+    )
+    first_service.shutdown(wait=True)
+    second_service = RealtimeFeedbackAttributionService(
+        store=store,
+        llm_provider=provider,
+        max_workers=1,
+    )
+    assert second_service.submit(
+        _job(
+            user_message_id="msg_user_2",
+            user_message_text="Still Python today.",
+            user_message_created_at=feedback_time_2,
+            recall_tool_message_ids=("msg_recall_2",),
+        )
+    )
+    second_service.shutdown(wait=True)
+
+    events = list(SQLiteEventLog(store).iter(kinds=[CognitiveEventKind.RECEIVED_FEEDBACK]))
+    assert [str(event.timestamp) for event in events] == [
+        feedback_time_1,
+        feedback_time_2,
+    ]
+    stored = state.beliefs.get_by_id("belief:python")
+    assert isinstance(stored, AtomicBelief)
+    assert [json.loads(entry) for entry in stored.feedback_history] == [
+        {
+            "at": feedback_time_1,
+            "event_id": str(events[0].id),
+            "kind": "confirmed",
+        }
+    ]
 
 
 def test_realtime_feedback_attribution_irrelevant_verdict_emits_no_events(
@@ -926,6 +1078,7 @@ def test_feedback_conflict_review_enqueue_is_idempotent_and_skips_inactive(
         feedback_event_id="cogevt_feedback_1",
         session_id="s1",
         user_message_id="msg_user_1",
+        user_message_created_at="2026-06-01T01:02:03+00:00",
     )
     second = state.enqueue_feedback_conflict_review(
         belief_id="belief:uv",
@@ -934,6 +1087,7 @@ def test_feedback_conflict_review_enqueue_is_idempotent_and_skips_inactive(
         feedback_event_id="cogevt_feedback_2",
         session_id="s1",
         user_message_id="msg_user_1",
+        user_message_created_at="2026-06-01T01:02:03+00:00",
     )
     state.mark_belief_lifecycle(
         "belief:uv",
@@ -947,6 +1101,7 @@ def test_feedback_conflict_review_enqueue_is_idempotent_and_skips_inactive(
         feedback_event_id="cogevt_feedback_3",
         session_id="s1",
         user_message_id="msg_user_2",
+        user_message_created_at="2026-06-02T01:02:03+00:00",
     )
 
     assert first is not None
@@ -966,6 +1121,7 @@ def test_feedback_conflict_review_enqueue_is_idempotent_and_skips_inactive(
         "evidence_quote": "use pnpm instead of uv",
         "feedback_event_id": "cogevt_feedback_1",
         "session_id": "s1",
+        "user_message_created_at": "2026-06-01T01:02:03+00:00",
         "user_message_id": "msg_user_1",
         "verdict": "contradicted",
     }
@@ -985,6 +1141,20 @@ def _feedback_json(*verdicts: dict[str, str]) -> str:
     return json.dumps({"payload": {"verdicts": list(verdicts)}}, sort_keys=True)
 
 
+def _sequence_clock(values: Sequence[str]):
+    index = 0
+    lock = Lock()
+
+    def now() -> str:
+        nonlocal index
+        with lock:
+            value = values[min(index, len(values) - 1)]
+            index += 1
+            return value
+
+    return now
+
+
 def _handle(
     belief_id: str = "belief:python",
     content: str = "User prefers Python examples.",
@@ -1001,6 +1171,8 @@ def _handle(
 
 def _job(
     *,
+    user_message_id: str = "msg_user_1",
+    user_message_created_at: str = "2026-06-01T01:02:03+00:00",
     user_message_text: str = "I still prefer Python examples.",
     recall_tool_message_ids: tuple[str, ...] = ("msg_recall_1",),
     recalled_beliefs: tuple[RecalledBeliefHandle, ...] | None = None,
@@ -1009,7 +1181,8 @@ def _job(
         session_id="s1",
         turn_id="turn_1",
         turn_received_event_id="cogevt_turn_received",
-        user_message_id="msg_user_1",
+        user_message_id=user_message_id,
+        user_message_created_at=user_message_created_at,
         user_message_text=user_message_text,
         prompt_messages=(
             {"role": "system", "content": "You are Alpha Agent."},

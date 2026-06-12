@@ -9,6 +9,7 @@ from typing import TypedDict
 import pytest
 
 import alpha_agent.cognition.loops.background_service as background_service_module
+import alpha_agent.cognition.state_service as state_service_module
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     BackgroundLLMValidationError,
@@ -1237,6 +1238,7 @@ def test_extraction_stage_rejects_non_atomic_outputs_retryably_without_writes(
 
 def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_draft(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
     service = CognitionStateStore(store)
@@ -1264,6 +1266,8 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
             },
         )
     )
+    processing_time = "2026-06-13T00:00:00+00:00"
+    monkeypatch.setattr(state_service_module, "utc_now_iso", lambda: processing_time)
 
     report = MemoryConsolidationWorker(service, provider).run_once()
 
@@ -1271,11 +1275,14 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
     original = service.beliefs.get_by_id(extracted.id)
     assert isinstance(original, AtomicBelief)
     assert original.lifecycle == BeliefLifecycle.ARCHIVED
+    assert original.held_until == Instant(processing_time)
     active = service.beliefs.list_active()
     assert len(active) == 1
     consolidated = active[0]
     assert consolidated.id != extracted.id
     assert consolidated.derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+    assert consolidated.held_since == Instant(processing_time)
+    assert consolidated.validity.observed_at == Instant(processing_time)
     evidence = {(item.kind, item.id) for item in consolidated.sources}
     assert ("atomic_belief", str(extracted.id)) in evidence
     assert any(kind == "background_source_window" for kind, _ in evidence)
@@ -1387,6 +1394,83 @@ def test_memory_consolidation_worker_prompt_includes_output_schema_and_valid_tar
     assert '"target_belief_id": {' in instruction
     assert '"enum": [' in instruction
     assert f'"{target.id}"' in instruction
+
+
+def test_memory_consolidation_prompt_uses_source_time_before_held_since_for_recency(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.create_session_record(
+        "s1",
+        timezone="Asia/Shanghai",
+        created_at="2026-06-01T00:00:00+00:00",
+    )
+    service = CognitionStateStore(store)
+    older_source = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Old import says Alpha Agent uses Poetry.",
+        created_at="2026-06-01T01:00:00+00:00",
+    )
+    newer_source = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Current source says Alpha Agent uses uv.",
+        created_at="2026-06-12T01:00:00+00:00",
+    )
+    target = _atomic_belief(
+        "belief:target-uv",
+        "Alpha Agent uses uv.",
+        sources=[Reference("session_message", newer_source.id)],
+        held_since="2026-01-01T00:00:00+00:00",
+    )
+    extracted = _atomic_belief(
+        "belief:extracted-poetry",
+        "Alpha Agent uses Poetry.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+        sources=[Reference("session_message", older_source.id)],
+        held_since="2026-06-12T00:00:00+00:00",
+    )
+    service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    service.write_atomic_belief(extracted, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="strengthen",
+            payload={
+                "belief_update": {
+                    "target_belief_id": str(target.id),
+                    "rationale": "The active belief has newer source evidence.",
+                }
+            },
+        )
+    )
+
+    report = MemoryConsolidationWorker(service, provider).run_once()
+
+    assert report.emitted == 1
+    instruction = provider.calls[0]["messages"][0]["content"]
+    assert isinstance(instruction, str)
+    assert "prefer source message time over held_since" in instruction
+    assert "held_since is Alpha holding time, not evidence time" in instruction
+    assert "must not infer source recency from held_since" in instruction
+    assert f'"id": "{extracted.id}"' in instruction
+    assert f'"id": "{target.id}"' in instruction
+    assert '"held_since": "2026-06-12T00:00:00+00:00"' in instruction
+    assert '"held_since": "2026-01-01T00:00:00+00:00"' in instruction
+    assert (
+        '"source_time_line": "Source message time: 2026-06-01 09:00 '
+        '(Asia/Shanghai)."'
+    ) in instruction
+    assert (
+        '"source_time_line": "Source message time: 2026-06-12 09:00 '
+        '(Asia/Shanghai)."'
+    ) in instruction
+    retained = service.beliefs.get_by_id(target.id)
+    assert isinstance(retained, AtomicBelief)
+    assert retained.lifecycle == BeliefLifecycle.ACTIVE
 
 
 def test_memory_consolidation_worker_strengthens_target_with_program_evidence(
@@ -1983,32 +2067,42 @@ def test_project_scoped_draft_rejects_unresolvable_descriptor(
 
 def test_memory_extraction_worker_processes_direct_compact_job_with_program_provenance(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
+    store.create_session_record(
+        "s1",
+        timezone="Asia/Shanghai",
+        created_at="2026-06-11T00:00:00+00:00",
+    )
     service = CognitionStateStore(store)
     old = store.append_session_message(
         session_id="s1",
         kind="user_message",
         llm_role="user",
         raw_content="Earlier raw context that was already compacted.",
+        created_at="2026-06-11T01:00:00+00:00",
     )
     prior_compressed = store.append_compressed_message(
         session_id="s1",
         raw_content="Earlier handover context.",
         compression_point_ordinal=old.ordinal,
         compression_version="handover-compression-old",
+        created_at="2026-06-11T01:01:00+00:00",
     )
     user = store.append_session_message(
         session_id="s1",
         kind="user_message",
         llm_role="user",
         raw_content="Alpha Agent uses uv for package management.",
+        created_at="2026-06-12T01:00:00+00:00",
     )
     assistant = store.append_session_message(
         session_id="s1",
         kind="assistant_message",
         llm_role="assistant",
         raw_content="Noted that Alpha Agent uses uv for package management.",
+        created_at="2026-06-12T01:17:00+00:00",
     )
     tools = [
         LLMToolDefinition(
@@ -2045,6 +2139,8 @@ def test_memory_extraction_worker_processes_direct_compact_job_with_program_prov
         ),
         model="extract-model",
     )
+    processing_time = "2026-06-13T00:00:00+00:00"
+    monkeypatch.setattr(state_service_module, "utc_now_iso", lambda: processing_time)
 
     report = MemoryExtractionWorker(service, extraction_provider, tools=tools).run_compact_job(
         compression_result.extraction_job
@@ -2059,6 +2155,13 @@ def test_memory_extraction_worker_processes_direct_compact_job_with_program_prov
     assert handover_prompt_prefix_hash(extraction_call["messages"][:-1]) == (
         completed_trace.metadata["prompt_prefix_hash"]
     )
+    assert "Source message time" not in str(extraction_call["messages"][:-1])
+    instruction = extraction_call["messages"][-1]["content"]
+    assert isinstance(instruction, str)
+    assert (
+        "Source message time range: 2026-06-12 09:00 to 2026-06-12 09:17 "
+        "(Asia/Shanghai)."
+    ) in instruction
     assert "Earlier handover context." in str(extraction_call["messages"])
     windows = service.ledger.list_source_windows(
         stage=BackgroundStage.EXTRACTION,
@@ -2077,11 +2180,16 @@ def test_memory_extraction_worker_processes_direct_compact_job_with_program_prov
     assert window.metadata["prompt_prefix_hash"] == completed_trace.metadata["prompt_prefix_hash"]
     assert window.metadata["tools_schema_hash"] == completed_trace.metadata["tools_schema_hash"]
     assert window.metadata["extraction_version"] == DEFAULT_MEMORY_EXTRACTION_VERSION
+    assert window.metadata["source_time_start"] == "2026-06-12T01:00:00+00:00"
+    assert window.metadata["source_time_end"] == "2026-06-12T01:17:00+00:00"
+    assert window.metadata["source_time_basis"] == "session_message"
 
     beliefs = service.beliefs.list_active()
     assert len(beliefs) == 1
     belief = beliefs[0]
     assert belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
+    assert belief.held_since == Instant(processing_time)
+    assert belief.validity.observed_at == Instant(processing_time)
     evidence = {(item.kind, item.id) for item in belief.sources}
     assert ("background_source_window", window.window_id) in evidence
     assert ("session_message", user.id) in evidence
@@ -2482,6 +2590,11 @@ def test_memory_extraction_worker_uses_reminders_as_context_not_sources(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
+    store.create_session_record(
+        "s1",
+        timezone="Asia/Shanghai",
+        created_at="2026-06-12T00:00:00+00:00",
+    )
     service = CognitionStateStore(store)
     time_reminder = store.append_session_time_reminder(
         session_id="s1",
@@ -2489,17 +2602,20 @@ def test_memory_extraction_worker_uses_reminders_as_context_not_sources(
         reminder_kind="time_update",
         local_datetime="2026-06-12T09:00+08:00",
         local_date="2026-06-12",
+        created_at="2026-06-12T00:55:00+00:00",
     )
     user_message = store.append_session_message(
         session_id="s1",
         kind="user_message",
         llm_role="user",
         raw_content="User prefers Chinese replies.",
+        created_at="2026-06-12T01:00:00+00:00",
     )
     profile_reminder = store.append_session_reminder(
         session_id="s1",
         raw_content="Counterpart profile: User prefers concise answers.",
         reminder_type="counterpart_profile",
+        created_at="2026-06-12T01:05:00+00:00",
     )
     provider = _RecordingLLMProvider(
         _llm_json(
@@ -2527,6 +2643,9 @@ def test_memory_extraction_worker_uses_reminders_as_context_not_sources(
     )[0]
     assert window.source_refs == (BackgroundSourceRef("session_message", user_message.id),)
     assert window.metadata["source_message_ids"] == [user_message.id]
+    assert window.metadata["source_time_start"] == "2026-06-12T01:00:00+00:00"
+    assert window.metadata["source_time_end"] == "2026-06-12T01:00:00+00:00"
+    assert window.metadata["source_time_basis"] == "session_message"
     assert window.metadata["context_reminder_message_ids"] == [
         time_reminder.id,
         profile_reminder.id,
@@ -2534,6 +2653,9 @@ def test_memory_extraction_worker_uses_reminders_as_context_not_sources(
     prompt_messages = provider.calls[0]["messages"]
     assert "time update: 2026-06-12T09:00+08:00" in str(prompt_messages)
     assert "Counterpart profile: User prefers concise answers." in str(prompt_messages)
+    instruction = prompt_messages[-1]["content"]
+    assert isinstance(instruction, str)
+    assert "Source message time: 2026-06-12 09:00 (Asia/Shanghai)." in instruction
     evidence = {(item.kind, item.id) for item in service.beliefs.list_active()[0].sources}
     assert ("session_message", user_message.id) in evidence
     assert ("session_message", time_reminder.id) not in evidence
@@ -2817,6 +2939,8 @@ def _atomic_belief(
     authority: Authority = Authority.USER_ASSERTED,
     derivation_stage: DerivationStage = DerivationStage.TOOL_WRITTEN,
     lifecycle: BeliefLifecycle = BeliefLifecycle.ACTIVE,
+    sources: list[Reference] | None = None,
+    held_since: str = "2026-01-01T00:00:00+00:00",
 ) -> AtomicBelief:
     return AtomicBelief(
         id=BeliefId(belief_id),
@@ -2829,12 +2953,12 @@ def _atomic_belief(
         scope=scope,
         authority=authority,
         lifecycle=lifecycle,
-        sources=[Reference("session_message", "msg-1")],
+        sources=list(sources or []),
         validity=validity
         or ValidityWindow(observed_at=Instant("2026-01-01T00:00:00+00:00")),
         formed_in=Reference("situation", "situation:test"),
         holder_role=Role("agent"),
-        held_since=Instant("2026-01-01T00:00:00+00:00"),
+        held_since=Instant(held_since),
     )
 
 

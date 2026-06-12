@@ -113,6 +113,12 @@ def test_recalled_wrong_preference_is_corrected_through_feedback_loop(
     assert len(submitted_jobs) == 1
     job = submitted_jobs[0]
     assert job.user_message_text == "Actually, I prefer TypeScript examples."
+    current_user = [
+        message
+        for message in store.list_session_messages("s1")
+        if message.id == job.user_message_id
+    ][0]
+    assert job.user_message_created_at == current_user.created_at
     assert job.recall_tool_message_ids == (recall_message.id,)
     assert [handle.belief_id for handle in job.recalled_beliefs] == [wrong_belief_id]
     assert state.ledger.list_source_progress(
@@ -169,6 +175,7 @@ def test_recalled_wrong_preference_is_corrected_through_feedback_loop(
     feedback_events = list(event_log.iter(kinds=[CognitiveEventKind.RECEIVED_FEEDBACK]))
     assert len(feedback_events) == 1
     feedback_event = feedback_events[0]
+    assert str(feedback_event.timestamp) == job.user_message_created_at
     assert feedback_event.payload["feedback_kind"] == "belief_corrected"
     assert feedback_event.payload["verdict"] == "corrected"
     assert feedback_event.payload["matched_expected"] is False
@@ -194,6 +201,7 @@ def test_recalled_wrong_preference_is_corrected_through_feedback_loop(
         "session_id": "s1",
         "turn_id": job.turn_id,
         "turn_received_event_id": job.turn_received_event_id,
+        "user_message_created_at": job.user_message_created_at,
         "user_message_id": job.user_message_id,
         "verdict_count": 1,
     }
@@ -241,6 +249,7 @@ def test_recalled_wrong_preference_is_corrected_through_feedback_loop(
         "evidence_quote": corrected_quote,
         "feedback_event_id": str(feedback_event.id),
         "session_id": "s1",
+        "user_message_created_at": job.user_message_created_at,
         "user_message_id": job.user_message_id,
         "verdict": "corrected",
     }

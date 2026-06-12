@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from alpha_agent.cognition.coordinator import LockBusy, LoopAcquireRequest, LoopCoordinator
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
@@ -29,7 +31,9 @@ from tests.cognition.helpers import clock_factory, id_factory
 
 def test_drive_loop_triggers_runtime_self_signal_turn_and_updates_goal_progress(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
     store, log, emitter, loop = _drive_runtime(tmp_path, enabled=False)
     registry = GoalRegistry(
         log,
@@ -49,6 +53,7 @@ def test_drive_loop_triggers_runtime_self_signal_turn_and_updates_goal_progress(
         event for event in events if event.kind == CognitiveEventKind.PERCEIVED
     ][-1]
     messages = store.list_session_messages("internal:goal:goal:pending")
+    session_record = store.get_session_record("internal:goal:goal:pending")
     goal = loop.projections.get_typed(GoalProjection).get("goal:pending")
     linked = [event for event in events if str(event.id) in report.linked_event_ids]
 
@@ -68,6 +73,8 @@ def test_drive_loop_triggers_runtime_self_signal_turn_and_updates_goal_progress(
     assert perceived.payload["session_id"] == "internal:goal:goal:pending"
     assert perceived.payload["from_counterpart"] is None
     assert store.get_session_counterpart("internal:goal:goal:pending") is None
+    assert session_record is not None
+    assert session_record.timezone == "Asia/Shanghai"
     assert perceived.payload["turn_id"]
     assert [event.kind for event in linked] == [
         CognitiveEventKind.PERCEIVED,

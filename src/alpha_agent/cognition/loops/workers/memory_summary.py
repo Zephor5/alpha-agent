@@ -49,10 +49,15 @@ from alpha_agent.cognition.processing_ledger import (
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
+from alpha_agent.cognition.source_time import (
+    render_source_time_line,
+    resolve_belief_source_time_range,
+)
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.llm.base import JSON_OBJECT_RESPONSE_FORMAT, ChatMessage, LLMProvider
 from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
 from alpha_agent.runtime.context_budget import stable_json
+from alpha_agent.state.store import StateStore
 from alpha_agent.utils.time import utc_now_iso
 
 _RETRYABLE_WINDOW_STATUSES = {
@@ -68,6 +73,8 @@ multiple summaries. The output must validate against this JSON Schema:
 Do not include belief ids, summary ids, source ids, provenance, idempotency keys,
 confidence, scores, or numeric strength fields. Preserve the selected summary target exactly.
 For domain summaries, structure.target_domain is required and must match the selected target.
+Use source_time_line as evidence time when present. held_since is Alpha holding time,
+not evidence time. Do not present old source evidence as newly updated evidence.
 
 Selected summary target:
 {summary_target_json}
@@ -641,7 +648,10 @@ def _summary_instruction_message(
                 sort_keys=True,
             ),
             source_beliefs_json=json.dumps(
-                [_belief_prompt_record(item) for item in target.source_beliefs],
+                [
+                    _belief_prompt_record(state_service.store, item)
+                    for item in target.source_beliefs
+                ],
                 ensure_ascii=False,
                 sort_keys=True,
             ),
@@ -786,8 +796,8 @@ def _render_source_text(source_beliefs: Sequence[AtomicBelief]) -> str:
     )
 
 
-def _belief_prompt_record(belief: AtomicBelief) -> dict[str, Any]:
-    return {
+def _belief_prompt_record(store: StateStore, belief: AtomicBelief) -> dict[str, Any]:
+    record = {
         "id": str(belief.id),
         "memory_kind": belief.memory_kind.value,
         "scope": belief.scope.value,
@@ -797,7 +807,12 @@ def _belief_prompt_record(belief: AtomicBelief) -> dict[str, Any]:
         "structure": belief.structure or {},
         "authority": belief.authority.value,
         "derivation_stage": belief.derivation_stage.value,
+        "held_since": str(belief.held_since),
     }
+    source_time = resolve_belief_source_time_range(store, belief)
+    if source_time is not None:
+        record["source_time_line"] = render_source_time_line(store, source_time)
+    return record
 
 
 def _about_key(about: Sequence[Reference]) -> tuple[tuple[str, str], ...]:

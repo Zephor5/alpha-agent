@@ -84,7 +84,7 @@ class GatewaySessionStore:
             source_context = _source_context(source, mode, session_key)
             mapping_id = new_id("gateway_session")
             session_id = new_session_id()
-            conn.execute(
+            insert_result = conn.execute(
                 """
                 INSERT OR IGNORE INTO gateway_session_mappings
                     (id, platform, chat_id, chat_type, user_id, platform_thread_id, session_mode,
@@ -110,6 +110,15 @@ class GatewaySessionStore:
             row = self._find_by_key(conn, session_key)
             if row is None:
                 raise RuntimeError("gateway session mapping insert did not return a row")
+            if insert_result.rowcount == 1:
+                timezone = _source_timezone(source)
+                self.state_store.create_session_record(
+                    row["session_id"],
+                    timezone=timezone,
+                    created_at=now,
+                    updated_at=now,
+                    conn=conn,
+                )
             return self._mapping_from_row(row)
 
     def _find_by_key(self, conn: sqlite3.Connection, session_key: str) -> sqlite3.Row | None:
@@ -380,6 +389,15 @@ def _norm_required(value: str | None, field_name: str) -> str:
 def _norm_optional(value: str | None) -> str | None:
     normalized = value.strip() if value else ""
     return normalized or None
+
+
+def _source_timezone(source: ConversationSource) -> str | None:
+    if "timezone" not in source.metadata:
+        return None
+    value = source.metadata["timezone"]
+    if not isinstance(value, str):
+        raise ValueError("timezone must be a string")
+    return value
 
 
 def _iso(value: datetime) -> str:

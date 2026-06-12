@@ -6,6 +6,8 @@ import json
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -15,11 +17,12 @@ from alpha_agent.state.models import (
     SessionCounterpart,
     SessionMessage,
     SessionMessageKind,
+    SessionRecord,
     SessionSummarySnapshot,
 )
 from alpha_agent.utils.ids import new_id
 from alpha_agent.utils.system_reminder import SYSTEM_REMINDER_CLOSE, SYSTEM_REMINDER_OPEN
-from alpha_agent.utils.time import utc_now_iso
+from alpha_agent.utils.time import local_timezone_identifier, utc_now_iso, validate_timezone
 
 T = TypeVar("T")
 
@@ -71,6 +74,44 @@ def _validate_reminder_type(reminder_type: str) -> None:
     if reminder_type not in KNOWN_REMINDER_TYPES:
         allowed = ", ".join(sorted(KNOWN_REMINDER_TYPES))
         raise ValueError(f"unsupported reminder_type {reminder_type!r}; allowed: {allowed}")
+
+
+def _normalize_session_timezone(timezone: str | None) -> str:
+    if timezone is None:
+        return local_timezone_identifier()
+    return validate_timezone(timezone)
+
+
+def _normalize_session_message_timestamps(message: SessionMessage) -> SessionMessage:
+    return replace(
+        message,
+        created_at=_normalize_timestamp(message.created_at, "created_at"),
+        updated_at=(
+            _normalize_timestamp(message.updated_at, "updated_at")
+            if message.updated_at is not None
+            else None
+        ),
+    )
+
+
+def _normalize_timestamp(value: str | datetime, field_name: str) -> str:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        raw_value = value.strip()
+        if not raw_value:
+            raise ValueError(f"{field_name} must be a non-empty datetime")
+        if raw_value.endswith("Z"):
+            raw_value = f"{raw_value[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"{field_name} must be a parseable datetime") from exc
+    else:
+        raise ValueError(f"{field_name} must be a datetime or ISO datetime string")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
 
 
 class StateStore:
@@ -131,6 +172,106 @@ class StateStore:
         with self.connect() as local:
             return fn(local)
 
+    def get_session_record(
+        self,
+        session_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionRecord | None:
+        """Return durable session metadata, if it exists."""
+
+        def op(db: sqlite3.Connection) -> SessionRecord | None:
+            row = db.execute(
+                """
+                SELECT *
+                FROM sessions
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            return self._session_record_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def create_session_record(
+        self,
+        session_id: str,
+        *,
+        timezone: str | None = None,
+        created_at: str | None = None,
+        updated_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionRecord:
+        """Create durable session metadata."""
+
+        normalized_timezone = _normalize_session_timezone(timezone)
+        created_timestamp = _normalize_timestamp(
+            created_at if created_at is not None else utc_now_iso(),
+            "created_at",
+        )
+        updated_timestamp = (
+            _normalize_timestamp(updated_at, "updated_at")
+            if updated_at is not None
+            else created_timestamp
+        )
+
+        def op(db: sqlite3.Connection) -> SessionRecord:
+            db.execute(
+                """
+                INSERT INTO sessions
+                    (session_id, timezone, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, normalized_timezone, created_timestamp, updated_timestamp),
+            )
+            record = self.get_session_record(session_id, conn=db)
+            if record is None:
+                raise RuntimeError(f"failed to create session record for {session_id!r}")
+            return record
+
+        return self._with_conn(conn, op)
+
+    def ensure_session_record(
+        self,
+        session_id: str,
+        *,
+        timezone: str | None = None,
+        created_at: str | None = None,
+        updated_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionRecord:
+        """Create durable session metadata if missing, preserving existing timezone."""
+
+        normalized_timezone = _normalize_session_timezone(timezone)
+        created_timestamp = _normalize_timestamp(
+            created_at if created_at is not None else utc_now_iso(),
+            "created_at",
+        )
+        updated_timestamp = (
+            _normalize_timestamp(updated_at, "updated_at")
+            if updated_at is not None
+            else created_timestamp
+        )
+
+        def op(db: sqlite3.Connection) -> SessionRecord:
+            db.execute(
+                """
+                INSERT OR IGNORE INTO sessions
+                    (session_id, timezone, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, normalized_timezone, created_timestamp, updated_timestamp),
+            )
+            record = self.get_session_record(session_id, conn=db)
+            if record is None:
+                raise RuntimeError(f"failed to ensure session record for {session_id!r}")
+            return record
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
     def append_session_message(
         self,
         *,
@@ -173,11 +314,13 @@ class StateStore:
                 source_metadata=source_metadata or {},
                 compression_point_ordinal=compression_point_ordinal,
                 compression_version=compression_version,
-                created_at=created_at or utc_now_iso(),
+                created_at=created_at if created_at is not None else utc_now_iso(),
                 updated_at=updated_at,
                 metadata=metadata or {},
             )
-            return self._insert_session_message(db, message)
+            normalized_message = _normalize_session_message_timestamps(message)
+            self.ensure_session_record(normalized_message.session_id, conn=db)
+            return self._insert_session_message(db, normalized_message)
 
         if conn is not None:
             return op(conn)
@@ -278,13 +421,16 @@ class StateStore:
         self._validate_session_message_shape(kind=message.kind, llm_role=message.llm_role)
 
         def op(db: sqlite3.Connection) -> SessionMessage:
+            normalized_message = _normalize_session_message_timestamps(message)
             expected_ordinal = self._next_session_ordinal(db, message.session_id)
-            if message.ordinal != expected_ordinal:
+            if normalized_message.ordinal != expected_ordinal:
                 raise ValueError(
                     "session message ordinal for session "
-                    f"{message.session_id!r} must be {expected_ordinal}, got {message.ordinal}"
+                    f"{message.session_id!r} must be {expected_ordinal}, got "
+                    f"{normalized_message.ordinal}"
                 )
-            return self._insert_session_message(db, message)
+            self.ensure_session_record(normalized_message.session_id, conn=db)
+            return self._insert_session_message(db, normalized_message)
 
         if conn is not None:
             return op(conn)
@@ -342,11 +488,14 @@ class StateStore:
         return [by_id[message_id] for message_id in message_ids if message_id in by_id]
 
     def list_session_ids(self) -> list[str]:
-        """List known session ids that have source messages or runtime traces."""
+        """List known session ids from session records, source messages, or traces."""
 
         with self.connect() as conn:
             rows = conn.execute(
                 """
+                SELECT session_id
+                FROM sessions
+                UNION
                 SELECT session_id
                 FROM session_messages
                 UNION
@@ -777,6 +926,14 @@ class StateStore:
             ),
         )
         return message
+
+    def _session_record_from_row(self, row: sqlite3.Row) -> SessionRecord:
+        return SessionRecord(
+            session_id=row["session_id"],
+            timezone=row["timezone"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
 
     def _session_message_from_row(self, row: sqlite3.Row) -> SessionMessage:
         return SessionMessage(

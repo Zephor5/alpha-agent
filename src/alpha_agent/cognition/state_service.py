@@ -312,6 +312,7 @@ class CognitionStateStore:
         feedback_event_id: str,
         session_id: str,
         user_message_id: str,
+        user_message_created_at: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> BackgroundSourceWindow | None:
         """Create an idempotent conflict-review source window for feedback."""
@@ -321,10 +322,17 @@ class CognitionStateStore:
             return None
         raw_belief_id = str(belief_id).strip()
         raw_user_message_id = str(user_message_id).strip()
+        raw_user_message_created_at = (
+            str(user_message_created_at).strip()
+            if user_message_created_at is not None
+            else None
+        )
         if not raw_belief_id:
             raise ValueError("belief_id must be non-empty")
         if not raw_user_message_id:
             raise ValueError("user_message_id must be non-empty")
+        if user_message_created_at is not None and not raw_user_message_created_at:
+            raise ValueError("user_message_created_at must be non-empty when provided")
 
         def op(db: sqlite3.Connection) -> BackgroundSourceWindow | None:
             belief = self.beliefs.get_by_id(raw_belief_id, conn=db)
@@ -339,21 +347,24 @@ class CognitionStateStore:
             idempotency_key = (
                 f"conflict_review:belief_feedback:{raw_belief_id}:{raw_user_message_id}"
             )
+            metadata = {
+                "active_belief_ids": [raw_belief_id],
+                "belief_id": raw_belief_id,
+                "belief_content": str(belief.content),
+                "verdict": verdict_value,
+                "evidence_quote": str(evidence_quote),
+                "feedback_event_id": str(feedback_event_id),
+                "session_id": str(session_id),
+                "user_message_id": raw_user_message_id,
+            }
+            if raw_user_message_created_at is not None:
+                metadata["user_message_created_at"] = raw_user_message_created_at
             return self.ledger.create_source_window(
                 stage=BackgroundStage.CONFLICT_REVIEW,
                 target_unit=_FEEDBACK_CONFLICT_TARGET_UNIT,
                 source_refs=(source_ref,),
                 idempotency_key=idempotency_key,
-                metadata={
-                    "active_belief_ids": [raw_belief_id],
-                    "belief_id": raw_belief_id,
-                    "belief_content": str(belief.content),
-                    "verdict": verdict_value,
-                    "evidence_quote": str(evidence_quote),
-                    "feedback_event_id": str(feedback_event_id),
-                    "session_id": str(session_id),
-                    "user_message_id": raw_user_message_id,
-                },
+                metadata=metadata,
                 conn=db,
             )
 

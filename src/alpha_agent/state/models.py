@@ -16,6 +16,16 @@ LLMRole = Literal["user", "assistant", "tool"]
 
 
 @dataclass(frozen=True)
+class SessionRecord:
+    """Durable session-level metadata."""
+
+    session_id: str
+    timezone: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class SessionMessage:
     """Append-only source message in a session stream."""
 

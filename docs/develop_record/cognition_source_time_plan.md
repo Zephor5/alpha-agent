@@ -2,7 +2,8 @@
 
 ## Status
 
-Planned.
+Implemented and verified. Validation completed with `uv run ruff check .`,
+`uv run mypy src tests`, and `uv run pytest -q`.
 
 ## Date
 
@@ -151,26 +152,26 @@ one timezone source for CLI, gateway, and internal sessions.
 
 **Acceptance criteria:**
 
-- [ ] A session record stores `session_id`, `timezone`, `created_at`, and
+- [x] A session record stores `session_id`, `timezone`, `created_at`, and
       `updated_at`.
-- [ ] Timezone values prefer valid IANA names.
-- [ ] Fixed offsets are accepted only as a fallback representation.
-- [ ] Invalid explicit timezone values are rejected.
-- [ ] CLI/runtime-created sessions use the local IANA timezone when available
+- [x] Timezone values prefer valid IANA names.
+- [x] Fixed offsets are accepted only as a fallback representation.
+- [x] Invalid explicit timezone values are rejected.
+- [x] CLI/runtime-created sessions use the local IANA timezone when available
       and the current local fixed offset otherwise.
-- [ ] Internal self-signal and goal sessions create session records with the
+- [x] Internal self-signal and goal sessions create session records with the
       same local timezone fallback rule.
-- [ ] Gateway-created sessions use external timezone metadata when valid and
+- [x] Gateway-created sessions use external timezone metadata when valid and
       the local timezone fallback rule when missing.
-- [ ] Later messages do not update or compare session timezone.
+- [x] Later messages do not update or compare session timezone.
 
 **Verification:**
 
-- [ ] Tests cover CLI default timezone creation.
-- [ ] Tests cover gateway timezone from metadata.
-- [ ] Tests cover gateway missing timezone fallback.
-- [ ] Tests cover invalid explicit gateway timezone rejection.
-- [ ] Tests cover internal goal/self-signal session timezone creation.
+- [x] Tests cover CLI default timezone creation.
+- [x] Tests cover gateway timezone from metadata.
+- [x] Tests cover gateway missing timezone fallback.
+- [x] Tests cover invalid explicit gateway timezone rejection.
+- [x] Tests cover internal goal/self-signal session timezone creation.
 
 **Files likely touched:**
 
@@ -189,23 +190,23 @@ invariants at the state-store boundary.
 
 **Acceptance criteria:**
 
-- [ ] `append_session_message(created_at=None)` continues to use the current UTC
+- [x] `append_session_message(created_at=None)` continues to use the current UTC
       time.
-- [ ] Explicit `created_at` and `updated_at` values must be non-empty,
+- [x] Explicit `created_at` and `updated_at` values must be non-empty,
       parseable datetimes.
-- [ ] Naive datetimes are treated as UTC before persistence.
-- [ ] Offset-aware datetimes are normalized to UTC before persistence.
-- [ ] `insert_session_message()` rejects empty or invalid `created_at`.
-- [ ] `insert_session_message()` validates `updated_at` when present.
-- [ ] No public shared timestamp helper is introduced unless multiple modules
+- [x] Naive datetimes are treated as UTC before persistence.
+- [x] Offset-aware datetimes are normalized to UTC before persistence.
+- [x] `insert_session_message()` rejects empty or invalid `created_at`.
+- [x] `insert_session_message()` validates `updated_at` when present.
+- [x] No public shared timestamp helper is introduced unless multiple modules
       genuinely need it.
 
 **Verification:**
 
-- [ ] Tests cover default timestamp auto-fill.
-- [ ] Tests cover explicit offset timestamp normalization to UTC.
-- [ ] Tests cover naive timestamp normalization to UTC.
-- [ ] Tests cover empty and invalid timestamp rejection for append and insert.
+- [x] Tests cover default timestamp auto-fill.
+- [x] Tests cover explicit offset timestamp normalization to UTC.
+- [x] Tests cover naive timestamp normalization to UTC.
+- [x] Tests cover empty and invalid timestamp rejection for append and insert.
 
 **Files likely touched:**
 
@@ -219,23 +220,23 @@ session-message refs and rendering prompt-facing local time lines.
 
 **Acceptance criteria:**
 
-- [ ] Resolver supports `session_message` refs only.
-- [ ] Belief source-time range resolution reads `belief.sources` and uses only
+- [x] Resolver supports `session_message` refs only.
+- [x] Belief source-time range resolution reads `belief.sources` and uses only
       `Reference("session_message", id)` sources.
-- [ ] `system_reminder` messages are skipped for evidence ranges.
-- [ ] `compressed_message` messages are skipped for evidence ranges.
-- [ ] Non-session refs are ignored, not treated as source time.
-- [ ] If a selected session-message evidence ref is missing or has an invalid
+- [x] `system_reminder` messages are skipped for evidence ranges.
+- [x] `compressed_message` messages are skipped for evidence ranges.
+- [x] Non-session refs are ignored, not treated as source time.
+- [x] If a selected session-message evidence ref is missing or has an invalid
       timestamp, the caller fails fast.
-- [ ] Local prompt rendering uses the stored session timezone.
-- [ ] Single-instant and range prompt lines match the formats in this document.
+- [x] Local prompt rendering uses the stored session timezone.
+- [x] Single-instant and range prompt lines match the formats in this document.
 
 **Verification:**
 
-- [ ] Tests cover source-window range from multiple messages.
-- [ ] Tests cover single-message prompt line.
-- [ ] Tests cover reminder and compressed messages being excluded.
-- [ ] Tests cover local timezone rendering from session state.
+- [x] Tests cover source-window range from multiple messages.
+- [x] Tests cover single-message prompt line.
+- [x] Tests cover reminder and compressed messages being excluded.
+- [x] Tests cover local timezone rendering from session state.
 
 **Files likely touched:**
 
@@ -250,18 +251,18 @@ timestamped source message they represent.
 
 **Acceptance criteria:**
 
-- [ ] `PERCEIVED.timestamp` equals `user_record.created_at`.
-- [ ] `ACTED.timestamp` equals `assistant_record.created_at`.
-- [ ] `TURN_SOURCES_RECORDED.timestamp` remains the emitter/processing time.
-- [ ] Counterpart observation/identification events remain processing time.
-- [ ] Runtime traces and LLM traces remain processing time.
+- [x] `PERCEIVED.timestamp` equals `user_record.created_at`.
+- [x] `ACTED.timestamp` equals `assistant_record.created_at`.
+- [x] `TURN_SOURCES_RECORDED.timestamp` remains the emitter/processing time.
+- [x] Counterpart observation/identification events remain processing time.
+- [x] Runtime traces and LLM traces remain processing time.
 
 **Verification:**
 
-- [ ] Tests cover a delayed or explicit `created_at` user message and verify
+- [x] Tests cover a delayed or explicit `created_at` user message and verify
       `PERCEIVED.timestamp`.
-- [ ] Tests verify `ACTED.timestamp` follows the assistant message.
-- [ ] Tests verify bookkeeping events still use processing time.
+- [x] Tests verify `ACTED.timestamp` follows the assistant message.
+- [x] Tests verify bookkeeping events still use processing time.
 
 **Files likely touched:**
 
@@ -276,25 +277,25 @@ without modifying stable replay prefixes.
 
 **Acceptance criteria:**
 
-- [ ] `candidate.prompt_prefix_messages` is unchanged.
-- [ ] `handover_prompt_prefix_hash` behavior is unchanged.
-- [ ] Extraction instruction includes a source-window time line rendered in the
+- [x] `candidate.prompt_prefix_messages` is unchanged.
+- [x] `handover_prompt_prefix_hash` behavior is unchanged.
+- [x] Extraction instruction includes a source-window time line rendered in the
       session timezone.
-- [ ] Source-window metadata stores UTC `source_time_start`,
+- [x] Source-window metadata stores UTC `source_time_start`,
       `source_time_end`, and `source_time_basis`.
-- [ ] Source-window metadata excludes reminders and compressed messages from
+- [x] Source-window metadata excludes reminders and compressed messages from
       range calculation.
-- [ ] No `extraction_version` bump is required.
-- [ ] Accepted beliefs continue to write `held_since` and default
+- [x] No `extraction_version` bump is required.
+- [x] Accepted beliefs continue to write `held_since` and default
       `validity.observed_at` from processing/acceptance time.
 
 **Verification:**
 
-- [ ] Tests verify extraction prompt contains the local source-time line.
-- [ ] Tests verify prompt prefix hash is unchanged by source-time rendering.
-- [ ] Tests verify metadata UTC range is written.
-- [ ] Tests verify reminder-only extraction still skips.
-- [ ] Tests verify accepted belief `held_since` remains processing time.
+- [x] Tests verify extraction prompt contains the local source-time line.
+- [x] Tests verify prompt prefix hash is unchanged by source-time rendering.
+- [x] Tests verify metadata UTC range is written.
+- [x] Tests verify reminder-only extraction still skips.
+- [x] Tests verify accepted belief `held_since` remains processing time.
 
 **Files likely touched:**
 
@@ -310,26 +311,26 @@ source-time ranges resolved from their session-message sources.
 
 **Acceptance criteria:**
 
-- [ ] Consolidation prompt records include `held_since`.
-- [ ] Consolidation prompt records include a local source-time line when
+- [x] Consolidation prompt records include `held_since`.
+- [x] Consolidation prompt records include a local source-time line when
       source-message evidence exists.
-- [ ] Prompt rules state that recency decisions prefer source message time over
+- [x] Prompt rules state that recency decisions prefer source message time over
       `held_since`.
-- [ ] Prompt rules state that `held_since` is Alpha holding time, not evidence
+- [x] Prompt rules state that `held_since` is Alpha holding time, not evidence
       time.
-- [ ] Supersede, retract, and archive decisions must not infer source recency
+- [x] Supersede, retract, and archive decisions must not infer source recency
       from `held_since`.
-- [ ] Consolidation acceptance still writes `held_since`,
+- [x] Consolidation acceptance still writes `held_since`,
       `validity.observed_at`, lifecycle transition `at`, and audits using
       processing/acceptance time.
 
 **Verification:**
 
-- [ ] Tests verify draft and active belief prompt records include local
+- [x] Tests verify draft and active belief prompt records include local
       source-time lines.
-- [ ] Tests cover old imported/source evidence processed today not superseding
+- [x] Tests cover old imported/source evidence processed today not superseding
       newer source evidence just because `held_since` is newer.
-- [ ] Tests verify accepted consolidated belief timing fields remain processing
+- [x] Tests verify accepted consolidated belief timing fields remain processing
       time.
 
 **Files likely touched:**
@@ -345,21 +346,21 @@ message time for feedback events and same-day feedback history.
 
 **Acceptance criteria:**
 
-- [ ] `FeedbackAttributionJob` carries `user_message_created_at`.
-- [ ] Runtime job submission passes `user_record.created_at`.
-- [ ] `RECEIVED_FEEDBACK.timestamp` equals `user_message_created_at`.
-- [ ] `record_belief_feedback(..., at=...)` receives
+- [x] `FeedbackAttributionJob` carries `user_message_created_at`.
+- [x] Runtime job submission passes `user_record.created_at`.
+- [x] `RECEIVED_FEEDBACK.timestamp` equals `user_message_created_at`.
+- [x] `record_belief_feedback(..., at=...)` receives
       `user_message_created_at`.
-- [ ] Same-day feedback de-duplication uses feedback message time.
-- [ ] Conflict-review window metadata includes `user_message_created_at`.
-- [ ] Feedback attribution ledger and audits remain processing time.
+- [x] Same-day feedback de-duplication uses feedback message time.
+- [x] Conflict-review window metadata includes `user_message_created_at`.
+- [x] Feedback attribution ledger and audits remain processing time.
 
 **Verification:**
 
-- [ ] Tests cover feedback processing delayed after the feedback message and
+- [x] Tests cover feedback processing delayed after the feedback message and
       verify event/history timestamps use message time.
-- [ ] Tests cover same-day de-duplication based on feedback message date.
-- [ ] Tests verify audit `created_at` remains processing time.
+- [x] Tests cover same-day de-duplication based on feedback message date.
+- [x] Tests verify audit `created_at` remains processing time.
 
 **Files likely touched:**
 
@@ -376,20 +377,20 @@ belief without changing summary belief storage semantics.
 
 **Acceptance criteria:**
 
-- [ ] Summary source belief records include `held_since`.
-- [ ] Summary source belief records include a local source-time line.
-- [ ] Summary prompt instructions avoid presenting old source evidence as newly
+- [x] Summary source belief records include `held_since`.
+- [x] Summary source belief records include a local source-time line.
+- [x] Summary prompt instructions avoid presenting old source evidence as newly
       updated evidence.
-- [ ] Summary acceptance still writes `held_since` and default
+- [x] Summary acceptance still writes `held_since` and default
       `validity.observed_at` from processing/acceptance time.
-- [ ] Summary gate logic remains based on source belief ids, lifecycle, changed
+- [x] Summary gate logic remains based on source belief ids, lifecycle, changed
       count, and invalidation count. It is not converted into a time gate.
 
 **Verification:**
 
-- [ ] Tests verify summary prompt records include local source-time lines.
-- [ ] Tests verify summary belief timing fields remain processing time.
-- [ ] Tests verify summary gating behavior is unchanged.
+- [x] Tests verify summary prompt records include local source-time lines.
+- [x] Tests verify summary belief timing fields remain processing time.
+- [x] Tests verify summary gating behavior is unchanged.
 
 **Files likely touched:**
 
@@ -410,21 +411,21 @@ belief without changing summary belief storage semantics.
 
 ## Acceptance Checklist
 
-- [ ] All persisted timestamps touched by this plan are stored as UTC.
-- [ ] Sessions have a durable timezone value.
-- [ ] Prompt-facing source times render in the session timezone.
-- [ ] `held_since` remains holding time across write paths.
-- [ ] `validity.observed_at` remains cognition observation time across write
+- [x] All persisted timestamps touched by this plan are stored as UTC.
+- [x] Sessions have a durable timezone value.
+- [x] Prompt-facing source times render in the session timezone.
+- [x] `held_since` remains holding time across write paths.
+- [x] `validity.observed_at` remains cognition observation time across write
       paths.
-- [ ] Source message time is available to extraction, consolidation, summary,
+- [x] Source message time is available to extraction, consolidation, summary,
       and feedback through program-owned resolution.
-- [ ] Reminder and compressed messages are not treated as source evidence.
-- [ ] `PERCEIVED`, `ACTED`, and `RECEIVED_FEEDBACK` use their source message
+- [x] Reminder and compressed messages are not treated as source evidence.
+- [x] `PERCEIVED`, `ACTED`, and `RECEIVED_FEEDBACK` use their source message
       timestamps.
-- [ ] Feedback history uses feedback message time.
-- [ ] Consolidation prompts can compare incoming and existing beliefs using
+- [x] Feedback history uses feedback message time.
+- [x] Consolidation prompts can compare incoming and existing beliefs using
       explicit source-time context.
-- [ ] Background ledgers, audits, traces, checkpoints, and status timestamps
+- [x] Background ledgers, audits, traces, checkpoints, and status timestamps
       remain processing time.
-- [ ] Tests cover delayed background processing where source message time and
+- [x] Tests cover delayed background processing where source message time and
       processing time differ.

@@ -4,6 +4,9 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
+import pytest
+
+import alpha_agent.cognition.state_service as state_service_module
 from alpha_agent.cognition.loops.workers.memory_summary import MemorySummaryWorker
 from alpha_agent.cognition.models import (
     AtomicBelief,
@@ -25,6 +28,7 @@ from tests.cognition.test_belief_projection_apply import belief
 
 def test_self_memory_summary_worker_writes_validated_summary_with_program_sources(
     tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
     service = CognitionStateStore(store)
@@ -41,6 +45,8 @@ def test_self_memory_summary_worker_writes_validated_summary_with_program_source
     provider = _RecordingLLMProvider(
         _summary_json("Agent solves root causes and validates changes with tests.")
     )
+    processing_time = "2026-06-13T00:00:00+00:00"
+    monkeypatch.setattr(state_service_module, "utc_now_iso", lambda: processing_time)
 
     report = MemorySummaryWorker(
         service,
@@ -59,6 +65,8 @@ def test_self_memory_summary_worker_writes_validated_summary_with_program_source
     assert summary is not None
     assert summary.derivation_stage == DerivationStage.BACKGROUND_SUMMARIZED
     assert summary.content == "Agent solves root causes and validates changes with tests."
+    assert str(summary.held_since) == processing_time
+    assert str(summary.validity.observed_at) == processing_time
     assert set(summary.source_belief_ids) == {first.id, second.id}
     evidence = {(item.kind, item.id) for item in summary.sources}
     assert any(kind == "background_source_window" for kind, _ in evidence)
@@ -126,14 +134,37 @@ def test_self_memory_summary_worker_prompt_includes_output_schema_and_target(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
+    store.create_session_record(
+        "s1",
+        timezone="Asia/Shanghai",
+        created_at="2026-06-12T00:00:00+00:00",
+    )
     service = CognitionStateStore(store)
+    first_source = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Agent solves root causes.",
+        created_at="2026-06-12T01:00:00+00:00",
+    )
+    second_source = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Agent validates changes with tests.",
+        created_at="2026-06-12T01:17:00+00:00",
+    )
     first = _self_consolidated_belief(
         "belief:self-root-cause",
         "Agent solves root causes.",
+        sources=[Reference("session_message", first_source.id)],
+        held_since="2026-06-12T02:00:00+00:00",
     )
     second = _self_consolidated_belief(
         "belief:self-tests",
         "Agent validates changes with tests.",
+        sources=[Reference("session_message", second_source.id)],
+        held_since="2026-06-12T02:17:00+00:00",
     )
     service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
     service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
@@ -161,6 +192,17 @@ def test_self_memory_summary_worker_prompt_includes_output_schema_and_target(
     assert '"const": "self"' in instruction
     assert '"about": {' in instruction
     assert '{"id": "subject:self", "kind": "subject"}' in instruction
+    assert "Do not present old source evidence as newly updated evidence." in instruction
+    assert '"held_since": "2026-06-12T02:00:00+00:00"' in instruction
+    assert '"held_since": "2026-06-12T02:17:00+00:00"' in instruction
+    assert (
+        '"source_time_line": "Source message time: 2026-06-12 09:00 '
+        '(Asia/Shanghai)."'
+    ) in instruction
+    assert (
+        '"source_time_line": "Source message time: 2026-06-12 09:17 '
+        '(Asia/Shanghai)."'
+    ) in instruction
 
 
 def _store(tmp_path) -> StateStore:
@@ -169,16 +211,24 @@ def _store(tmp_path) -> StateStore:
     return store
 
 
-def _self_consolidated_belief(belief_id: str, content: str) -> AtomicBelief:
+def _self_consolidated_belief(
+    belief_id: str,
+    content: str,
+    *,
+    sources: list[Reference] | None = None,
+    held_since: str = "2026-01-01T00:00:00+00:00",
+) -> AtomicBelief:
     record = belief(
         belief_id,
         content,
         about=[Reference("subject", "subject:self")],
         object_="self memory source",
         scope=BeliefScope.SELF,
+        held_since=held_since,
     ).to_record()
     record["authority"] = Authority.BACKGROUND_SYNTHESIZED.value
     record["derivation_stage"] = DerivationStage.BACKGROUND_CONSOLIDATED.value
+    record["sources"] = [source.to_record() for source in sources or []]
     return AtomicBelief.from_record(record)
 
 

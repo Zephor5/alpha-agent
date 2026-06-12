@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+
+import pytest
 
 from alpha_agent.cognition.processing_ledger import (
     BackgroundSourceRef,
@@ -11,6 +14,7 @@ from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import LLMContextConfig
 from alpha_agent.runtime.chat_messages import TOOL_TRUNCATION_MARKER, wrap_system_reminder
 from alpha_agent.runtime.session_context import SessionContextAssembler
+from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
 
 
@@ -18,6 +22,177 @@ def _store(tmp_path) -> StateStore:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
     return store
+
+
+def test_append_session_message_creates_default_session_record(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    store = _store(tmp_path)
+
+    message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+    )
+
+    record = store.get_session_record("s1")
+    assert record is not None
+    assert record.session_id == "s1"
+    assert record.timezone == "Asia/Shanghai"
+    assert datetime.fromisoformat(record.created_at).tzinfo == UTC
+    assert datetime.fromisoformat(record.updated_at).tzinfo == UTC
+    assert datetime.fromisoformat(message.created_at).tzinfo == UTC
+
+
+@pytest.mark.parametrize("timezone", ["+08:00", "-05:30"])
+def test_session_record_accepts_fixed_offset_timezone(tmp_path, timezone: str) -> None:
+    store = _store(tmp_path)
+
+    record = store.ensure_session_record("s1", timezone=timezone)
+
+    assert record.timezone == timezone
+
+
+def test_later_session_messages_do_not_update_timezone(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.ensure_session_record("s1", timezone="Asia/Shanghai")
+
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+        source_metadata={"timezone": "UTC"},
+    )
+
+    record = store.get_session_record("s1")
+    assert record is not None
+    assert record.timezone == "Asia/Shanghai"
+
+
+def test_append_session_message_normalizes_offset_and_naive_timestamps_to_utc(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+
+    offset_message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="offset",
+        created_at="2026-01-01T08:30:00+08:00",
+        updated_at="2026-01-01T09:00:00+08:00",
+    )
+    naive_message = store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="naive",
+        created_at="2026-01-01T00:30:00",
+        updated_at="2026-01-01T01:00:00",
+    )
+
+    assert offset_message.created_at == "2026-01-01T00:30:00+00:00"
+    assert offset_message.updated_at == "2026-01-01T01:00:00+00:00"
+    assert naive_message.created_at == "2026-01-01T00:30:00+00:00"
+    assert naive_message.updated_at == "2026-01-01T01:00:00+00:00"
+
+
+@pytest.mark.parametrize("field", ["created_at", "updated_at"])
+@pytest.mark.parametrize("value", ["", "not-a-datetime"])
+def test_append_session_message_rejects_empty_or_invalid_timestamps(
+    tmp_path,
+    field: str,
+    value: str,
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(ValueError, match=field):
+        if field == "created_at":
+            store.append_session_message(
+                session_id="s1",
+                kind="user_message",
+                llm_role="user",
+                raw_content="hello",
+                created_at=value,
+            )
+        else:
+            store.append_session_message(
+                session_id="s1",
+                kind="user_message",
+                llm_role="user",
+                raw_content="hello",
+                updated_at=value,
+            )
+
+
+def test_insert_session_message_normalizes_timestamps_and_creates_session_record(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    message = SessionMessage(
+        id="msg_1",
+        session_id="s1",
+        ordinal=1,
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+        model_content=None,
+        tool_call_id=None,
+        tool_calls=[],
+        tool_result_id=None,
+        provider_metadata={},
+        source_metadata={},
+        compression_point_ordinal=None,
+        compression_version=None,
+        created_at="2026-01-01T08:30:00+08:00",
+        updated_at="2026-01-01T09:00:00",
+    )
+
+    inserted = store.insert_session_message(message)
+
+    assert inserted.created_at == "2026-01-01T00:30:00+00:00"
+    assert inserted.updated_at == "2026-01-01T09:00:00+00:00"
+    assert store.get_session_record("s1") is not None
+
+
+@pytest.mark.parametrize(
+    ("created_at", "updated_at", "field"),
+    [
+        ("", None, "created_at"),
+        ("not-a-datetime", None, "created_at"),
+        ("2026-01-01T00:00:00+00:00", "", "updated_at"),
+        ("2026-01-01T00:00:00+00:00", "not-a-datetime", "updated_at"),
+    ],
+)
+def test_insert_session_message_rejects_empty_or_invalid_timestamps(
+    tmp_path,
+    created_at: str,
+    updated_at: str | None,
+    field: str,
+) -> None:
+    store = _store(tmp_path)
+    message = SessionMessage(
+        id="msg_1",
+        session_id="s1",
+        ordinal=1,
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+        model_content=None,
+        tool_call_id=None,
+        tool_calls=[],
+        tool_result_id=None,
+        provider_metadata={},
+        source_metadata={},
+        compression_point_ordinal=None,
+        compression_version=None,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+    with pytest.raises(ValueError, match=field):
+        store.insert_session_message(message)
 
 
 def test_source_stream_append_read_and_latest_compressed_message(tmp_path) -> None:

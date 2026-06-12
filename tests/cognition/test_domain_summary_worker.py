@@ -154,18 +154,93 @@ def test_domain_summary_worker_runs_invalidated_source_gate(tmp_path) -> None:
     assert latest.content == "Memory proposal confirmation required."
 
 
-def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) -> None:
+def test_domain_summary_worker_gate_ignores_source_and_holding_time_when_sources_unchanged(
+    tmp_path,
+) -> None:
     store = _store(tmp_path)
     service = CognitionStateStore(store)
     first = _consolidated_belief(
         "belief:domain-memory-propose-1",
         "Memory proposal confirmation required for remembered preferences.",
         target_domain="memory_propose",
+        held_since="2026-06-12T00:00:00+00:00",
     )
     second = _consolidated_belief(
         "belief:domain-memory-propose-2",
         "Memory proposal confirmation required before changing constraints.",
         target_domain="memory_propose",
+        held_since="2026-06-12T01:00:00+00:00",
+    )
+    service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_summary_belief(
+        _domain_summary_belief(
+            "belief:domain-summary-current",
+            source_belief_ids=[first.id, second.id],
+        ),
+        source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+    )
+    provider = _RecordingLLMProvider(
+        _summary_json(
+            summary_kind=SummaryKind.DOMAIN_SUMMARY,
+            scope=BeliefScope.GLOBAL,
+            about=[],
+            content="Memory proposal confirmation required.",
+            structure={
+                "target_domain": "memory_propose",
+                "memory_propose": {"requires_confirmation": True},
+            },
+        )
+    )
+
+    report = MemorySummaryWorker(
+        service,
+        provider,
+        initial_min_beliefs=1,
+        changed_source_min=1,
+        invalidated_source_min=1,
+    ).run_once()
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "skipped_no_backlog"
+    assert provider.calls == []
+
+
+def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.create_session_record(
+        "s1",
+        timezone="Asia/Shanghai",
+        created_at="2026-06-12T00:00:00+00:00",
+    )
+    service = CognitionStateStore(store)
+    first_source = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Memory proposal confirmation required for remembered preferences.",
+        created_at="2026-06-12T01:00:00+00:00",
+    )
+    second_source = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Memory proposal confirmation required before changing constraints.",
+        created_at="2026-06-12T01:17:00+00:00",
+    )
+    first = _consolidated_belief(
+        "belief:domain-memory-propose-1",
+        "Memory proposal confirmation required for remembered preferences.",
+        target_domain="memory_propose",
+        sources=[Reference("session_message", first_source.id)],
+        held_since="2026-06-12T02:00:00+00:00",
+    )
+    second = _consolidated_belief(
+        "belief:domain-memory-propose-2",
+        "Memory proposal confirmation required before changing constraints.",
+        target_domain="memory_propose",
+        sources=[Reference("session_message", second_source.id)],
+        held_since="2026-06-12T02:17:00+00:00",
     )
     service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
     service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
@@ -199,6 +274,16 @@ def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) ->
     assert '"const": "global"' in instruction
     assert '"target_domain": {' in instruction
     assert '"const": "memory_propose"' in instruction
+    assert '"held_since": "2026-06-12T02:00:00+00:00"' in instruction
+    assert '"held_since": "2026-06-12T02:17:00+00:00"' in instruction
+    assert (
+        '"source_time_line": "Source message time: 2026-06-12 09:00 '
+        '(Asia/Shanghai)."'
+    ) in instruction
+    assert (
+        '"source_time_line": "Source message time: 2026-06-12 09:17 '
+        '(Asia/Shanghai)."'
+    ) in instruction
 
 
 def _store(tmp_path) -> StateStore:
@@ -212,16 +297,20 @@ def _consolidated_belief(
     content: str,
     *,
     target_domain: str,
+    sources: list[Reference] | None = None,
+    held_since: str = "2026-01-01T00:00:00+00:00",
 ) -> AtomicBelief:
     record = belief(
         belief_id,
         content,
         about=[],
         object_=f"domain guidance {target_domain}",
+        held_since=held_since,
     ).to_record()
     record["authority"] = Authority.BACKGROUND_SYNTHESIZED.value
     record["derivation_stage"] = DerivationStage.BACKGROUND_CONSOLIDATED.value
     record["structure"] = {"target_domain": target_domain}
+    record["sources"] = [source.to_record() for source in sources or []]
     return AtomicBelief.from_record(record)
 
 

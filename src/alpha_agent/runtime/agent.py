@@ -804,6 +804,7 @@ class AlphaAgent:
             turn_id=turn_context.turn_id,
             turn_received_event_id=turn_context.turn_received_event_id or "",
             user_message_id=user_record.id,
+            user_message_created_at=user_record.created_at,
             user_message_text=user_message,
             prompt_messages=prompt_messages,
             recalled_beliefs=tuple(recalled_beliefs),
@@ -1560,6 +1561,7 @@ class AlphaAgent:
                 "content_digest": _content_digest(user_message),
                 "content_length": len(user_message),
             },
+            timestamp=Instant(user_record.created_at),
         )
 
     def _emit_turn_acted(
@@ -1604,6 +1606,7 @@ class AlphaAgent:
                 "tool_result_trace_ids": list(loop_result.provider_tool_trace_ids),
                 "tool_cognitive_event_ids": list(loop_result.tool_cognitive_event_ids),
             },
+            timestamp=Instant(assistant_record.created_at),
         )
 
     def _emit_turn_failed(

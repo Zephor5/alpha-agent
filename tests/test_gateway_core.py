@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,6 +31,7 @@ def _source(
     user_id: str = "user-1",
     platform_thread_id: str | None = None,
     message_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> ConversationSource:
     return ConversationSource(
         platform="telegram",
@@ -39,7 +41,7 @@ def _source(
         user_name="Ada",
         platform_thread_id=platform_thread_id,
         message_id=message_id,
-        metadata={"tenant": "personal"},
+        metadata=metadata or {"tenant": "personal"},
     )
 
 
@@ -172,6 +174,76 @@ def test_session_mapping_is_persisted_and_reused(tmp_path: Path) -> None:
     assert second.source_context["chat_id"] == "chat-1"
     assert second.source_context["user_id"] == "user-1"
     assert second.source_context["platform_thread_id"] == "thread-9"
+
+
+def test_gateway_session_mapping_creates_session_record_with_explicit_timezone(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    gateway_sessions = GatewaySessionStore(store)
+    source = _source(metadata={"tenant": "personal", "timezone": "Asia/Shanghai"})
+
+    mapping = gateway_sessions.get_or_create(source, SessionMode.GROUP_PER_USER)
+
+    record = store.get_session_record(mapping.session_id)
+    assert record is not None
+    assert record.timezone == "Asia/Shanghai"
+
+
+def test_gateway_session_mapping_uses_local_timezone_fallback_when_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TZ", "Asia/Shanghai")
+    store = _store(tmp_path)
+    gateway_sessions = GatewaySessionStore(store)
+
+    mapping = gateway_sessions.get_or_create(_source(), SessionMode.GROUP_PER_USER)
+
+    record = store.get_session_record(mapping.session_id)
+    assert record is not None
+    assert record.timezone == "Asia/Shanghai"
+
+
+def test_gateway_session_mapping_rejects_invalid_explicit_timezone(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    gateway_sessions = GatewaySessionStore(store)
+    source = _source(metadata={"tenant": "personal", "timezone": "Moon/Base"})
+
+    with pytest.raises(ValueError, match="timezone"):
+        gateway_sessions.get_or_create(source, SessionMode.GROUP_PER_USER)
+
+
+def test_gateway_session_mapping_reuse_ignores_invalid_later_timezone(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    gateway_sessions = GatewaySessionStore(store)
+    first_source = _source(metadata={"tenant": "personal", "timezone": "Asia/Shanghai"})
+    later_source = _source(metadata={"tenant": "personal", "timezone": "Moon/Base"})
+
+    first = gateway_sessions.get_or_create(first_source, SessionMode.GROUP_PER_USER)
+    second = gateway_sessions.get_or_create(later_source, SessionMode.GROUP_PER_USER)
+
+    record = store.get_session_record(first.session_id)
+    assert second.session_id == first.session_id
+    assert record is not None
+    assert record.timezone == "Asia/Shanghai"
+
+
+def test_gateway_session_mapping_reuse_ignores_non_string_later_timezone(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    gateway_sessions = GatewaySessionStore(store)
+    first_source = _source(metadata={"tenant": "personal", "timezone": "Asia/Shanghai"})
+    later_source = _source(metadata={"tenant": "personal", "timezone": ["UTC"]})
+
+    first = gateway_sessions.get_or_create(first_source, SessionMode.GROUP_PER_USER)
+    second = gateway_sessions.get_or_create(later_source, SessionMode.GROUP_PER_USER)
+
+    record = store.get_session_record(first.session_id)
+    assert second.session_id == first.session_id
+    assert record is not None
+    assert record.timezone == "Asia/Shanghai"
 
 
 def test_group_shared_session_mapping_keeps_source_context(tmp_path: Path) -> None:

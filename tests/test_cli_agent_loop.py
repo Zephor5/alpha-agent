@@ -53,6 +53,7 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
             ).fetchall()
         }
         assert tables == {
+            "sessions",
             "session_messages",
             "session_counterparts",
             "session_summary_snapshots",
