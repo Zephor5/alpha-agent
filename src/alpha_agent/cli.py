@@ -47,8 +47,16 @@ from alpha_agent.config import (
     set_config_value,
     write_default_config,
 )
+from alpha_agent.conversation_import.deepseek import (
+    DeepSeekExportConversionError,
+    convert_deepseek_export,
+)
 from alpha_agent.daemon.client import DaemonClient
-from alpha_agent.daemon.conversation_import import MAX_CONVERSATION_IMPORT_PAYLOAD_BYTES
+from alpha_agent.daemon.conversation_import import (
+    MAX_CONVERSATION_IMPORT_PAYLOAD_BYTES,
+    ConversationImportService,
+    ConversationImportValidationFailed,
+)
 from alpha_agent.daemon.manager import build_provider, initialize_store
 from alpha_agent.daemon.runtime import AlphaDaemon, DaemonAlreadyRunningError
 from alpha_agent.daemon.status import (
@@ -93,6 +101,7 @@ config_app = typer.Typer(help="Configuration commands.")
 daemon_app = typer.Typer(help="Daemon runtime commands.")
 cognition_app = typer.Typer(help="Cognition inspection commands.")
 cognition_import_app = typer.Typer(help="External conversation import commands.")
+cognition_import_convert_app = typer.Typer(help="Source export conversion commands.")
 goals_app = typer.Typer(help="Drive Loop goal commands.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(debug_app, name="debug")
@@ -101,6 +110,7 @@ app.add_typer(config_app, name="config")
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(cognition_app, name="cognition")
 cognition_app.add_typer(cognition_import_app, name="import")
+cognition_import_app.add_typer(cognition_import_convert_app, name="convert")
 cognition_app.add_typer(goals_app, name="goals")
 
 DAEMON_START_TIMEOUT_SECONDS = 5.0
@@ -1248,6 +1258,56 @@ def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
     return isinstance(raw_session_id, str) and raw_session_id == session_id
 
 
+@cognition_import_convert_app.command("deepseek")
+def cognition_import_convert_deepseek(
+    source: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Raw DeepSeek conversation export JSON file.",
+        ),
+    ],
+    output: Annotated[
+        Path,
+        typer.Argument(help="Normalized conversation import JSON output file."),
+    ],
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Overwrite an existing output file."),
+    ] = False,
+) -> None:
+    """Convert a raw DeepSeek export into normalized import JSON."""
+
+    if output.exists():
+        if output.is_dir():
+            console.print("Output path is a directory.")
+            raise typer.Exit(1)
+        if not force:
+            console.print("Output file already exists. Use --force to overwrite.")
+            raise typer.Exit(1)
+    output_parent = output.parent
+    if output_parent and not output_parent.exists():
+        console.print("Output directory does not exist.")
+        raise typer.Exit(1)
+    raw_json = _read_deepseek_export_file(source)
+    try:
+        payload = convert_deepseek_export(raw_json)
+    except DeepSeekExportConversionError as exc:
+        console.print(str(exc))
+        _render_error_details({"details": [error.to_dict() for error in exc.errors]})
+        raise typer.Exit(1) from exc
+
+    payload_json = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    _validate_converted_conversation_import_payload(payload_json, input_name=output.name)
+    try:
+        output.write_text(payload_json, encoding="utf-8")
+    except OSError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _render_deepseek_conversion_summary(payload, output_name=output.name)
+
+
 @cognition_import_app.command("conversations")
 def cognition_import_conversations(
     file: Annotated[
@@ -1333,6 +1393,69 @@ def _read_conversation_import_file(file: Path) -> str:
         raise typer.BadParameter("Import file must be UTF-8 encoded JSON.") from exc
     except OSError as exc:
         raise typer.BadParameter(str(exc)) from exc
+
+
+def _read_deepseek_export_file(file: Path) -> str:
+    try:
+        return file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise typer.BadParameter("DeepSeek export file must be UTF-8 encoded JSON.") from exc
+    except OSError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _validate_converted_conversation_import_payload(
+    payload_json: str,
+    *,
+    input_name: str,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="alpha-import-convert-") as tmp_dir:
+        store = StateStore(Path(tmp_dir) / "alpha.db")
+        store.initialize()
+        try:
+            ConversationImportService(store).import_payload(
+                payload_json,
+                input_name=input_name,
+                dry_run=True,
+            )
+        except ConversationImportValidationFailed as exc:
+            console.print("Converted payload failed normalized import validation.")
+            _render_error_details({"details": [error.to_dict() for error in exc.errors]})
+            raise typer.Exit(1) from exc
+
+
+def _render_deepseek_conversion_summary(
+    payload: dict[str, Any],
+    *,
+    output_name: str,
+) -> None:
+    conversations = payload.get("conversations")
+    conversation_count = len(conversations) if isinstance(conversations, list) else 0
+    message_count = 0
+    if isinstance(conversations, list):
+        for conversation in conversations:
+            if isinstance(conversation, dict) and isinstance(conversation.get("messages"), list):
+                message_count += len(conversation["messages"])
+
+    rows = {
+        "source_provider": str(payload.get("source_provider") or ""),
+        "conversations": str(conversation_count),
+        "messages": str(message_count),
+        "output": output_name,
+    }
+    table = Table(title="DeepSeek Conversion")
+    table.add_column("Field")
+    table.add_column("Value")
+    for key, value in rows.items():
+        table.add_row(key, value)
+    console.print(table)
+    typer.echo(
+        "conversion "
+        f"source_provider={rows['source_provider']} "
+        f"conversations={rows['conversations']} "
+        f"messages={rows['messages']} "
+        f"output={rows['output']}"
+    )
 
 
 def _render_conversation_import_summary(summary: dict[str, Any]) -> None:
