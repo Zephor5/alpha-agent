@@ -167,6 +167,19 @@ def test_adjusts_timestamps_by_tree_order_when_deepseek_times_move_backwards(tmp
             "branched mappings are not supported",
         ),
         (
+            lambda source: source[0]["mapping"]["root"].update(
+                {
+                    "message": {
+                        "files": [],
+                        "model": "deepseek-chat",
+                        "inserted_at": "2026-01-01T10:00:00.000000+08:00",
+                        "fragments": [{"type": "REQUEST", "content": "root content"}],
+                    }
+                }
+            ),
+            "root message must be null",
+        ),
+        (
             lambda source: source[0]["mapping"]["1"]["message"]["fragments"].append(
                 {"type": "AUDIO", "content": "voice"}
             ),

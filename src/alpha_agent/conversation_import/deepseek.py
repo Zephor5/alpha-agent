@@ -295,6 +295,15 @@ def _linear_message_node_ids(
             )
             return node_ids
         _validate_node_id(raw_node, current_id, f"{path}.{current_id}", errors)
+        if current_id == "root" and raw_node.get("message") is not None:
+            errors.append(
+                DeepSeekConversionErrorDetail(
+                    f"{path}.root.message",
+                    "DeepSeek root message must be null",
+                    code="invalid_root_message",
+                )
+            )
+            return node_ids
 
         children = _node_children(raw_node, f"{path}.{current_id}.children", errors)
         if children is None:
