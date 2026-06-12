@@ -91,14 +91,30 @@ Imported messages always have original message timestamps.
 
 Rules:
 
-- Use external message `created_at` as the persisted session message time.
+- Message `created_at` is required and must include an explicit timezone offset
+  or `Z`. Naive timestamps are invalid.
+- Timestamp comparisons use parsed UTC instants, not raw strings.
+- Message `created_at` must be strictly increasing within each external
+  conversation across all imported roles: `system`, `user`, `assistant`, and
+  `tool`.
+- Use external message `created_at` as the persisted session message time. It
+  may be normalized to UTC for storage, but it must represent the same instant.
 - Do not replace original message time with import time.
 - Store import time separately in import batch/message records.
-- Target cognition behavior should have access to source message time, not just
-  processing time, when extracting and consolidating memories. The exact
-  project-wide representation of message-time evidence remains an open design
-  detail because current background cognition also loses accurate per-message
-  time information.
+- Conversation-level `created_at` and `updated_at` are metadata/status fields.
+  They do not participate in cognition source-time decisions.
+- Import does not generate Alpha runtime `session_time` reminders. Imported
+  `system` messages are external source messages, not Alpha runtime reminders.
+- Cognition uses source message time as approximate evidence time when
+  extracting, consolidating, and summarizing memories. `held_since` and
+  `observed_at` remain Alpha processing/holding time and must not be treated as
+  evidence time.
+- The first version uses a single approximate `source_time` for each extraction
+  source window, not a per-draft or per-message time range. The approximate
+  `source_time` is the latest `created_at` among the source messages selected
+  for that window.
+- `source_time` is for cognition prompting and recency decisions, not for
+  audit-grade proof that a belief came from one exact message or second.
 - More recent user expressions can supersede older ones, especially for volatile
   preferences, active projects, tools, and short-term plans.
 - Stable long-term values, quality standards, working style, and repeated
@@ -132,6 +148,7 @@ converted into this format before import.
 ```json
 {
   "source_provider": "chatgpt",
+  "timezone": "Asia/Shanghai",
   "conversations": [
     {
       "external_conversation_id": "conv_001",
@@ -169,7 +186,7 @@ Message:
 
 - `external_message_id`: required non-empty string.
 - `role`: required; one of `system`, `user`, `assistant`, `tool`.
-- `created_at`: required valid timestamp.
+- `created_at`: required timezone-aware timestamp.
 - `content`: required non-empty string except for assistant messages with
   non-empty `tool_calls`.
 
@@ -184,19 +201,25 @@ Assistant message with tool calls:
 - `content` may be empty or omitted when `tool_calls` is non-empty.
 - Each tool call must include an `id` that can be matched by later `tool`
   messages in the same conversation.
+- The matched `tool` message must appear later in file order and therefore have
+  a strictly later `created_at`.
 
 ### Optional Fields
 
 Top level:
 
 - `metadata`: optional JSON object.
+- `timezone`: optional IANA timezone or fixed UTC offset. When absent, each
+  hidden import session uses the offset from that conversation's first message
+  `created_at`; `Z` is treated as `+00:00`.
 
 Conversation:
 
 - `title`: optional string.
-- `created_at`: optional timestamp.
-- `updated_at`: optional timestamp.
+- `created_at`: optional timezone-aware timestamp.
+- `updated_at`: optional timezone-aware timestamp.
 - `metadata`: optional JSON object.
+- Per-conversation `timezone` is not supported in the first version.
 
 Message:
 
@@ -208,6 +231,9 @@ First version rejects:
 
 - Missing or empty message content, except assistant tool-call messages.
 - Roles outside `system`, `user`, `assistant`, `tool`.
+- Naive timestamps without timezone/offset.
+- Message timestamps that are not strictly increasing by UTC instant within one
+  conversation.
 - `reasoning_content`.
 - Attachments or multimodal fields.
 - `tool_call_id` on non-tool messages.
@@ -265,12 +291,23 @@ source_provider + external_conversation_id + external_message_id
 Rules:
 
 - If the tuple already exists, skip it as deduped.
-- Do not compare existing content for conflicts in first version.
+- Dedup is based only on external message identity. Do not compare existing
+  content, timestamps, tool fields, or metadata for conflicts in first version.
+- Deduped messages do not update existing `session_messages` or
+  `imported_messages`.
 - Do not overwrite existing messages.
 - If the same conversation contains new message ids, append them to the same
   hidden import session.
 - Message append order follows file order.
-- Do not sort by timestamp.
+- Do not sort by timestamp. The normalized payload must already be in intended
+  transcript order.
+- For a new conversation, all messages must be strictly increasing by
+  `created_at` UTC instant in file order.
+- For an existing conversation, plan dedup first. Deduped old messages are
+  ignored for append-time validation. The first newly inserted message must be
+  strictly later than the latest already imported message in that conversation,
+  and all newly inserted messages must then be strictly increasing in file
+  order.
 - Do not support middle insertion or ordinal rewrites in first version.
 
 ### Batch Identity
@@ -363,6 +400,11 @@ recorded on the import batch summary. If verbose status needs per-conversation
 dedup details for a past batch, store those attempt-level counts in
 `import_batches.metadata` or an equivalent batch-result structure.
 
+External message timestamps may be normalized to UTC in `session_messages` and
+`imported_messages`, as long as the persisted value represents the same instant.
+If the original timestamp literal is useful for troubleshooting, keep it in
+metadata; do not use it for sorting or cognition decisions.
+
 ### Session Message Changes
 
 Persistent session messages need to support external system messages.
@@ -376,6 +418,8 @@ Target changes:
 - Existing Alpha runtime system prompt remains dynamically generated and is not
   written to `session_messages`.
 - Ordinary Alpha chat should not start persisting system prompts.
+- Import should not synthesize `system_reminder` messages, including
+  `session_time` reminders.
 
 ### Hidden Import Sessions
 
@@ -391,6 +435,18 @@ Rules:
 - Do not infer import sessions from individual message metadata.
 - If a session is both a gateway session and an import session, treat it as a
   data error and reject ordinary chat use.
+- New hidden import session metadata should use external history time:
+  `sessions.created_at` is the first imported message time and
+  `sessions.updated_at` is the latest imported message time.
+- When appending new messages to an existing imported conversation,
+  `sessions.created_at` remains unchanged and `sessions.updated_at` advances to
+  the newest inserted message time.
+- Hidden import session `timezone` is the optional top-level `timezone` when
+  provided. Otherwise, derive a fixed offset from the conversation's first
+  message timestamp; `Z` becomes `+00:00`.
+- Do not validate message timestamp offsets against the chosen session
+  timezone. Message offsets define instants; session timezone only controls
+  prompt/display rendering.
 
 ### Main User Binding
 
@@ -419,7 +475,9 @@ Responsibilities:
 
 - Parse JSON.
 - Validate normalized import contract.
+- Validate timezone-aware message timestamps and strict conversation ordering.
 - Plan writes and dedup counts.
+- Reject unsupported historical middle insertion during write planning.
 - Execute dry-run without writing.
 - Execute real import in transactional writes.
 - Create or reuse hidden import sessions.
@@ -489,7 +547,7 @@ Validation errors should include paths:
   "details": [
     {
       "path": "conversations[3].messages[12].created_at",
-      "message": "created_at must be a valid timestamp"
+      "message": "created_at must include a timezone and be strictly later than the previous inserted message"
     }
   ]
 }
@@ -531,6 +589,7 @@ Rules:
 - Do not create import-specific cognitive event kinds.
 - Do not write runtime traces for import.
 - Do not generate `compressed_message` rows during import.
+- Do not generate `system_reminder` rows during import.
 - Do not add a first-version `--process-now` path.
 - Let daemon/background cognition process imported messages after import.
 
@@ -549,9 +608,14 @@ Target behavior:
 - Ordinary sessions keep existing extraction prefix behavior.
 - Import sessions do not prepend Alpha runtime system prompt.
 - Import sessions do not introduce local summary or compressed context.
-- Import sessions replay imported source messages only, then an import-aware
-  extraction instruction.
-- Imported `role=system` messages remain part of the imported message sequence.
+- Import sessions replay imported source messages only, in persisted file order,
+  then append an import-aware extraction instruction.
+- Imported `role=system` messages remain part of the imported message sequence
+  and are replayed as real LLM `system` messages. They are historical external
+  transcript messages, not Alpha runtime prompts.
+- If an LLM provider cannot replay a supported imported message shape, extraction
+  should fail for that source window rather than rewriting the stored import
+  transcript.
 - Import-aware extraction does not allow `SESSION` scope and does not include
   the import session as an allowed `about` reference.
 - Import-aware extraction must not treat assistant output as user
@@ -559,6 +623,28 @@ Target behavior:
   the assistant output evidence.
 - The general background extraction contract remains unchanged for ordinary
   sessions.
+
+### Cognition Source Time
+
+Imported messages preserve exact source instants in persistent message records,
+but cognition uses a simpler approximate source time.
+
+Rules:
+
+- Extraction source windows expose a single approximate `source_time`, not a
+  time range and not per-draft supporting message ids.
+- Approximate `source_time` is the latest `created_at` UTC instant among the
+  source messages selected for that extraction window.
+- Imported `system`, `user`, `assistant`, and `tool` source messages all
+  participate in approximate `source_time`.
+- Alpha-generated `system_reminder` and `compressed_message` records do not
+  participate in approximate `source_time`.
+- Prompt rendering may show `source_time` in the hidden session timezone and may
+  round display to minute precision.
+- Consolidation and summary prompts should prefer `source_time` over
+  `held_since` when reasoning about recency.
+- `source_time` is not an audit field. Exact message timestamps remain available
+  through the stored source messages and import mapping records.
 
 ### Processing Priority
 
@@ -570,12 +656,19 @@ Desired scheduling behavior:
 - Ordinary recent inactive sessions come before bulk imported history.
 - Imported sessions are lower priority and can be rate-limited later.
 - Among imported sessions, extraction selects conversations in ascending
-  original-time order (oldest first), so consolidation supersede chains
-  terminate at the user's most recent expression instead of an older
-  conversation arriving late and "contradicting" newer state.
+  earliest pending source message time order (oldest first), so consolidation
+  supersede chains terminate at the user's most recent expression instead of an
+  older conversation arriving late and "contradicting" newer state.
 
 First version can use the existing worker flow with import-session detection,
 but must not let imported history break ordinary chat responsiveness.
+It does not need an import-specific bypass around ordinary inactive-session
+eligibility; historical imports are expected to satisfy existing inactivity
+rules in normal use.
+
+For imported sessions, "oldest first" means sorting by the earliest pending
+extractable source message `created_at` UTC instant, with a stable id tie-breaker.
+Conversation-level timestamps are not used for this ordering.
 
 ### Status Semantics
 
@@ -587,7 +680,12 @@ First version status scope:
 - Number of conversations/messages seen.
 - Number of conversations/messages newly created.
 - Number of messages deduped/skipped.
-- Extraction progress over imported `session_message` sources.
+- Extraction progress over imported `session_message` sources. Default status
+  counts messages; verbose status may aggregate those message counts by
+  conversation.
+- Imported `system`, `user`, `assistant`, and `tool` source messages all count
+  toward extraction progress. Deduped messages do not, because they create no
+  new `session_messages`.
 
 Do not include consolidation/profile-summary completion in first-version status.
 That would make status semantics harder to explain and verify.
@@ -656,16 +754,24 @@ Validation categories:
 - Malformed JSON.
 - Invalid top-level object.
 - Missing provider.
+- Invalid top-level timezone.
 - Empty conversations.
 - Missing or duplicate conversation ids.
 - Missing or duplicate message ids inside a conversation.
 - Invalid role.
-- Invalid timestamp.
+- Invalid timestamp, including any explicit timestamp without timezone/offset.
+- Message timestamps that are not strictly increasing by UTC instant in a new
+  conversation.
+- New messages for an existing conversation that are not strictly later than
+  the latest already imported message after dedup planning.
 - Empty content where content is required.
 - Invalid tool call shape.
 - Tool message without a matching assistant tool call.
 - Unsupported reasoning or attachment fields.
 - Metadata present but not an object.
+
+All validation and write-plan errors are whole-batch failures. First version
+does not partially import valid conversations from an invalid batch.
 
 ## Security And Data Boundary Notes
 
@@ -697,6 +803,8 @@ Tasks:
 - [ ] Add import tables to the target schema.
 - [ ] Add store methods to create/reuse imported conversations and map imported
       messages to session messages.
+- [ ] Store hidden import session timezone and external-history session
+      created/updated times.
 - [ ] Add store methods to detect import sessions by session id.
 - [ ] Add store status queries for import batches and imported session messages.
 - [ ] Ensure imported message content is stored once in `session_messages`.
@@ -708,6 +816,8 @@ Acceptance criteria:
 - [ ] Imported conversation mappings can identify hidden import sessions.
 - [ ] Duplicate external message ids can be skipped without duplicate
       `session_messages`.
+- [ ] Hidden import sessions can preserve external-history created/updated times
+      and derived fixed-offset timezones.
 - [ ] Store tests cover create, reuse, dedup, and import-session detection.
 
 Verification:
@@ -727,11 +837,17 @@ Tasks:
       defensive service-side size rejection only if it fits the existing IPC
       boundary cleanly.
 - [ ] Validate required fields and rejected fields.
+- [ ] Validate optional top-level timezone.
+- [ ] Validate message timestamps are timezone-aware.
+- [ ] Validate per-conversation message timestamps are strictly increasing by
+      UTC instant.
 - [ ] Validate role-specific rules for `system`, `user`, `assistant`, `tool`.
 - [ ] Validate assistant tool calls and tool result matching.
 - [ ] Produce path-aware validation errors.
 - [ ] Produce dry-run plan counts without writes.
 - [ ] Produce real import write plans with conversation reuse and message dedup.
+- [ ] For existing conversations, dedup first and reject planned inserts that
+      would require historical middle insertion or non-increasing append time.
 
 Acceptance criteria:
 
@@ -739,6 +855,8 @@ Acceptance criteria:
 - [ ] Dry-run returns counts and does not write batches or messages.
 - [ ] A valid payload produces a deterministic plan for inserted and deduped
       messages.
+- [ ] Invalid timestamp ordering fails the whole batch in dry-run and real
+      planning.
 
 Verification:
 
@@ -760,10 +878,13 @@ Tasks:
 - [ ] Append new messages to hidden sessions in file order.
 - [ ] Set `session_messages.created_at` from external message `created_at`.
 - [ ] Keep `session_messages.updated_at` null for new imports.
+- [ ] Set hidden import session `created_at`, `updated_at`, and `timezone`
+      from the import time model.
 - [ ] Persist message mapping records for inserted messages.
 - [ ] Count deduped messages.
 - [ ] Persist aggregate batch status.
-- [ ] Avoid writing cognitive events, runtime traces, or compressed messages.
+- [ ] Avoid writing cognitive events, runtime traces, compressed messages, or
+      session time reminders.
 
 Acceptance criteria:
 
@@ -773,6 +894,8 @@ Acceptance criteria:
       duplicate session messages.
 - [ ] Re-importing an existing conversation with new messages appends only new
       messages.
+- [ ] Re-importing an existing conversation rejects new messages that are not
+      strictly later than the already imported conversation history.
 - [ ] Imported sessions are detectable as hidden import sessions.
 
 Verification:
@@ -878,6 +1001,7 @@ Tasks:
 - [ ] For import sessions, build prompt prefix from imported source messages
       only.
 - [ ] Preserve imported `system` messages in the source sequence.
+- [ ] Replay imported `system` messages as historical LLM `system` messages.
 - [ ] Do not prepend Alpha runtime system prompt for import sessions.
 - [ ] Do not include local summary snapshots or compressed handover context for
       import sessions.
@@ -886,8 +1010,10 @@ Tasks:
 - [ ] Instruct extraction that assistant output is evidence about the user only
       when adopted, corrected, or otherwise made evidence by user messages.
 - [ ] Keep ordinary session extraction prefix and instruction unchanged.
-- [ ] Select imported-session extraction candidates in ascending original
-      conversation time order (oldest first).
+- [ ] Select imported-session extraction candidates in ascending earliest
+      pending source message time order (oldest first).
+- [ ] Attach approximate `source_time` from the latest selected source message
+      time to extraction metadata and prompts.
 
 Acceptance criteria:
 
@@ -896,10 +1022,12 @@ Acceptance criteria:
 - [ ] Import session extraction cannot emit `SESSION` scope memory.
 - [ ] Import session extraction does not convert standalone assistant output
       into user self-description.
-- [ ] Imported sessions are extracted oldest-first by original conversation
-      time.
+- [ ] Imported sessions are extracted oldest-first by earliest pending source
+      message time.
 - [ ] Imported `system/user/assistant/tool` messages are converted into LLM
       source messages as intended.
+- [ ] Import extraction source time is approximate, single-valued, and derived
+      from selected source message timestamps.
 - [ ] Import extraction source refs still use existing background ledger source
       tracking.
 
@@ -992,19 +1120,22 @@ Rationale:
 | Duplicate imports create duplicate memories | High | External message id is required; dedup before writing session messages. |
 | Existing local DB has old CHECK constraints | Medium | No compatibility migration; document local state rebuild requirement. |
 | Tool messages cannot replay because of missing tool calls | Medium | Require tool_call_id and assistant tool_calls with matching ids. |
-| Out-of-order extraction lets older expressions supersede newer ones | Medium | Extract imported sessions oldest-first by original time so supersede chains end at the most recent expression. |
+| Naive or non-increasing timestamps corrupt transcript order | High | Require timezone-aware message timestamps and strict UTC-instant increase within each conversation. |
+| Historical middle insertion corrupts imported session replay | High | Dedup first on re-import, then reject new messages that are not strictly later than existing imported history. |
+| Out-of-order extraction lets older expressions supersede newer ones | Medium | Extract imported sessions oldest-first by earliest pending source message time so supersede chains end at the most recent expression. |
 | First version status overpromises cognition completion | Medium | Track only import completion and extraction source progress. |
 
-## Open Decisions
+## Settled First-Version Time Decisions
 
-### Source-Time Propagation Through Cognition
-
-Imported messages persist original `created_at`, but current background
-cognition primarily uses processing time when materializing extracted beliefs.
-Before relying on time-based supersession quality, decide how source message
-time should be represented in extraction prompts, validation context, belief
-validity, and consolidation inputs. This likely affects ordinary sessions too,
-not only external imports.
+- Source message time is available to cognition as a single approximate
+  `source_time`.
+- Approximate `source_time` is derived from selected source message
+  `created_at`, not import processing time.
+- `held_since` and `observed_at` remain Alpha processing/holding time.
+- Exact message timestamps remain in persistent source records and import
+  mapping records.
+- Per-draft supporting message ids and source-time ranges are not required in
+  the first version.
 
 Low-level details not explicitly specified in this plan should follow existing
 project patterns and the architectural decisions above.
@@ -1015,8 +1146,15 @@ project patterns and the architectural decisions above.
 - [ ] Dry-run validates and reports planned counts without writes.
 - [ ] Re-import creates a new batch and dedups existing messages.
 - [ ] Imported messages persist with original timestamps.
+- [ ] Imported message timestamps are timezone-aware and strictly increasing
+      within each conversation by UTC instant.
+- [ ] Existing conversation re-import rejects planned inserts that are not
+      strictly later than existing imported history.
+- [ ] Hidden import session timezone is top-level `timezone` when provided, or
+      the fixed offset from the first message timestamp otherwise.
 - [ ] Imported `system` messages are persistable.
 - [ ] Existing Alpha runtime system prompt remains non-persistent.
+- [ ] Import does not generate session time reminders.
 - [ ] Imported conversations map to hidden internal sessions.
 - [ ] Hidden import sessions are invisible and not continuable in normal chat.
 - [ ] Imported sessions bind to main user counterpart.
@@ -1026,6 +1164,10 @@ project patterns and the architectural decisions above.
 - [ ] Import status reports aggregate import counts.
 - [ ] Import status reports extraction progress for imported session messages.
 - [ ] Import extraction does not prepend Alpha runtime system prompt.
+- [ ] Import extraction replays imported `system` messages as historical LLM
+      `system` messages.
+- [ ] Import extraction exposes approximate source time derived from selected
+      source messages.
 - [ ] Import extraction does not produce `SESSION` scope memories.
 - [ ] Import extraction does not treat standalone assistant output as user
       self-description.
