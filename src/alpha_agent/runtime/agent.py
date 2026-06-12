@@ -1768,7 +1768,11 @@ def _content_digest(value: str) -> str:
 
 
 def _local_minute_timestamp(value: datetime) -> tuple[str, str]:
-    local_value = value.astimezone().replace(second=0, microsecond=0)
+    local_value = (
+        value
+        if value.tzinfo is not None and value.utcoffset() is not None
+        else value.astimezone()
+    ).replace(second=0, microsecond=0)
     return local_value.isoformat(timespec="minutes"), local_value.date().isoformat()
 
 
