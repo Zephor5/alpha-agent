@@ -6,6 +6,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+from alpha_agent import cli as cli_module
 from alpha_agent.cli import app
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.llm.base import (
@@ -22,6 +23,7 @@ from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_TOOL_NAME
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
+from alpha_agent.utils.system_reminder import SYSTEM_REMINDER_OPEN
 from tests.cognition.test_belief_projection_apply import belief
 
 
@@ -116,18 +118,15 @@ def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path
     assert "continue" in result.output
 
 
-def test_debug_prompt_renders_session_profile_snapshot(
+def test_debug_prompt_filters_session_profile_reminder_by_default(
     tmp_path: Path,
 ) -> None:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
-    store.create_session_summary_snapshot(
+    store.append_session_reminder(
         session_id="s1",
-        summary_kind="counterpart_profile",
-        target_kind="counterpart",
-        target_id="counterpart:main-user",
-        source_belief_id="belief:digest:v1",
-        content="Stable debug profile.",
+        raw_content="Counterpart profile: Stable debug profile.",
+        reminder_type="counterpart_profile",
     )
     store.append_session_message(
         session_id="s1",
@@ -145,21 +144,64 @@ def test_debug_prompt_renders_session_profile_snapshot(
 
     assert result.exit_code == 0
     assert "Message 1 [system]" in result.output
-    assert "Counterpart profile: Stable debug profile." in result.output
+    assert "Counterpart profile: Stable debug profile." not in result.output
     assert "hello" in result.output
+
+
+def test_debug_prompt_can_include_raw_reminders_explicitly(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.append_session_reminder(
+        session_id="s1",
+        raw_content="Counterpart profile: Stable debug profile.",
+        reminder_type="counterpart_profile",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["debug", "prompt", "continue", "--session", "s1", "--include-reminders"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert SYSTEM_REMINDER_OPEN in result.output
+    assert "Counterpart profile: Stable debug profile." in result.output
+
+
+def test_normal_chat_history_display_filters_raw_reminders(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    reminder = store.append_session_reminder(
+        session_id="s1",
+        raw_content="Counterpart profile: Stable display profile.",
+        reminder_type="counterpart_profile",
+    )
+    user_message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+    )
+    assistant_message = store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="hi",
+    )
+
+    display_messages = cli_module._displayable_session_messages(store, "s1")
+
+    assert display_messages == [user_message, assistant_message]
+    assert reminder in store.list_session_messages("s1")
+    assert reminder.kind == "system_reminder"
+    assert SYSTEM_REMINDER_OPEN in reminder.raw_content
+    assert "Counterpart profile: Stable display profile." in reminder.raw_content
 
 
 def test_debug_prompt_matches_shared_answer_prompt_builder(tmp_path: Path) -> None:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
-    store.create_session_summary_snapshot(
-        session_id="s1",
-        summary_kind="counterpart_profile",
-        target_kind="counterpart",
-        target_id="counterpart:main-user",
-        source_belief_id="belief:digest:v1",
-        content="Stable shared profile.",
-    )
     store.append_session_message(
         session_id="s1",
         kind="user_message",
@@ -173,7 +215,6 @@ def test_debug_prompt_matches_shared_answer_prompt_builder(tmp_path: Path) -> No
         raw_content="hi",
     )
     expected_messages = build_answer_prompt_messages(
-        summary_snapshots=store.list_session_summary_snapshots("s1"),
         session_history=SessionContextAssembler(store).load("s1").chat_messages,
         current_turn_messages=[{"role": "user", "content": "continue"}],
     )

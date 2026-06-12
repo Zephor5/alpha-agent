@@ -23,6 +23,7 @@ from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.llm.mock import MockLLMProvider
 from alpha_agent.runtime.agent import AlphaAgent
 from alpha_agent.state.store import StateStore
+from alpha_agent.utils.system_reminder import inline_system_reminder
 from tests.cognition.helpers import clock_factory, id_factory
 
 
@@ -58,8 +59,8 @@ def test_drive_loop_triggers_runtime_self_signal_turn_and_updates_goal_progress(
         "user_message",
         "assistant_message",
     ]
-    assert messages[0].raw_content == (
-        "<system-reminder>started at: 2026-01-01T08:00+08:00</system-reminder>"
+    assert messages[0].raw_content == inline_system_reminder(
+        "started at: 2026-01-01T08:00+08:00"
     )
     assert messages[1].raw_content.startswith("[self_signal]")
     assert "goal_id: goal:pending" in messages[1].raw_content

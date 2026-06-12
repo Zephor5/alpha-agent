@@ -2,7 +2,7 @@
 
 ## Status
 
-Planned.
+Implemented.
 
 ## Date
 
@@ -209,27 +209,27 @@ expected model contract with representative prompts.
 
 ## Acceptance Checklist
 
-- [ ] Self-memory summary context can appear as durable `system_reminder`
+- [x] Self-memory summary context can appear as durable `system_reminder`
       session messages.
-- [ ] Counterpart profile context can appear as durable `system_reminder`
+- [x] Counterpart profile context can appear as durable `system_reminder`
       session messages.
-- [ ] Session summary snapshots remain the stable selection ledger.
-- [ ] Summary/profile reminders are inserted at session start only.
-- [ ] Answer prompts do not duplicate the same summary/profile context through
+- [x] Session summary snapshots remain the stable selection ledger.
+- [x] Summary/profile reminders are inserted at session start only.
+- [x] Answer prompts do not duplicate the same summary/profile context through
       both snapshot injection and source-message replay.
-- [ ] Time reminder lookup ignores non-time `system_reminder` messages.
-- [ ] Stable-context reminder lookup ignores `session_time` reminders.
-- [ ] CLI, history, and debug display paths filter out reminder messages
+- [x] Time reminder lookup ignores non-time `system_reminder` messages.
+- [x] Stable-context reminder lookup ignores `session_time` reminders.
+- [x] CLI, history, and debug display paths filter out reminder messages
       directly.
-- [ ] Explicit low-level debug or source-inspection paths can still show raw
+- [x] Explicit low-level debug or source-inspection paths can still show raw
       reminder messages.
-- [ ] Inactive backlog extraction and direct compact extraction use consistent
+- [x] Inactive backlog extraction and direct compact extraction use consistent
       `system_reminder` semantics.
-- [ ] Extraction prompt text uses `<system-reminder>` and says reminder messages
+- [x] Extraction prompt text uses `<system-reminder>` and says reminder messages
       are context, not new evidence.
-- [ ] Reminder-only extraction windows produce no new memory candidates.
-- [ ] Extracted memories are not sourced only to `system_reminder` messages.
-- [ ] Compression does not reinsert summary/profile reminders after the
+- [x] Reminder-only extraction windows produce no new memory candidates.
+- [x] Extracted memories are not sourced only to `system_reminder` messages.
+- [x] Compression does not reinsert summary/profile reminders after the
       boundary.
 
 ## Non-Goals

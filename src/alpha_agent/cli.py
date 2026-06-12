@@ -74,7 +74,7 @@ from alpha_agent.llm.deepseek import DEEPSEEK_DEFAULT_MODEL
 from alpha_agent.llm.mimo import MIMO_DEFAULT_MODEL
 from alpha_agent.llm.openai_compatible import OPENAI_COMPATIBLE_DEFAULT_MODEL
 from alpha_agent.runtime.agent import AlphaAgent
-from alpha_agent.runtime.chat_messages import strip_system_reminder
+from alpha_agent.runtime.chat_messages import session_message_to_chat, strip_system_reminder
 from alpha_agent.runtime.prompt_builder import build_answer_prompt_messages
 from alpha_agent.runtime.session import new_session_id
 from alpha_agent.runtime.session_context import SessionContextAssembler
@@ -998,6 +998,13 @@ def prompt(
         bool,
         typer.Option("--trace", help="Include recent cognitive event trace for the session."),
     ] = False,
+    include_reminders: Annotated[
+        bool,
+        typer.Option(
+            "--include-reminders",
+            help="Include raw durable system reminder source messages in the prompt preview.",
+        ),
+    ] = False,
 ) -> None:
     """Print the runtime prompt preview and optional cognitive event trace."""
 
@@ -1005,9 +1012,17 @@ def prompt(
     store = _store(config)
     session_id = session or new_session_id()
     context = SessionContextAssembler(store).load(session_id)
+    session_history = (
+        context.chat_messages
+        if include_reminders
+        else [
+            session_message_to_chat(message)
+            for message in context.source_messages
+            if message.kind != "system_reminder"
+        ]
+    )
     messages = build_answer_prompt_messages(
-        summary_snapshots=store.list_session_summary_snapshots(session_id),
-        session_history=context.chat_messages,
+        session_history=session_history,
         current_turn_messages=[{"role": "user", "content": message}],
     )
     for index, prompt_message in enumerate(messages, start=1):

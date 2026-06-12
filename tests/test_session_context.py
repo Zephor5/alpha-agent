@@ -9,7 +9,7 @@ from alpha_agent.cognition.processing_ledger import (
 )
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import LLMContextConfig
-from alpha_agent.runtime.chat_messages import wrap_system_reminder
+from alpha_agent.runtime.chat_messages import TOOL_TRUNCATION_MARKER, wrap_system_reminder
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.state.store import StateStore
 
@@ -311,7 +311,7 @@ def test_truncate_tool_context_if_needed_truncates_unchecked_tool_replay_payload
     long_input = "A" * 12
     long_raw_output = "B" * 14
     long_model_output = "C" * 16
-    marker = "<system-reminder>truncated</system-reminder>"
+    marker = TOOL_TRUNCATION_MARKER
     tool_calls = [
         {
             "id": "call_1",
@@ -460,7 +460,7 @@ def test_truncate_tool_context_if_needed_skips_messages_before_latest_compressed
     assert old_tool_after.metadata == {}
     assert new_assistant_after.id == new_assistant.id
     assert json.loads(new_assistant_after.tool_calls[0]["function"]["arguments"]) == {
-        "body": "CCCCC<system-reminder>truncated</system-reminder>"
+        "body": "CCCCC" + TOOL_TRUNCATION_MARKER
     }
     assert new_assistant_after.metadata["truncate_checked"] is True
 
@@ -510,10 +510,10 @@ def test_truncate_tool_context_if_needed_truncates_plain_text_tool_outputs(
     assert result.truncated_message_ids == [assistant.id, plain_tool.id]
     assert assistant_after.id == assistant.id
     assert json.loads(assistant_after.tool_calls[0]["function"]["arguments"]) == {
-        "body": "AAAAA<system-reminder>truncated</system-reminder>"
+        "body": "AAAAA" + TOOL_TRUNCATION_MARKER
     }
     assert plain_tool_after.id == plain_tool.id
-    assert plain_tool_after.raw_content == "plain<system-reminder>truncated</system-reminder>"
+    assert plain_tool_after.raw_content == "plain" + TOOL_TRUNCATION_MARKER
     assert plain_tool_after.metadata["tool_output_kind"] == "text"
     assert plain_tool_after.metadata["truncate_checked"] is True
     assert plain_tool_after.metadata["original_lengths"] == {"raw_content": 22}

@@ -18,12 +18,26 @@ from alpha_agent.state.models import (
     SessionSummarySnapshot,
 )
 from alpha_agent.utils.ids import new_id
+from alpha_agent.utils.system_reminder import SYSTEM_REMINDER_CLOSE, SYSTEM_REMINDER_OPEN
 from alpha_agent.utils.time import utc_now_iso
 
 T = TypeVar("T")
 
-SYSTEM_REMINDER_OPEN = "<system-reminder>"
-SYSTEM_REMINDER_CLOSE = "</system-reminder>"
+REMINDER_TYPE_SESSION_TIME = "session_time"
+REMINDER_TYPE_SELF_MEMORY_SUMMARY = "self_memory_summary"
+REMINDER_TYPE_COUNTERPART_PROFILE = "counterpart_profile"
+STABLE_CONTEXT_REMINDER_TYPES = frozenset(
+    {
+        REMINDER_TYPE_SELF_MEMORY_SUMMARY,
+        REMINDER_TYPE_COUNTERPART_PROFILE,
+    }
+)
+KNOWN_REMINDER_TYPES = frozenset(
+    {
+        REMINDER_TYPE_SESSION_TIME,
+        *STABLE_CONTEXT_REMINDER_TYPES,
+    }
+)
 
 
 def _dumps(value: Any) -> str:
@@ -51,6 +65,12 @@ def _system_reminder(content: str) -> str:
     if stripped.startswith(SYSTEM_REMINDER_OPEN) and stripped.endswith(SYSTEM_REMINDER_CLOSE):
         return stripped
     return f"{SYSTEM_REMINDER_OPEN}\n{stripped}\n{SYSTEM_REMINDER_CLOSE}"
+
+
+def _validate_reminder_type(reminder_type: str) -> None:
+    if reminder_type not in KNOWN_REMINDER_TYPES:
+        allowed = ", ".join(sorted(KNOWN_REMINDER_TYPES))
+        raise ValueError(f"unsupported reminder_type {reminder_type!r}; allowed: {allowed}")
 
 
 class StateStore:
@@ -208,18 +228,43 @@ class StateStore:
     ) -> SessionMessage:
         """Append a local-time system reminder to the session source stream."""
 
-        return self.append_session_message(
+        return self.append_session_reminder(
             session_id=session_id,
-            kind="system_reminder",
-            llm_role="user",
             raw_content=raw_content,
+            reminder_type=REMINDER_TYPE_SESSION_TIME,
             created_at=created_at,
             metadata={
-                "reminder_type": "session_time",
                 "time_reminder_kind": reminder_kind,
                 "local_date": local_date,
                 "local_datetime": local_datetime,
             },
+            conn=conn,
+        )
+
+    def append_session_reminder(
+        self,
+        *,
+        session_id: str,
+        raw_content: str,
+        reminder_type: str,
+        metadata: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionMessage:
+        """Append a typed system reminder to the durable session source stream."""
+
+        _validate_reminder_type(reminder_type)
+        reminder_metadata = {
+            **dict(metadata or {}),
+            "reminder_type": reminder_type,
+        }
+        return self.append_session_message(
+            session_id=session_id,
+            kind="system_reminder",
+            llm_role="user",
+            raw_content=_system_reminder(raw_content),
+            created_at=created_at,
+            metadata=reminder_metadata,
             conn=conn,
         )
 
@@ -326,18 +371,62 @@ class StateStore:
     ) -> SessionMessage | None:
         """Return the newest local-time reminder in a session, if any."""
 
+        return self.find_latest_session_reminder(
+            session_id,
+            reminder_type=REMINDER_TYPE_SESSION_TIME,
+            conn=conn,
+        )
+
+    def find_latest_session_reminder(
+        self,
+        session_id: str,
+        *,
+        reminder_type: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionMessage | None:
+        """Return the newest reminder of one concrete semantic type."""
+
+        _validate_reminder_type(reminder_type)
+
         def op(db: sqlite3.Connection) -> SessionMessage | None:
             row = db.execute(
                 """
                 SELECT * FROM session_messages
                 WHERE session_id = ?
                   AND kind = 'system_reminder'
+                  AND json_extract(metadata, '$.reminder_type') = ?
                 ORDER BY ordinal DESC
                 LIMIT 1
                 """,
-                (session_id,),
+                (session_id, reminder_type),
             ).fetchone()
             return self._session_message_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def list_session_reminders(
+        self,
+        session_id: str,
+        *,
+        reminder_type: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[SessionMessage]:
+        """Return reminders of one concrete semantic type in source order."""
+
+        _validate_reminder_type(reminder_type)
+
+        def op(db: sqlite3.Connection) -> list[SessionMessage]:
+            rows = db.execute(
+                """
+                SELECT * FROM session_messages
+                WHERE session_id = ?
+                  AND kind = 'system_reminder'
+                  AND json_extract(metadata, '$.reminder_type') = ?
+                ORDER BY ordinal ASC
+                """,
+                (session_id, reminder_type),
+            ).fetchall()
+            return [self._session_message_from_row(row) for row in rows]
 
         return self._with_conn(conn, op)
 

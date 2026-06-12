@@ -62,6 +62,7 @@ from alpha_agent.runtime.context_handover import (
 from alpha_agent.runtime.prompt_builder import default_runtime_system_message
 from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
+from alpha_agent.utils.system_reminder import SYSTEM_REMINDER_OPEN, SYSTEM_REMINDER_PLACEHOLDER
 from alpha_agent.utils.time import utc_now_iso
 
 _COMPACT_SOURCE_PATH = "compact_direct"
@@ -94,6 +95,10 @@ Scope and reference rules:
 
 Content rules:
 - Each content value must be directly supported by the previous messages.
+- Messages wrapped in {system_reminder_placeholder} are session context,
+  not new user evidence. Use them only to interpret ordinary user, assistant, and
+  tool messages. Do not extract a new memory whose only support is a
+  {system_reminder_open} message.
 - object should be the short subject of content; omit it if content is already short.
 - requires_confirmation should be true when a memory is plausible but not safe to accept
   without human review.
@@ -477,8 +482,9 @@ def _compact_job_candidate(
         raise ValueError("tools schema hash mismatch")
 
     source_messages = _compact_job_source_messages(store, job)
+    extractable_messages = _extractable_source_messages(source_messages)
     source_refs = tuple(
-        BackgroundSourceRef("session_message", message.id) for message in source_messages
+        BackgroundSourceRef("session_message", message.id) for message in extractable_messages
     )
     selected_refs = _retryable_refs(
         state_service,
@@ -488,7 +494,9 @@ def _compact_job_candidate(
     if not selected_refs:
         return None
     selected_ids = {ref.source_id for ref in selected_refs}
-    selected_messages = [message for message in source_messages if message.id in selected_ids]
+    selected_messages = [
+        message for message in extractable_messages if message.id in selected_ids
+    ]
     ordinals = [message.ordinal for message in selected_messages]
     return _SourceWindowCandidate(
         source_path=_COMPACT_SOURCE_PATH,
@@ -504,6 +512,9 @@ def _compact_job_candidate(
             "ordinal_start": min(ordinals) if ordinals else None,
             "ordinal_end": max(ordinals) if ordinals else None,
             "source_message_ids": [ref.source_id for ref in selected_refs],
+            "context_reminder_message_ids": [
+                message.id for message in source_messages if _is_system_reminder(message)
+            ],
             "provider": job.provider,
             "model": job.model,
             "prompt_prefix_hash": job.prompt_prefix_hash,
@@ -550,6 +561,7 @@ def _inactive_backlog_candidate(
         ]
         message_refs = tuple(
             BackgroundSourceRef("session_message", message.id) for message in messages
+            if not _is_system_reminder(message)
         )
         source_refs = _retryable_refs(
             state_service,
@@ -562,12 +574,19 @@ def _inactive_backlog_candidate(
             ref.source_id for ref in source_refs if ref.source_type == "session_message"
         ]
         selected_ids = set(selected_message_ids)
-        selected_messages = [message for message in messages if message.id in selected_ids]
+        selected_messages = [
+            message for message in messages if message.id in selected_ids
+        ]
+        prompt_source_messages = [
+            message
+            for message in messages
+            if message.id in selected_ids or _is_system_reminder(message)
+        ]
         ordinals = [message.ordinal for message in selected_messages]
         prompt_prefix_messages = [
             default_runtime_system_message(),
             *([session_message_to_chat(compressed)] if compressed is not None else []),
-            *[source_message_to_chat(message) for message in selected_messages],
+            *[source_message_to_chat(message) for message in prompt_source_messages],
         ]
         return _SourceWindowCandidate(
             source_path=_BACKLOG_SOURCE_PATH,
@@ -583,6 +602,9 @@ def _inactive_backlog_candidate(
                 "ordinal_start": min(ordinals) if ordinals else None,
                 "ordinal_end": max(ordinals) if ordinals else None,
                 "source_message_ids": selected_message_ids,
+                "context_reminder_message_ids": [
+                    message.id for message in prompt_source_messages if _is_system_reminder(message)
+                ],
                 "compressed_message_id": compressed.id if compressed is not None else None,
                 "boundary_ordinal": boundary_ordinal,
                 "prompt_prefix_hash": handover_prompt_prefix_hash(prompt_prefix_messages),
@@ -611,6 +633,16 @@ def _compact_job_source_messages(
         if message.kind != "compressed_message"
         and message.ordinal <= job.compression_point_ordinal
     ]
+
+
+def _extractable_source_messages(
+    messages: Sequence[SessionMessage],
+) -> list[SessionMessage]:
+    return [message for message in messages if not _is_system_reminder(message)]
+
+
+def _is_system_reminder(message: SessionMessage) -> bool:
+    return message.kind == "system_reminder"
 
 
 def _retryable_refs(
@@ -802,6 +834,8 @@ def _extraction_instruction_message(
         "content": _EXTRACTION_INSTRUCTION.format(
             output_schema_json=_extraction_output_schema_json(),
             allowed_about_refs_json=_allowed_about_refs_json(context),
+            system_reminder_placeholder=SYSTEM_REMINDER_PLACEHOLDER,
+            system_reminder_open=SYSTEM_REMINDER_OPEN,
         ),
     }
 

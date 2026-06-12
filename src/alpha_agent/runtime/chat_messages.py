@@ -8,10 +8,9 @@ from typing import Any, cast
 from alpha_agent.llm.base import ChatCompletionToolCall, ChatMessage, LLMToolDefinitionInput
 from alpha_agent.runtime.context_budget import estimate_context_budget
 from alpha_agent.state.models import SessionMessage
+from alpha_agent.utils.system_reminder import SYSTEM_REMINDER_CLOSE, SYSTEM_REMINDER_OPEN
 
-SYSTEM_REMINDER_OPEN = "<system-reminder>"
-SYSTEM_REMINDER_CLOSE = "</system-reminder>"
-TOOL_TRUNCATION_MARKER = "<system-reminder>truncated</system-reminder>"
+TOOL_TRUNCATION_MARKER = f"{SYSTEM_REMINDER_OPEN}truncated{SYSTEM_REMINDER_CLOSE}"
 COUNTERPART_PROFILE_LABEL = "Counterpart profile:"
 SELF_MEMORY_SUMMARY_LABEL = "Self memory summary:"
 

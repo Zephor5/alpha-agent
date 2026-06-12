@@ -65,6 +65,8 @@ from alpha_agent.llm.tracing import llm_metadata_summary as _llm_metadata_summar
 from alpha_agent.llm.tracing import llm_request_summary as _llm_request_summary
 from alpha_agent.runtime.chat_messages import (
     estimate_chat_tokens,
+    render_counterpart_profile,
+    render_self_memory_summary,
     source_message_to_chat,
     wrap_system_reminder,
 )
@@ -86,13 +88,18 @@ from alpha_agent.runtime.prompt_builder import (
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
 from alpha_agent.state.models import RuntimeTrace, SessionMessage, SessionSummarySnapshot
-from alpha_agent.state.store import StateStore
+from alpha_agent.state.store import (
+    REMINDER_TYPE_COUNTERPART_PROFILE,
+    REMINDER_TYPE_SELF_MEMORY_SUMMARY,
+    StateStore,
+)
 from alpha_agent.tools.base import ToolCall, TurnToolState, tool_output_kind
 from alpha_agent.tools.default import build_tool_registry
 from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_CONTEXT_KEY
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_CONTEXT_KEY
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
+from alpha_agent.utils.system_reminder import inline_system_reminder
 from alpha_agent.utils.time import local_now, utc_now_iso
 
 _SELF_MEMORY_SUMMARY_REF = Reference("subject", "subject:self")
@@ -127,6 +134,14 @@ class SessionTimeReminder:
     kind: str
     local_datetime: str
     local_date: str
+    raw_content: str
+
+
+@dataclass(frozen=True)
+class SessionStableContextReminder:
+    """Pending stable context reminder selected for the start of a session."""
+
+    reminder_type: str
     raw_content: str
 
 
@@ -395,10 +410,14 @@ class AlphaAgent:
             }
             self._check_canceled(session_id, "before_user_event")
             model_tools = self.tool_registry.to_llm_tool_definitions()
-            self._session_summary_snapshots(session_id, counterpart)
+            stable_reminders = self._pending_session_start_stable_reminders(
+                session_id,
+                counterpart,
+            )
             time_reminder = self._pending_time_reminder(session_id)
             pending_source_messages = self._pending_runtime_input_messages(
                 user_message,
+                stable_reminders=stable_reminders,
                 time_reminder=time_reminder,
             )
             self._run_pre_user_context_maintenance(
@@ -410,6 +429,19 @@ class AlphaAgent:
                 debug=debug,
             )
             with self.store.immediate_transaction() as conn:
+                for stable_reminder in stable_reminders:
+                    reminder_record = self.store.append_session_reminder(
+                        session_id=session_id,
+                        raw_content=stable_reminder.raw_content,
+                        reminder_type=stable_reminder.reminder_type,
+                        conn=conn,
+                    )
+                    debug.setdefault("stable_reminder_message_ids", []).append(
+                        reminder_record.id
+                    )
+                    debug.setdefault("stable_reminder_message_ordinals", []).append(
+                        reminder_record.ordinal
+                    )
                 if time_reminder is not None:
                     reminder_record = self.store.append_session_time_reminder(
                         session_id=session_id,
@@ -559,10 +591,8 @@ class AlphaAgent:
         model_tool_choice: LLMToolChoice | None,
         debug: dict[str, Any],
     ) -> None:
-        summary_snapshots = self.store.list_session_summary_snapshots(session_id)
         pending_only_estimate = self._estimate_context_budget(
             build_answer_prompt_messages(
-                summary_snapshots=summary_snapshots,
                 session_history=[],
                 current_turn_messages=pending_source_messages,
                 system_message=self._default_system_message(),
@@ -573,7 +603,6 @@ class AlphaAgent:
             self._raise_pending_user_too_large(pending_only_estimate)
 
         planning_messages = build_answer_prompt_messages(
-            summary_snapshots=summary_snapshots,
             session_history=[],
             current_turn_messages=pending_source_messages,
             system_message=self._default_system_message(),
@@ -837,11 +866,71 @@ class AlphaAgent:
         extra_source_messages: Sequence[ChatMessage] | None = None,
     ) -> list[ChatMessage]:
         return build_answer_prompt_messages(
-            summary_snapshots=self.store.list_session_summary_snapshots(session_id),
             session_history=self.session_context.load(session_id).chat_messages,
             current_turn_messages=extra_source_messages or (),
             system_message=self._default_system_message(),
         )
+
+    def _pending_session_start_stable_reminders(
+        self,
+        session_id: str,
+        counterpart: Reference | None,
+    ) -> list[SessionStableContextReminder]:
+        if not self._is_before_first_runtime_input(session_id):
+            return []
+        snapshots = sorted(
+            self._session_summary_snapshots(session_id, counterpart),
+            key=lambda snapshot: (
+                0
+                if snapshot.summary_kind == SummaryKind.SELF_MEMORY_SUMMARY.value
+                else 1
+                if snapshot.summary_kind == SummaryKind.COUNTERPART_PROFILE.value
+                else 2,
+                snapshot.summary_kind,
+            ),
+        )
+        reminders: list[SessionStableContextReminder] = []
+        for snapshot in snapshots:
+            reminder_type, content = self._stable_reminder_payload(snapshot)
+            if reminder_type is None or content is None:
+                continue
+            if (
+                self.store.find_latest_session_reminder(
+                    session_id,
+                    reminder_type=reminder_type,
+                )
+                is not None
+            ):
+                continue
+            reminders.append(
+                SessionStableContextReminder(
+                    reminder_type=reminder_type,
+                    raw_content=wrap_system_reminder(content),
+                )
+            )
+        return reminders
+
+    def _is_before_first_runtime_input(self, session_id: str) -> bool:
+        return not any(
+            message.kind == "user_message"
+            for message in self.store.list_session_messages(session_id)
+        )
+
+    def _stable_reminder_payload(
+        self,
+        snapshot: SessionSummarySnapshot,
+    ) -> tuple[str | None, str | None]:
+        if snapshot.summary_kind == SummaryKind.SELF_MEMORY_SUMMARY.value:
+            return (
+                REMINDER_TYPE_SELF_MEMORY_SUMMARY,
+                render_self_memory_summary(snapshot.content),
+            )
+        if snapshot.summary_kind == SummaryKind.COUNTERPART_PROFILE.value:
+            return (
+                REMINDER_TYPE_COUNTERPART_PROFILE,
+                render_counterpart_profile(snapshot.content),
+            )
+        return None, None
 
     def _pending_time_reminder(self, session_id: str) -> SessionTimeReminder | None:
         local_datetime, local_date = _local_minute_timestamp(self.local_clock())
@@ -851,7 +940,7 @@ class AlphaAgent:
                 kind="started_at",
                 local_datetime=local_datetime,
                 local_date=local_date,
-                raw_content=wrap_system_reminder(f"currently start at: {local_datetime}"),
+                raw_content=inline_system_reminder(f"started at: {local_datetime}"),
             )
         if latest.metadata.get("local_date") == local_date:
             return None
@@ -859,16 +948,21 @@ class AlphaAgent:
             kind="time_update",
             local_datetime=local_datetime,
             local_date=local_date,
-            raw_content=wrap_system_reminder(f"time update: {local_datetime}"),
+            raw_content=inline_system_reminder(f"time update: {local_datetime}"),
         )
 
     def _pending_runtime_input_messages(
         self,
         user_message: str,
         *,
+        stable_reminders: Sequence[SessionStableContextReminder] = (),
         time_reminder: SessionTimeReminder | None,
     ) -> list[ChatMessage]:
         pending: list[ChatMessage] = []
+        pending.extend(
+            {"role": "user", "content": reminder.raw_content}
+            for reminder in stable_reminders
+        )
         if time_reminder is not None:
             pending.append({"role": "user", "content": time_reminder.raw_content})
         pending.append({"role": "user", "content": user_message})
@@ -918,8 +1012,8 @@ class AlphaAgent:
         return default_runtime_system_message()
 
     def _answer_prompt_frame(self, session_id: str) -> AnswerPromptFrame:
+        del session_id
         return build_answer_prompt_frame(
-            summary_snapshots=self.store.list_session_summary_snapshots(session_id),
             system_message=self._default_system_message(),
         )
 

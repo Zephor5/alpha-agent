@@ -25,6 +25,7 @@ from alpha_agent.runtime.context_handover import (
 )
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.state.store import StateStore
+from alpha_agent.utils.system_reminder import SYSTEM_REMINDER_CLOSE, SYSTEM_REMINDER_OPEN
 
 
 class _ProviderCall(TypedDict):
@@ -111,8 +112,8 @@ def test_build_prompt_preserves_explicit_runtime_messages_and_appends_instructio
     assert prompt.messages[-1]["role"] == "user"
     instruction = prompt.messages[-1]["content"]
     assert isinstance(instruction, str)
-    assert instruction.startswith("<system-reminder>")
-    assert instruction.endswith("</system-reminder>")
+    assert instruction.startswith(SYSTEM_REMINDER_OPEN)
+    assert instruction.endswith(SYSTEM_REMINDER_CLOSE)
     assert DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in instruction
 
 
@@ -195,8 +196,8 @@ def test_compression_call_preserves_runtime_prefix_and_passes_tools(tmp_path) ->
     assert messages[-1]["role"] == "user"
     instruction = messages[-1]["content"]
     assert isinstance(instruction, str)
-    assert instruction.startswith("<system-reminder>")
-    assert instruction.endswith("</system-reminder>")
+    assert instruction.startswith(SYSTEM_REMINDER_OPEN)
+    assert instruction.endswith(SYSTEM_REMINDER_CLOSE)
     assert DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in instruction
     assert "future user text that must not be compressed" not in str(messages)
 

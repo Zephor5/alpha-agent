@@ -86,6 +86,11 @@ from alpha_agent.runtime.prompt_builder import (
 )
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.state.store import StateStore
+from alpha_agent.utils.system_reminder import (
+    SYSTEM_REMINDER_OPEN,
+    SYSTEM_REMINDER_PLACEHOLDER,
+    inline_system_reminder,
+)
 
 
 def test_state_service_writes_indexes_and_audit_is_noncanonical(tmp_path) -> None:
@@ -2394,7 +2399,108 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
     assert "source_text" not in instruction
     assert "source window" not in lower_instruction
     assert "selected" not in lower_instruction
+    assert SYSTEM_REMINDER_PLACEHOLDER in instruction
+    assert "not new user evidence" in instruction
+    assert "only support is a" in instruction
+    assert f"{SYSTEM_REMINDER_OPEN} message" in instruction
     assert "User prefers Chinese replies." not in instruction
+
+
+def test_memory_extraction_worker_skips_reminder_only_backlog(tmp_path) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_time_reminder(
+        session_id="s1",
+        raw_content=inline_system_reminder("time update: 2026-06-12T09:00+08:00"),
+        reminder_kind="time_update",
+        local_datetime="2026-06-12T09:00+08:00",
+        local_date="2026-06-12",
+    )
+    store.append_session_reminder(
+        session_id="s1",
+        raw_content="Counterpart profile: User prefers concise answers.",
+        reminder_type="counterpart_profile",
+    )
+    provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={"s1"},
+    ).run_once()
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "skipped_no_backlog"
+    assert provider.calls == []
+    assert (
+        service.ledger.list_source_windows(
+            stage=BackgroundStage.EXTRACTION,
+            target_unit="session:s1",
+        )
+        == []
+    )
+
+
+def test_memory_extraction_worker_uses_reminders_as_context_not_sources(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    time_reminder = store.append_session_time_reminder(
+        session_id="s1",
+        raw_content=inline_system_reminder("time update: 2026-06-12T09:00+08:00"),
+        reminder_kind="time_update",
+        local_datetime="2026-06-12T09:00+08:00",
+        local_date="2026-06-12",
+    )
+    user_message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="User prefers Chinese replies.",
+    )
+    profile_reminder = store.append_session_reminder(
+        session_id="s1",
+        raw_content="Counterpart profile: User prefers concise answers.",
+        reminder_type="counterpart_profile",
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.PREFERENCE.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "content": "User prefers Chinese replies.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={"s1"},
+    ).run_once()
+
+    assert report.emitted == 1
+    window = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )[0]
+    assert window.source_refs == (BackgroundSourceRef("session_message", user_message.id),)
+    assert window.metadata["source_message_ids"] == [user_message.id]
+    assert window.metadata["context_reminder_message_ids"] == [
+        time_reminder.id,
+        profile_reminder.id,
+    ]
+    prompt_messages = provider.calls[0]["messages"]
+    assert "time update: 2026-06-12T09:00+08:00" in str(prompt_messages)
+    assert "Counterpart profile: User prefers concise answers." in str(prompt_messages)
+    evidence = {(item.kind, item.id) for item in service.beliefs.list_active()[0].sources}
+    assert ("session_message", user_message.id) in evidence
+    assert ("session_message", time_reminder.id) not in evidence
+    assert ("session_message", profile_reminder.id) not in evidence
 
 
 def test_memory_extraction_worker_writes_llm_debug_trace(tmp_path) -> None:
@@ -2545,6 +2651,105 @@ def test_memory_extraction_worker_skips_compact_range_already_processed_by_backl
     assert len(backlog_provider.calls) == 1
     assert compact_provider.calls == []
     assert len(service.beliefs.list_active()) == 1
+
+
+def test_memory_extraction_worker_direct_compact_excludes_reminders_from_sources(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    reminder = store.append_session_reminder(
+        session_id="s1",
+        raw_content="Counterpart profile: User prefers concise answers.",
+        reminder_type="counterpart_profile",
+    )
+    user_message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="User prefers Chinese replies.",
+    )
+    compression_provider = _RecordingLLMProvider("Operational handover.")
+    compression_result = compress_session_context(
+        session_id="s1",
+        assembler=SessionContextAssembler(store),
+        llm_provider=compression_provider,
+        llm_messages=_runtime_prefix(store, "s1"),
+    )
+    compact_provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.PREFERENCE.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "content": "User prefers Chinese replies.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(service, compact_provider).run_compact_job(
+        compression_result.extraction_job
+    )
+
+    assert report.emitted == 1
+    window = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )[0]
+    assert window.source_refs == (BackgroundSourceRef("session_message", user_message.id),)
+    assert window.metadata["source_message_ids"] == [user_message.id]
+    assert window.metadata["context_reminder_message_ids"] == [reminder.id]
+    assert "Counterpart profile: User prefers concise answers." in str(
+        compact_provider.calls[0]["messages"]
+    )
+    evidence = {(item.kind, item.id) for item in service.beliefs.list_active()[0].sources}
+    assert ("session_message", user_message.id) in evidence
+    assert ("session_message", reminder.id) not in evidence
+
+
+def test_memory_extraction_worker_skips_direct_compact_reminder_only_window(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_time_reminder(
+        session_id="s1",
+        raw_content=inline_system_reminder("time update: 2026-06-12T09:00+08:00"),
+        reminder_kind="time_update",
+        local_datetime="2026-06-12T09:00+08:00",
+        local_date="2026-06-12",
+    )
+    store.append_session_reminder(
+        session_id="s1",
+        raw_content="Counterpart profile: User prefers concise answers.",
+        reminder_type="counterpart_profile",
+    )
+    compression_provider = _RecordingLLMProvider("Operational handover.")
+    compression_result = compress_session_context(
+        session_id="s1",
+        assembler=SessionContextAssembler(store),
+        llm_provider=compression_provider,
+        llm_messages=_runtime_prefix(store, "s1"),
+    )
+    compact_provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(service, compact_provider).run_compact_job(
+        compression_result.extraction_job
+    )
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "skipped_no_backlog"
+    assert compact_provider.calls == []
+    assert service.beliefs.list_active() == []
+    assert (
+        service.ledger.list_source_windows(
+            stage=BackgroundStage.EXTRACTION,
+            target_unit="session:s1",
+        )
+        == []
+    )
 
 
 def _store(tmp_path) -> StateStore:
@@ -2706,7 +2911,6 @@ class _RecordingLLMProvider:
 
 def _runtime_prefix(store: StateStore, session_id: str) -> list[ChatMessage]:
     return build_answer_prompt_messages(
-        summary_snapshots=store.list_session_summary_snapshots(session_id),
         session_history=SessionContextAssembler(store).load(session_id).chat_messages,
         system_message=default_runtime_system_message(),
     )

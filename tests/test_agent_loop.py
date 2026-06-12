@@ -65,7 +65,11 @@ from alpha_agent.runtime.context_handover import (
 from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID
 from alpha_agent.runtime.prompt_builder import default_runtime_system_message
 from alpha_agent.state.models import SessionMessage
-from alpha_agent.state.store import StateStore
+from alpha_agent.state.store import (
+    REMINDER_TYPE_COUNTERPART_PROFILE,
+    REMINDER_TYPE_SELF_MEMORY_SUMMARY,
+    StateStore,
+)
 from alpha_agent.tools.base import (
     Tool,
     ToolAvailability,
@@ -84,6 +88,11 @@ from alpha_agent.tools.files import (
 )
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
 from alpha_agent.tools.registry import ToolRegistry
+from alpha_agent.utils.system_reminder import (
+    SYSTEM_REMINDER_CLOSE,
+    SYSTEM_REMINDER_OPEN,
+    inline_system_reminder,
+)
 from tests.cognition.test_belief_projection_apply import belief, summary_belief
 
 
@@ -113,11 +122,14 @@ def _is_time_reminder_chat(message: ChatMessage) -> bool:
     if message.get("role") != "user":
         return False
     content = str(message.get("content", ""))
-    return content.startswith(
-        (
-            "<system-reminder>started at:",
-            "<system-reminder>time update:",
+    return (
+        content.startswith(SYSTEM_REMINDER_OPEN)
+        and (
+            "started at:" in content
+            or "currently start at:" in content
+            or "time update:" in content
         )
+        and content.rstrip().endswith(SYSTEM_REMINDER_CLOSE)
     )
 
 
@@ -269,7 +281,7 @@ def test_agent_responds_and_persists_session_messages(tmp_path) -> None:
         "assistant_message",
     ]
     assert [message.llm_role for message in messages] == ["user", "user", "assistant"]
-    assert messages[0].raw_content.startswith("<system-reminder>started at: ")
+    assert messages[0].raw_content.startswith(f"{SYSTEM_REMINDER_OPEN}started at: ")
     assert messages[1].raw_content == "hello"
     assert messages[2].raw_content == result.response
     assert [trace.event_type for trace in store.list_runtime_traces("s1")] == [
@@ -297,9 +309,8 @@ def test_agent_inserts_session_start_time_reminder_before_first_input(tmp_path) 
         "user_message",
         "assistant_message",
     ]
-    assert messages[0].raw_content == (
-        "<system-reminder>started at: 2026-06-11T21:37+08:00</system-reminder>"
-    )
+    started_reminder = inline_system_reminder("started at: 2026-06-11T21:37+08:00")
+    assert messages[0].raw_content == started_reminder
     assert messages[0].metadata == {
         "reminder_type": "session_time",
         "time_reminder_kind": "started_at",
@@ -309,7 +320,7 @@ def test_agent_inserts_session_start_time_reminder_before_first_input(tmp_path) 
     assert provider.calls[0][1:] == [
         {
             "role": "user",
-            "content": "<system-reminder>started at: 2026-06-11T21:37+08:00</system-reminder>",
+            "content": started_reminder,
         },
         {"role": "user", "content": "hello"},
     ]
@@ -334,8 +345,8 @@ def test_agent_inserts_time_update_only_when_local_day_changes(tmp_path) -> None
     messages = store.list_session_messages("s1")
     reminders = [message for message in messages if message.kind == "system_reminder"]
     assert [message.raw_content for message in reminders] == [
-        "<system-reminder>started at: 2026-06-11T21:37+08:00</system-reminder>",
-        "<system-reminder>time update: 2026-06-12T09:03+08:00</system-reminder>",
+        inline_system_reminder("started at: 2026-06-11T21:37+08:00"),
+        inline_system_reminder("time update: 2026-06-12T09:03+08:00"),
     ]
     assert [message.raw_content for message in messages if message.kind == "user_message"] == [
         "one",
@@ -445,6 +456,19 @@ def test_agent_reuses_session_profile_snapshot_before_history(tmp_path) -> None:
     snapshot = store.get_session_summary_snapshot("s1", SummaryKind.COUNTERPART_PROFILE.value)
     assert snapshot is not None
     assert snapshot.content == "Stable profile v1."
+    profile_reminders = store.list_session_reminders(
+        "s1",
+        reminder_type=REMINDER_TYPE_COUNTERPART_PROFILE,
+    )
+    assert len(profile_reminders) == 1
+    assert profile_reminders[0].kind == "system_reminder"
+    assert profile_reminders[0].llm_role == "user"
+    assert profile_reminders[0].raw_content.startswith(SYSTEM_REMINDER_OPEN)
+    assert profile_reminders[0].raw_content.endswith(SYSTEM_REMINDER_CLOSE)
+    assert "Counterpart profile: Stable profile v1." in profile_reminders[0].raw_content
+    assert profile_reminders[0].metadata == {
+        "reminder_type": REMINDER_TYPE_COUNTERPART_PROFILE
+    }
 
 
 def test_agent_injects_self_memory_summary_before_counterpart_profile_as_separate_stable_messages(
@@ -506,6 +530,23 @@ def test_agent_injects_self_memory_summary_before_counterpart_profile_as_separat
     assert "Self memory summary: Agent solves root causes" in str(second_call[1]["content"])
     assert "Agent updated self memory mid-session." not in str(second_call)
     assert "Counterpart profile: User prefers concise answers." in str(second_call[2]["content"])
+    stable_reminders = [
+        message
+        for message in store.list_session_messages("s1")
+        if message.metadata.get("reminder_type")
+        in {REMINDER_TYPE_SELF_MEMORY_SUMMARY, REMINDER_TYPE_COUNTERPART_PROFILE}
+    ]
+    assert [message.metadata["reminder_type"] for message in stable_reminders] == [
+        REMINDER_TYPE_SELF_MEMORY_SUMMARY,
+        REMINDER_TYPE_COUNTERPART_PROFILE,
+    ]
+    assert all(message.kind == "system_reminder" for message in stable_reminders)
+    assert all(message.llm_role == "user" for message in stable_reminders)
+    assert all(message.raw_content.startswith(SYSTEM_REMINDER_OPEN) for message in stable_reminders)
+    assert all(message.raw_content.endswith(SYSTEM_REMINDER_CLOSE) for message in stable_reminders)
+    assert stable_reminders[0].ordinal < stable_reminders[1].ordinal
+    assert "Self memory summary: Agent solves root causes" in stable_reminders[0].raw_content
+    assert "Counterpart profile: User prefers concise answers." in stable_reminders[1].raw_content
 
 
 def test_background_profile_summary_feeds_new_sessions_without_mutating_existing_snapshot(
@@ -597,6 +638,43 @@ def test_background_profile_summary_feeds_new_sessions_without_mutating_existing
     assert existing_snapshot.content == "Original stable profile."
     assert new_snapshot is not None
     assert new_snapshot.source_belief_id == str(latest.id)
+
+
+def test_stable_context_is_not_backfilled_after_first_runtime_input(tmp_path) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    projection = BeliefProjection(store)
+    provider = _QueuedRecordingProvider(["first answer", "second answer"])
+    agent = AlphaAgent(store=store, llm_provider=provider, event_log=log)
+
+    agent.respond("first turn", session_id="s1")
+    projection.upsert_summary(
+        summary_belief(
+            "belief:digest:v1",
+            "Stable profile appeared later.",
+            about=[counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))],
+            object_="counterpart profile",
+            summary_kind=SummaryKind.COUNTERPART_PROFILE,
+            scope=BeliefScope.COUNTERPART,
+        )
+    )
+    agent.respond("second turn", session_id="s1")
+
+    assert "Stable profile appeared later." not in str(provider.calls[1])
+    assert (
+        store.get_session_summary_snapshot(
+            "s1",
+            SummaryKind.COUNTERPART_PROFILE.value,
+        )
+        is None
+    )
+    assert (
+        store.list_session_reminders(
+            "s1",
+            reminder_type=REMINDER_TYPE_COUNTERPART_PROFILE,
+        )
+        == []
+    )
 
 
 def test_answer_prompt_excludes_background_integration_artifacts_by_default(
@@ -1358,7 +1436,7 @@ def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path)
         "user_message",
         "assistant_message",
     ]
-    assert persisted[2].raw_content.startswith("<system-reminder>")
+    assert persisted[2].raw_content.startswith(SYSTEM_REMINDER_OPEN)
     assert persisted[2].ordinal < persisted[3].ordinal < persisted[4].ordinal
     assert persisted[4].raw_content == "pending user must stay out of compression"
     assert all(
@@ -1414,6 +1492,57 @@ def test_pre_user_compression_submits_direct_compact_extraction_job(tmp_path) ->
     assert job.compression_point_ordinal == old_assistant.ordinal
     assert "covered_source_message_refs" not in job.to_record()
     assert "covered_source_message_ids" not in job.to_record()
+
+
+def test_compression_does_not_reinsert_stable_context_reminders(tmp_path) -> None:
+    store = _store(tmp_path)
+    profile = store.append_session_reminder(
+        session_id="s1",
+        raw_content="Counterpart profile: Stable profile before compression.",
+        reminder_type=REMINDER_TYPE_COUNTERPART_PROFILE,
+    )
+    store.create_session_summary_snapshot(
+        session_id="s1",
+        summary_kind=SummaryKind.COUNTERPART_PROFILE.value,
+        target_kind="counterpart",
+        target_id=str(DEFAULT_COUNTERPART_ID),
+        source_belief_id="belief:digest:v1",
+        content="Stable profile before compression.",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="old source one two three four",
+    )
+    store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="old answer five six seven eight",
+    )
+    provider = _QueuedRecordingProvider(["stable handover", "final answer"])
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        tool_registry=ToolRegistry(),
+        llm_context_config=_compression_context(),
+        max_context_tokens=340,
+    )
+
+    result = agent.respond("pending user must stay out of compression", session_id="s1")
+
+    assert result.response == "final answer"
+    assert len(provider.calls) == 2
+    compression_call = _without_time_reminder_chats(provider.calls[0])
+    assert "Counterpart profile: Stable profile before compression." in str(compression_call)
+    answer_call = _without_time_reminder_chats(provider.calls[1])
+    assert "stable handover" in str(answer_call)
+    assert "Counterpart profile: Stable profile before compression." not in str(answer_call)
+    assert store.list_session_reminders(
+        "s1",
+        reminder_type=REMINDER_TYPE_COUNTERPART_PROFILE,
+    ) == [profile]
 
 
 def test_failed_pre_user_compression_does_not_persist_pending_user(tmp_path) -> None:
@@ -1514,8 +1643,8 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
     assert persisted[3].provider_metadata == {"tool_name": "echo"}
     assert persisted[3].metadata["result_metadata"] == {}
     assert persisted[3].metadata["tool_output_kind"] == "text"
-    assert persisted[4].raw_content.startswith("<system-reminder>")
-    assert persisted[4].raw_content.endswith("</system-reminder>")
+    assert persisted[4].raw_content.startswith(SYSTEM_REMINDER_OPEN)
+    assert persisted[4].raw_content.endswith(SYSTEM_REMINDER_CLOSE)
     assert persisted[4].compression_point_ordinal == persisted[3].ordinal
     assert all(
         DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in message.raw_content
