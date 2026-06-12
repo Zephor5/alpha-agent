@@ -585,7 +585,7 @@ def _pending_extraction_count(
             session_id,
             after_ordinal=boundary_ordinal,
         ):
-            if message.kind == "compressed_message":
+            if message.kind in {"compressed_message", "system_reminder"}:
                 continue
             source_ref = BackgroundSourceRef("session_message", message.id)
             if _source_status(

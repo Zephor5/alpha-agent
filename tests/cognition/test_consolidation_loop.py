@@ -393,6 +393,43 @@ def test_background_service_runs_extraction_for_session_past_inactivity_threshol
     assert provider.calls
 
 
+def test_background_service_does_not_count_reminder_only_session_for_extraction(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    created_at = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    store.append_session_time_reminder(
+        session_id="s1",
+        raw_content=inline_system_reminder("time update: 2026-06-12T09:00+08:00"),
+        reminder_kind="time_update",
+        local_datetime="2026-06-12T09:00+08:00",
+        local_date="2026-06-12",
+        created_at=created_at,
+    )
+    service = CognitionStateStore(store)
+    provider = _RecordingLLMProvider(_llm_json())
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            tick_timeout_seconds=1,
+            intake=BackgroundIntakeConfig(batch_size=1, min_sources=99),
+            extraction=BackgroundExtractionConfig(min_sources=1),
+            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
+            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+        ),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    reports = background.tick_once()
+
+    assert reports == []
+    assert provider.calls == []
+
+
 def test_background_service_excludes_active_session_from_extraction(
     tmp_path,
 ) -> None:
