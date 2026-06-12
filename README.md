@@ -203,11 +203,42 @@ local database:
 
 ```bash
 uv run alpha daemon start
+uv run alpha cognition import convert deepseek path/to/deepseek-export.json path/to/conversations.json
 uv run alpha cognition import conversations path/to/conversations.json --dry-run
 uv run alpha cognition import conversations path/to/conversations.json
 uv run alpha cognition import status <batch-id>
 uv run alpha cognition import status <batch-id> --verbose
 ```
+
+DeepSeek raw exports can be converted before daemon import. Conversion does not
+require a running daemon, refuses to overwrite an existing output file unless
+`--force` is provided, and validates the generated normalized JSON with the same
+import contract before writing:
+
+```bash
+uv run alpha cognition import convert deepseek path/to/deepseek-export.json path/to/conversations.json
+uv run alpha cognition import convert deepseek path/to/deepseek-export.json path/to/conversations.json --force
+```
+
+The first-version DeepSeek converter is intentionally strict:
+
+- The raw export must be a top-level array of conversation objects with
+  `id`, `title`, `inserted_at`, `updated_at`, and `mapping` fields matching the
+  current DeepSeek export shape.
+- `mapping` must be one linear path from `root`; branched or unreachable nodes
+  are rejected instead of silently choosing a branch.
+- `REQUEST` fragments become `user` messages, and `RESPONSE` fragments become
+  `assistant` messages. Multiple same-role fragments in one node are joined
+  with a blank line. A node containing both `REQUEST` and `RESPONSE` is
+  rejected.
+- `THINK` and `SEARCH` fragments are omitted from message content. Message
+  metadata records the DeepSeek model and small omission counts only; full
+  reasoning text and search results are not copied into the normalized file.
+- Non-empty `files` arrays, unknown fragment types, empty message content, and
+  inconsistent message timestamp offsets are rejected.
+- Message order follows the DeepSeek tree. If source timestamps are equal or
+  move backwards along that tree path, the converter applies the smallest
+  microsecond adjustment needed for strictly increasing import timestamps.
 
 The CLI checks the 50 MB UTF-8 JSON payload limit before IPC, sends only the file
 content and basename to the daemon, and has no direct-write fallback when the
@@ -310,8 +341,9 @@ messages: `extraction_pending`, `extraction_claimed`,
 
 First-version limitations:
 
-- The input must already be normalized; there are no platform-specific export
-  converters.
+- Raw DeepSeek export conversion is available. Other platforms must already
+  provide normalized JSON; there are no ChatGPT, Claude, or other source
+  converters yet.
 - Imports are whole-batch: one invalid conversation or message rejects the full
   payload.
 - Status covers import completion and extraction source progress only, not
