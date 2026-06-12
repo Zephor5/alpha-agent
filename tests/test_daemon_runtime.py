@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -12,6 +13,7 @@ from alpha_agent.cognition.models import LoopPriority
 from alpha_agent.config import AlphaConfig, CognitionBackgroundConfig
 from alpha_agent.daemon.runtime import AlphaDaemon, DaemonAlreadyRunningError
 from alpha_agent.daemon.status import DaemonRuntimeConfig, running_status, write_daemon_status
+from alpha_agent.gateway.runner import ActiveTurnGuard
 from alpha_agent.state.store import StateStore
 
 
@@ -78,6 +80,39 @@ def _config(tmp_path: Path) -> AlphaConfig:
         daemon_socket_path=tmp_path / "daemon.sock",
         daemon_status_path=tmp_path / "daemon-status.json",
     )
+
+
+def _import_payload() -> dict[str, object]:
+    return {
+        "source_provider": "chatgpt",
+        "timezone": "Asia/Shanghai",
+        "conversations": [
+            {
+                "external_conversation_id": "conv_1",
+                "title": "Imported design discussion",
+                "messages": [
+                    {
+                        "external_message_id": "msg_1",
+                        "role": "system",
+                        "content": "External assistant policy.",
+                        "created_at": "2026-01-01T10:00:00+08:00",
+                    },
+                    {
+                        "external_message_id": "msg_2",
+                        "role": "user",
+                        "content": "I prefer direct feedback.",
+                        "created_at": "2026-01-01T10:01:00+08:00",
+                    },
+                    {
+                        "external_message_id": "msg_3",
+                        "role": "assistant",
+                        "content": "Understood.",
+                        "created_at": "2026-01-01T10:02:00+08:00",
+                    },
+                ],
+            }
+        ],
+    }
 
 
 def test_daemon_handles_ask_with_session_guard_and_source_metadata(tmp_path: Path) -> None:
@@ -158,6 +193,204 @@ def test_daemon_returns_unknown_request_type_for_invalid_payload(tmp_path: Path)
 
     assert response["ok"] is False
     assert response["error"]["code"] == "UNKNOWN_REQUEST_TYPE"
+
+
+def test_daemon_conversation_import_dry_run_returns_summary_without_writes(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    daemon = AlphaDaemon(config, store=store)
+
+    response = daemon.handle_payload(
+        {
+            "type": "conversation_import",
+            "input_name": "conversation_exports/export.json",
+            "payload_json": json.dumps(_import_payload()),
+            "dry_run": True,
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["summary"] == {
+        "batch_id": None,
+        "source_provider": "chatgpt",
+        "dry_run": True,
+        "status": "completed",
+        "input_name": "export.json",
+        "conversations_seen": 1,
+        "messages_seen": 3,
+        "conversations_created": 1,
+        "conversations_reused": 0,
+        "messages_inserted": 3,
+        "messages_deduped": 0,
+    }
+    assert store.list_import_batches() == []
+    assert store.get_imported_conversation("chatgpt", "conv_1") is None
+
+
+def test_daemon_conversation_import_real_run_and_status(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    daemon = AlphaDaemon(config, store=store)
+
+    import_response = daemon.handle_payload(
+        {
+            "type": "conversation_import",
+            "input_name": "export.json",
+            "payload_json": json.dumps(_import_payload()),
+        }
+    )
+
+    assert import_response["ok"] is True
+    summary = import_response["summary"]
+    assert summary["batch_id"]
+    assert summary["messages_inserted"] == 3
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    assert store.is_import_session(imported.session_id) is True
+
+    status_response = daemon.handle_payload(
+        {
+            "type": "conversation_import_status",
+            "batch_id": summary["batch_id"],
+            "verbose": True,
+        }
+    )
+
+    assert status_response["ok"] is True
+    assert status_response["status"]["batch_id"] == summary["batch_id"]
+    assert status_response["status"]["messages_inserted"] == 3
+    assert status_response["status"]["extraction_pending"] == 3
+    assert status_response["status"]["extraction_processed"] == 0
+    assert status_response["conversations"] == [
+        {
+            "external_conversation_id": "conv_1",
+            "title": "Imported design discussion",
+            "session_id": imported.session_id,
+            "messages_inserted": 3,
+            "messages_deduped": 0,
+            "session_reused": False,
+            "extraction_pending": 3,
+            "extraction_claimed": 0,
+            "extraction_processed": 0,
+            "extraction_failed": 0,
+            "extraction_skipped": 0,
+        }
+    ]
+
+
+def test_daemon_conversation_import_returns_validation_details(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    daemon = AlphaDaemon(config, store=store)
+    payload = _import_payload()
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    first_conversation = conversations[0]
+    assert isinstance(first_conversation, dict)
+    messages = first_conversation["messages"]
+    assert isinstance(messages, list)
+    first_message = messages[0]
+    assert isinstance(first_message, dict)
+    first_message["created_at"] = "2026-01-01T10:00:00"
+
+    response = daemon.handle_payload(
+        {
+            "type": "conversation_import",
+            "input_name": "bad.json",
+            "payload_json": json.dumps(payload),
+        }
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "VALIDATION_ERROR"
+    assert response["error"]["message"] == "Invalid conversation import payload."
+    assert response["error"]["details"] == [
+        {
+            "path": "conversations[0].messages[0].created_at",
+            "message": "timestamp must include an explicit timezone offset or Z",
+            "code": "naive_timestamp",
+        }
+    ]
+
+
+def test_daemon_conversation_import_rejects_malformed_boundary_fields(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    daemon = AlphaDaemon(config, store=store)
+
+    response = daemon.handle_payload(
+        {
+            "type": "conversation_import",
+            "input_name": "export.json",
+            "payload_json": {"not": "a string"},
+        }
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "INVALID_REQUEST"
+    assert response["error"]["message"] == "payload_json must be a string."
+
+
+def test_daemon_conversation_import_does_not_use_turn_guard(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    guard = ActiveTurnGuard()
+    assert guard.begin("s1", "already running").accepted is True
+    daemon = AlphaDaemon(config, store=store, turn_guard=guard)
+
+    response = daemon.handle_payload(
+        {
+            "type": "conversation_import",
+            "payload_json": json.dumps(_import_payload()),
+            "dry_run": True,
+        }
+    )
+
+    assert response["ok"] is True
+    assert guard.is_active("s1") is True
+
+
+def test_daemon_rejects_ordinary_turn_for_import_session(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    import_response = AlphaDaemon(config, store=store).handle_payload(
+        {
+            "type": "conversation_import",
+            "payload_json": json.dumps(_import_payload()),
+        }
+    )
+    assert import_response["ok"] is True
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    agent = _FakeAgent()
+    daemon = AlphaDaemon(
+        config,
+        store=store,
+        agent_manager=_FakeManager(agent),  # type: ignore[arg-type]
+    )
+
+    response = daemon.handle_payload(
+        {
+            "type": "chat_turn",
+            "message": "continue this",
+            "session_id": imported.session_id,
+        }
+    )
+
+    assert response["ok"] is False
+    assert response["error"]["code"] == "IMPORT_SESSION_NOT_CHAT"
+    assert "cannot be continued" in response["error"]["message"]
+    assert agent.calls == []
 
 
 def test_daemon_status_response_includes_runtime_paths(tmp_path: Path) -> None:

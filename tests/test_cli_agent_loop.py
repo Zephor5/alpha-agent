@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 from alpha_agent import cli as cli_module
 from alpha_agent.cli import app
 from alpha_agent.cognition.projections.belief import BeliefProjection
+from alpha_agent.daemon.conversation_import import ConversationImportService
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
@@ -56,6 +57,9 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
             "sessions",
             "session_messages",
             "session_counterparts",
+            "import_batches",
+            "imported_conversations",
+            "imported_messages",
             "session_summary_snapshots",
             "runtime_traces",
             "gateway_session_mappings",
@@ -117,6 +121,46 @@ def test_debug_prompt_renders_minimal_prompt_for_existing_session(tmp_path: Path
     assert "hello" in result.output
     assert "hi" in result.output
     assert "continue" in result.output
+
+
+def test_debug_prompt_rejects_import_session_before_rendering(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "hidden import source",
+                                "created_at": "2026-01-01T10:00:00+08:00",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["debug", "prompt", "continue", "--session", imported.session_id],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 1
+    assert "Import sessions are hidden source material" in result.output
+    assert "hidden import source" not in result.output
+    assert "Message 1 [system]" not in result.output
 
 
 def test_debug_prompt_filters_session_profile_reminder_by_default(

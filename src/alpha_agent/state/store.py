@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from alpha_agent.state.models import (
+    ImportBatchRecord,
+    ImportedConversationRecord,
+    ImportedMessageRecord,
+    ImportStatusSummary,
     LLMRole,
     RuntimeTrace,
     SessionCounterpart,
@@ -266,6 +270,50 @@ class StateStore:
             if record is None:
                 raise RuntimeError(f"failed to ensure session record for {session_id!r}")
             return record
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
+    def update_session_record_history_times(
+        self,
+        session_id: str,
+        *,
+        created_at: str | None = None,
+        updated_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionRecord:
+        """Update persisted session history timestamps without changing timezone."""
+
+        normalized_created_at = (
+            _normalize_timestamp(created_at, "created_at") if created_at is not None else None
+        )
+        normalized_updated_at = (
+            _normalize_timestamp(updated_at, "updated_at") if updated_at is not None else None
+        )
+
+        def op(db: sqlite3.Connection) -> SessionRecord:
+            record = self.get_session_record(session_id, conn=db)
+            if record is None:
+                raise KeyError(f"session record {session_id!r} not found")
+            db.execute(
+                """
+                UPDATE sessions
+                SET created_at = ?,
+                    updated_at = ?
+                WHERE session_id = ?
+                """,
+                (
+                    normalized_created_at or record.created_at,
+                    normalized_updated_at or record.updated_at,
+                    session_id,
+                ),
+            )
+            updated = self.get_session_record(session_id, conn=db)
+            if updated is None:
+                raise RuntimeError(f"failed to update session record for {session_id!r}")
+            return updated
 
         if conn is not None:
             return op(conn)
@@ -657,6 +705,507 @@ class StateStore:
         with self.immediate_transaction() as local:
             return op(local)
 
+    def create_import_batch(
+        self,
+        *,
+        batch_id: str,
+        source_provider: str,
+        input_name: str | None,
+        payload_digest: str,
+        status: str,
+        conversations_seen: int,
+        messages_seen: int,
+        conversations_created: int,
+        conversations_reused: int,
+        messages_inserted: int,
+        messages_deduped: int,
+        error_summary: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        updated_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> ImportBatchRecord:
+        """Record one external conversation import attempt summary."""
+
+        timestamp = _normalize_timestamp(created_at or utc_now_iso(), "created_at")
+        updated_timestamp = _normalize_timestamp(updated_at or timestamp, "updated_at")
+
+        def op(db: sqlite3.Connection) -> ImportBatchRecord:
+            db.execute(
+                """
+                INSERT INTO import_batches
+                    (
+                        id,
+                        source_provider,
+                        input_name,
+                        payload_digest,
+                        status,
+                        conversations_seen,
+                        messages_seen,
+                        conversations_created,
+                        conversations_reused,
+                        messages_inserted,
+                        messages_deduped,
+                        error_summary,
+                        metadata,
+                        created_at,
+                        updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch_id,
+                    source_provider,
+                    input_name,
+                    payload_digest,
+                    status,
+                    conversations_seen,
+                    messages_seen,
+                    conversations_created,
+                    conversations_reused,
+                    messages_inserted,
+                    messages_deduped,
+                    error_summary,
+                    _dumps(metadata or {}),
+                    timestamp,
+                    updated_timestamp,
+                ),
+            )
+            batch = self.get_import_batch(batch_id, conn=db)
+            if batch is None:
+                raise RuntimeError(f"failed to create import batch {batch_id!r}")
+            return batch
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
+    def get_import_batch(
+        self,
+        batch_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> ImportBatchRecord | None:
+        """Return one import batch summary, if it exists."""
+
+        def op(db: sqlite3.Connection) -> ImportBatchRecord | None:
+            row = db.execute(
+                """
+                SELECT *
+                FROM import_batches
+                WHERE id = ?
+                """,
+                (batch_id,),
+            ).fetchone()
+            return self._import_batch_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def list_import_batches(
+        self,
+        *,
+        source_provider: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[ImportBatchRecord]:
+        """List durable import batch summaries in creation order."""
+
+        def op(db: sqlite3.Connection) -> list[ImportBatchRecord]:
+            params: list[Any] = []
+            where = ""
+            if source_provider is not None:
+                where = "WHERE source_provider = ?"
+                params.append(source_provider)
+            rows = db.execute(
+                f"""
+                SELECT *
+                FROM import_batches
+                {where}
+                ORDER BY created_at ASC, id ASC
+                """,
+                params,
+            ).fetchall()
+            return [self._import_batch_from_row(row) for row in rows]
+
+        return self._with_conn(conn, op)
+
+    def get_imported_conversation(
+        self,
+        source_provider: str,
+        external_conversation_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> ImportedConversationRecord | None:
+        """Return an imported conversation mapping by external identity."""
+
+        def op(db: sqlite3.Connection) -> ImportedConversationRecord | None:
+            row = db.execute(
+                """
+                SELECT *
+                FROM imported_conversations
+                WHERE source_provider = ?
+                  AND external_conversation_id = ?
+                """,
+                (source_provider, external_conversation_id),
+            ).fetchone()
+            return self._imported_conversation_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def get_imported_conversation_by_session(
+        self,
+        session_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> ImportedConversationRecord | None:
+        """Return an imported conversation mapping by hidden session id."""
+
+        def op(db: sqlite3.Connection) -> ImportedConversationRecord | None:
+            row = db.execute(
+                """
+                SELECT *
+                FROM imported_conversations
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+            return self._imported_conversation_from_row(row) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def is_import_session(
+        self,
+        session_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> bool:
+        """Return whether a session is a hidden imported conversation session."""
+
+        return self.get_imported_conversation_by_session(session_id, conn=conn) is not None
+
+    def create_or_reuse_imported_conversation(
+        self,
+        *,
+        source_provider: str,
+        external_conversation_id: str,
+        session_id: str,
+        title: str | None,
+        external_created_at: str | None,
+        external_updated_at: str | None,
+        first_import_batch_id: str,
+        latest_import_batch_id: str,
+        metadata: dict[str, Any] | None = None,
+        imported_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[ImportedConversationRecord, bool]:
+        """Create an imported conversation mapping, or mark an existing one reused."""
+
+        timestamp = _normalize_timestamp(imported_at or utc_now_iso(), "imported_at")
+        normalized_external_created_at = (
+            _normalize_timestamp(external_created_at, "external_created_at")
+            if external_created_at is not None
+            else None
+        )
+        normalized_external_updated_at = (
+            _normalize_timestamp(external_updated_at, "external_updated_at")
+            if external_updated_at is not None
+            else None
+        )
+
+        def op(db: sqlite3.Connection) -> tuple[ImportedConversationRecord, bool]:
+            existing = self.get_imported_conversation(
+                source_provider,
+                external_conversation_id,
+                conn=db,
+            )
+            if existing is not None:
+                db.execute(
+                    """
+                    UPDATE imported_conversations
+                    SET latest_import_batch_id = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (latest_import_batch_id, timestamp, existing.id),
+                )
+                updated = self.get_imported_conversation(
+                    source_provider,
+                    external_conversation_id,
+                    conn=db,
+                )
+                if updated is None:
+                    raise RuntimeError(
+                        "failed to reload imported conversation "
+                        f"{source_provider!r}/{external_conversation_id!r}"
+                    )
+                return updated, False
+
+            conversation_id = new_id("import_conv")
+            db.execute(
+                """
+                INSERT INTO imported_conversations
+                    (
+                        id,
+                        source_provider,
+                        external_conversation_id,
+                        session_id,
+                        title,
+                        external_created_at,
+                        external_updated_at,
+                        first_import_batch_id,
+                        latest_import_batch_id,
+                        created_at,
+                        updated_at,
+                        metadata
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conversation_id,
+                    source_provider,
+                    external_conversation_id,
+                    session_id,
+                    title,
+                    normalized_external_created_at,
+                    normalized_external_updated_at,
+                    first_import_batch_id,
+                    latest_import_batch_id,
+                    timestamp,
+                    timestamp,
+                    _dumps(metadata or {}),
+                ),
+            )
+            created = self.get_imported_conversation(
+                source_provider,
+                external_conversation_id,
+                conn=db,
+            )
+            if created is None:
+                raise RuntimeError(
+                    "failed to create imported conversation "
+                    f"{source_provider!r}/{external_conversation_id!r}"
+                )
+            return created, True
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
+    def list_imported_external_message_ids(
+        self,
+        source_provider: str,
+        external_conversation_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> set[str]:
+        """Return known external message ids for one imported conversation."""
+
+        def op(db: sqlite3.Connection) -> set[str]:
+            rows = db.execute(
+                """
+                SELECT external_message_id
+                FROM imported_messages
+                WHERE source_provider = ?
+                  AND external_conversation_id = ?
+                """,
+                (source_provider, external_conversation_id),
+            ).fetchall()
+            return {str(row["external_message_id"]) for row in rows}
+
+        return self._with_conn(conn, op)
+
+    def latest_imported_message_timestamp(
+        self,
+        source_provider: str,
+        external_conversation_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> str | None:
+        """Return the latest imported external message timestamp for a conversation."""
+
+        def op(db: sqlite3.Connection) -> str | None:
+            row = db.execute(
+                """
+                SELECT external_created_at
+                FROM imported_messages
+                WHERE source_provider = ?
+                  AND external_conversation_id = ?
+                ORDER BY external_created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (source_provider, external_conversation_id),
+            ).fetchone()
+            return str(row["external_created_at"]) if row is not None else None
+
+        return self._with_conn(conn, op)
+
+    def create_imported_message(
+        self,
+        *,
+        source_provider: str,
+        external_conversation_id: str,
+        external_message_id: str,
+        imported_conversation_id: str,
+        session_message_id: str,
+        import_batch_id: str,
+        role: str,
+        external_created_at: str,
+        metadata: dict[str, Any] | None = None,
+        imported_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> ImportedMessageRecord:
+        """Create the external-message to session-message mapping."""
+
+        timestamp = _normalize_timestamp(imported_at or utc_now_iso(), "imported_at")
+        normalized_external_created_at = _normalize_timestamp(
+            external_created_at,
+            "external_created_at",
+        )
+
+        def op(db: sqlite3.Connection) -> ImportedMessageRecord:
+            message_id = new_id("import_msg")
+            db.execute(
+                """
+                INSERT INTO imported_messages
+                    (
+                        id,
+                        source_provider,
+                        external_conversation_id,
+                        external_message_id,
+                        imported_conversation_id,
+                        session_message_id,
+                        import_batch_id,
+                        role,
+                        external_created_at,
+                        imported_at,
+                        metadata
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    source_provider,
+                    external_conversation_id,
+                    external_message_id,
+                    imported_conversation_id,
+                    session_message_id,
+                    import_batch_id,
+                    role,
+                    normalized_external_created_at,
+                    timestamp,
+                    _dumps(metadata or {}),
+                ),
+            )
+            row = db.execute(
+                """
+                SELECT *
+                FROM imported_messages
+                WHERE id = ?
+                """,
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"failed to create imported message {message_id!r}")
+            return self._imported_message_from_row(row)
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
+    def list_imported_messages(
+        self,
+        *,
+        source_provider: str | None = None,
+        external_conversation_id: str | None = None,
+        import_batch_id: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[ImportedMessageRecord]:
+        """List imported message mappings."""
+
+        def op(db: sqlite3.Connection) -> list[ImportedMessageRecord]:
+            conditions: list[str] = []
+            params: list[Any] = []
+            if source_provider is not None:
+                conditions.append("source_provider = ?")
+                params.append(source_provider)
+            if external_conversation_id is not None:
+                conditions.append("external_conversation_id = ?")
+                params.append(external_conversation_id)
+            if import_batch_id is not None:
+                conditions.append("import_batch_id = ?")
+                params.append(import_batch_id)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            rows = db.execute(
+                f"""
+                SELECT *
+                FROM imported_messages
+                {where}
+                ORDER BY source_provider ASC,
+                         external_conversation_id ASC,
+                         external_created_at ASC,
+                         id ASC
+                """,
+                params,
+            ).fetchall()
+            return [self._imported_message_from_row(row) for row in rows]
+
+        return self._with_conn(conn, op)
+
+    def get_import_status_summary(
+        self,
+        batch_id: str,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> ImportStatusSummary | None:
+        """Return aggregate import counts plus extraction progress for one batch."""
+
+        def op(db: sqlite3.Connection) -> ImportStatusSummary | None:
+            batch = self.get_import_batch(batch_id, conn=db)
+            if batch is None:
+                return None
+            progress_rows = db.execute(
+                """
+                SELECT COALESCE(progress.status, 'pending') AS status,
+                       COUNT(*) AS count
+                FROM imported_messages AS imported
+                JOIN imported_conversations AS conversation
+                  ON conversation.id = imported.imported_conversation_id
+                LEFT JOIN background_source_progress AS progress
+                  ON progress.source_type = 'session_message'
+                 AND progress.source_id = imported.session_message_id
+                 AND progress.stage = 'extraction'
+                 AND progress.target_unit = 'session:' || conversation.session_id
+                WHERE imported.import_batch_id = ?
+                GROUP BY COALESCE(progress.status, 'pending')
+                """,
+                (batch_id,),
+            ).fetchall()
+            counts = {str(row["status"]): int(row["count"]) for row in progress_rows}
+            return ImportStatusSummary(
+                batch_id=batch.id,
+                source_provider=batch.source_provider,
+                status=batch.status,
+                conversations_seen=batch.conversations_seen,
+                messages_seen=batch.messages_seen,
+                conversations_created=batch.conversations_created,
+                conversations_reused=batch.conversations_reused,
+                messages_inserted=batch.messages_inserted,
+                messages_deduped=batch.messages_deduped,
+                extraction_pending=counts.get("pending", 0),
+                extraction_claimed=counts.get("claimed", 0),
+                extraction_processed=counts.get("processed", 0),
+                extraction_failed=counts.get("failed", 0),
+                extraction_skipped=counts.get("skipped", 0),
+                error_summary=batch.error_summary,
+                metadata=batch.metadata,
+                created_at=batch.created_at,
+                updated_at=batch.updated_at,
+            )
+
+        return self._with_conn(conn, op)
+
     def get_session_summary_snapshot(
         self,
         session_id: str,
@@ -971,6 +1520,59 @@ class StateStore:
             metadata=_loads_dict(row["metadata"]),
         )
 
+    def _import_batch_from_row(self, row: sqlite3.Row) -> ImportBatchRecord:
+        return ImportBatchRecord(
+            id=row["id"],
+            source_provider=row["source_provider"],
+            input_name=row["input_name"],
+            payload_digest=row["payload_digest"],
+            status=row["status"],
+            conversations_seen=int(row["conversations_seen"]),
+            messages_seen=int(row["messages_seen"]),
+            conversations_created=int(row["conversations_created"]),
+            conversations_reused=int(row["conversations_reused"]),
+            messages_inserted=int(row["messages_inserted"]),
+            messages_deduped=int(row["messages_deduped"]),
+            error_summary=row["error_summary"],
+            metadata=_loads_dict(row["metadata"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _imported_conversation_from_row(
+        self,
+        row: sqlite3.Row,
+    ) -> ImportedConversationRecord:
+        return ImportedConversationRecord(
+            id=row["id"],
+            source_provider=row["source_provider"],
+            external_conversation_id=row["external_conversation_id"],
+            session_id=row["session_id"],
+            title=row["title"],
+            external_created_at=row["external_created_at"],
+            external_updated_at=row["external_updated_at"],
+            first_import_batch_id=row["first_import_batch_id"],
+            latest_import_batch_id=row["latest_import_batch_id"],
+            metadata=_loads_dict(row["metadata"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _imported_message_from_row(self, row: sqlite3.Row) -> ImportedMessageRecord:
+        return ImportedMessageRecord(
+            id=row["id"],
+            source_provider=row["source_provider"],
+            external_conversation_id=row["external_conversation_id"],
+            external_message_id=row["external_message_id"],
+            imported_conversation_id=row["imported_conversation_id"],
+            session_message_id=row["session_message_id"],
+            import_batch_id=row["import_batch_id"],
+            role=row["role"],
+            external_created_at=row["external_created_at"],
+            imported_at=row["imported_at"],
+            metadata=_loads_dict(row["metadata"]),
+        )
+
     def _session_summary_snapshot_from_row(
         self,
         row: sqlite3.Row,
@@ -1008,6 +1610,7 @@ class StateStore:
             return
         expected_roles: dict[SessionMessageKind, LLMRole] = {
             "system_reminder": "user",
+            "system_message": "system",
             "user_message": "user",
             "assistant_message": "assistant",
             "tool_message": "tool",

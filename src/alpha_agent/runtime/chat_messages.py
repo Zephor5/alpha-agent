@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
@@ -69,6 +70,8 @@ def source_message_to_chat(message: SessionMessage) -> ChatMessage:
     content = message.model_content if message.model_content is not None else message.raw_content
     if message.kind == "compressed_message":
         raise ValueError("compressed_message must be projected by SessionContextAssembler")
+    if message.llm_role == "system":
+        return {"role": "system", "content": content}
     if message.llm_role == "user":
         return {"role": "user", "content": content}
     if message.llm_role == "assistant":
@@ -81,7 +84,8 @@ def source_message_to_chat(message: SessionMessage) -> ChatMessage:
             assistant_message["reasoning_content"] = message.reasoning_content
         if message.tool_calls:
             assistant_message["tool_calls"] = [
-                _source_tool_call(tool_call) for tool_call in message.tool_calls
+                _source_tool_call(tool_call, index)
+                for index, tool_call in enumerate(message.tool_calls)
             ]
         return cast(ChatMessage, assistant_message)
     if message.llm_role != "tool":
@@ -91,16 +95,38 @@ def source_message_to_chat(message: SessionMessage) -> ChatMessage:
     return {"role": "tool", "tool_call_id": message.tool_call_id, "content": content}
 
 
-def _source_tool_call(payload: Mapping[str, Any]) -> ChatCompletionToolCall:
+def _source_tool_call(payload: Mapping[str, Any], index: int) -> ChatCompletionToolCall:
+    call_id = payload.get("id")
+    if not isinstance(call_id, str) or not call_id.strip():
+        raise ValueError(f"assistant tool_call {index} id must be a non-empty string")
+    call_type = payload.get("type")
+    if call_type != "function":
+        raise ValueError(f"assistant tool_call {index} type must be function")
     function = payload.get("function")
     if not isinstance(function, Mapping):
-        function = {}
+        raise ValueError(f"assistant tool_call {index} function must be an object")
+    function_name = function.get("name")
+    if not isinstance(function_name, str) or not function_name.strip():
+        raise ValueError(
+            f"assistant tool_call {index} function.name must be a non-empty string"
+        )
+    function_arguments = function.get("arguments")
+    if not isinstance(function_arguments, str):
+        raise ValueError(
+            f"assistant tool_call {index} function.arguments must be a JSON string"
+        )
+    try:
+        json.loads(function_arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"assistant tool_call {index} function.arguments must contain valid JSON"
+        ) from exc
     return {
-        "id": str(payload.get("id") or ""),
+        "id": call_id,
         "type": "function",
         "function": {
-            "name": str(function.get("name") or ""),
-            "arguments": str(function.get("arguments") or "{}"),
+            "name": function_name,
+            "arguments": function_arguments,
         },
     }
 

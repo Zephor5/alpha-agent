@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from alpha_agent import cli
 from alpha_agent.cli import app
+from alpha_agent.daemon.conversation_import import ConversationImportService
 from alpha_agent.state.store import StateStore
 
 
@@ -472,6 +473,38 @@ def test_chat_with_existing_session_renders_tool_round(tmp_path: Path, monkeypat
     assert _FakeDaemonClient.requests == []
 
 
+def test_chat_with_import_session_rejects_without_rendering_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    ConversationImportService(store).import_payload(
+        '{"source_provider":"chatgpt","conversations":[{"external_conversation_id":"conv_1",'
+        '"messages":[{"external_message_id":"msg_1","role":"user",'
+        '"content":"DO_NOT_SHOW_IMPORTED_HISTORY",'
+        '"created_at":"2026-01-01T00:00:00Z"}]}]}',
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["chat", "--session", imported.session_id],
+        input="/exit\n",
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 1
+    assert "Import sessions are hidden source material" in result.output
+    assert "DO_NOT_SHOW_IMPORTED_HISTORY" not in result.output
+    assert _FakeDaemonClient.requests == []
+
+
 def test_chat_reports_daemon_not_running(tmp_path: Path, monkeypatch) -> None:
     _reset_fake_client()
     _FakeDaemonClient.response = {
@@ -496,6 +529,205 @@ def test_chat_reports_daemon_not_running(tmp_path: Path, monkeypatch) -> None:
             "message": "hello",
             "session_id": "s1",
             "source_metadata": {"channel": "cli", "command": "chat"},
+        }
+    ]
+
+
+def test_cognition_import_conversations_sends_filename_only_and_renders_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    payload_path = tmp_path / "nested" / "external.json"
+    payload_path.parent.mkdir()
+    payload_path.write_text('{"source_provider":"chatgpt","conversations":[]}', encoding="utf-8")
+    _FakeDaemonClient.response = {
+        "ok": True,
+        "summary": {
+            "batch_id": None,
+            "source_provider": "chatgpt",
+            "dry_run": True,
+            "status": "completed",
+            "input_name": "external.json",
+            "conversations_seen": 1,
+            "messages_seen": 3,
+            "conversations_created": 1,
+            "conversations_reused": 0,
+            "messages_inserted": 3,
+            "messages_deduped": 0,
+        },
+    }
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["cognition", "import", "conversations", str(payload_path), "--dry-run"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "Conversation Import" in result.output
+    assert "dry_run=true" in result.output
+    assert "source_provider=chatgpt" in result.output
+    assert "messages_inserted=3" in result.output
+    assert "background_cognition=eligible" in result.output
+    assert "background_cognition=available" not in result.output
+    assert _FakeDaemonClient.requests == [
+        {
+            "type": "conversation_import",
+            "input_name": "external.json",
+            "payload_json": '{"source_provider":"chatgpt","conversations":[]}',
+            "dry_run": True,
+        }
+    ]
+    assert str(payload_path) not in str(_FakeDaemonClient.requests[0]["input_name"])
+
+
+def test_cognition_import_conversations_rejects_large_file_before_ipc(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    payload_path = tmp_path / "large.json"
+    payload_path.write_text("12345", encoding="utf-8")
+    monkeypatch.setattr("alpha_agent.cli.MAX_CONVERSATION_IMPORT_PAYLOAD_BYTES", 4)
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["cognition", "import", "conversations", str(payload_path)],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 1
+    assert "exceeds the 50 MB conversation import limit" in result.output
+    assert _FakeDaemonClient.requests == []
+
+
+def test_cognition_import_conversations_reports_daemon_not_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    payload_path = tmp_path / "external.json"
+    payload_path.write_text("{}", encoding="utf-8")
+    _FakeDaemonClient.response = {
+        "ok": False,
+        "error": {"code": "DAEMON_NOT_RUNNING", "message": "socket missing"},
+    }
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["cognition", "import", "conversations", str(payload_path)],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 1
+    assert "Daemon is not running. Run alpha daemon start." in result.output
+
+
+def test_cognition_import_conversations_renders_validation_details(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    payload_path = tmp_path / "bad.json"
+    payload_path.write_text("{}", encoding="utf-8")
+    _FakeDaemonClient.response = {
+        "ok": False,
+        "error": {
+            "code": "VALIDATION_ERROR",
+            "message": "Invalid conversation import payload.",
+            "details": [
+                {
+                    "path": "conversations[0].messages[0].created_at",
+                    "message": "timestamp must include an explicit timezone offset or Z",
+                    "code": "naive_timestamp",
+                }
+            ],
+        },
+    }
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["cognition", "import", "conversations", str(payload_path)],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 1
+    assert "Invalid conversation import payload." in result.output
+    assert "conversations[0].messages[0].created_at" in result.output
+    assert "timestamp must include an explicit timezone offset or Z" in result.output
+
+
+def test_cognition_import_status_renders_summary_and_verbose_conversations(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    _FakeDaemonClient.response = {
+        "ok": True,
+        "status": {
+            "batch_id": "import_batch_1",
+            "source_provider": "chatgpt",
+            "status": "completed",
+            "conversations_seen": 1,
+            "messages_seen": 3,
+            "conversations_created": 1,
+            "conversations_reused": 0,
+            "messages_inserted": 3,
+            "messages_deduped": 0,
+            "extraction_pending": 2,
+            "extraction_claimed": 0,
+            "extraction_processed": 1,
+            "extraction_failed": 0,
+            "extraction_skipped": 0,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+            "error_summary": None,
+        },
+        "conversations": [
+            {
+                "external_conversation_id": "conv_1",
+                "title": "Imported design discussion",
+                "session_id": "session_hidden",
+                "messages_inserted": 3,
+                "messages_deduped": 0,
+                "session_reused": False,
+                "extraction_pending": 2,
+                "extraction_claimed": 0,
+                "extraction_processed": 1,
+                "extraction_failed": 0,
+                "extraction_skipped": 0,
+            }
+        ],
+    }
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["cognition", "import", "status", "import_batch_1", "--verbose"],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "Conversation Import Status" in result.output
+    assert "batch_id=import_batch_1" in result.output
+    assert "extraction_pending=2" in result.output
+    assert "conv_1" in result.output
+    assert "session_hidden" in result.output
+    assert _FakeDaemonClient.requests == [
+        {
+            "type": "conversation_import_status",
+            "batch_id": "import_batch_1",
+            "verbose": True,
         }
     ]
 

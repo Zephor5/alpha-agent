@@ -66,6 +66,7 @@ from alpha_agent.config import (
     BackgroundIntakeConfig,
     CognitionBackgroundConfig,
 )
+from alpha_agent.daemon.conversation_import import ConversationImportService
 from alpha_agent.llm.base import (
     ChatMessage,
     LLMResponse,
@@ -2660,6 +2661,236 @@ def test_memory_extraction_worker_uses_reminders_as_context_not_sources(
     assert ("session_message", user_message.id) in evidence
     assert ("session_message", time_reminder.id) not in evidence
     assert ("session_message", profile_reminder.id) not in evidence
+
+
+def test_memory_extraction_worker_import_prompt_excludes_runtime_context_and_session_scope(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "timezone": "Asia/Shanghai",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "system",
+                                "content": "External system instruction.",
+                                "created_at": "2026-01-01T10:00:00+08:00",
+                            },
+                            {
+                                "external_message_id": "msg_2",
+                                "role": "user",
+                                "content": "I prefer direct feedback.",
+                                "created_at": "2026-01-01T10:01:00+08:00",
+                            },
+                            {
+                                "external_message_id": "msg_3",
+                                "role": "assistant",
+                                "content": "You prefer concise plans.",
+                                "created_at": "2026-01-01T10:02:00+08:00",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={imported.session_id},
+    ).run_once()
+
+    assert report.emitted == 1
+    prompt_messages = provider.calls[0]["messages"]
+    assert [message["role"] for message in prompt_messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    prompt_text = json.dumps(prompt_messages, sort_keys=True)
+    assert "External system instruction." in prompt_text
+    assert "Identity: Alpha Agent" not in prompt_text
+    assert "system_reminder" not in prompt_text
+    instruction = prompt_messages[-1]["content"]
+    assert isinstance(instruction, str)
+    assert 'For scope "session"' not in instruction
+    assert 'Do not emit scope "session"' in instruction
+    assert "assistant output is evidence about the user only when" in instruction.lower()
+    assert f'{{"id": "{imported.session_id}", "kind": "session"}}' not in instruction
+    window = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit=f"session:{imported.session_id}",
+    )[0]
+    assert window.metadata["source_path"] == "import_backlog"
+    assert window.metadata["source_time_start"] == "2026-01-01T02:02:00+00:00"
+    assert window.metadata["source_time_end"] == "2026-01-01T02:02:00+00:00"
+    assert window.metadata["source_time_basis"] == "session_message"
+    assert window.metadata["context_reminder_message_ids"] == []
+    assert window.metadata["compressed_message_id"] is None
+
+
+def test_memory_extraction_worker_rejects_session_scope_for_import_session(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "I prefer direct feedback.",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.SESSION.value,
+                    "about": [{"kind": "session", "id": imported.session_id}],
+                    "content": "This import session has direct feedback preference.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={imported.session_id},
+    ).run_once()
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "error"
+    assert service.beliefs.list_active() == []
+    assert "not included in llm input" in " ".join(report.notes).lower()
+
+
+def test_memory_extraction_worker_prioritizes_ordinary_then_oldest_imported_sessions(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="zzzz_ordinary",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Ordinary session should run before imports.",
+        created_at="2026-03-01T00:00:00+00:00",
+    )
+    counters: dict[str, int] = {}
+    session_ids = ["session_z_old", "session_a_new"]
+
+    def fake_new_id(prefix: str) -> str:
+        if prefix == "session":
+            return session_ids.pop(0)
+        counters[prefix] = counters.get(prefix, 0) + 1
+        return f"{prefix}_{counters[prefix]}"
+
+    monkeypatch.setattr("alpha_agent.daemon.conversation_import.new_id", fake_new_id)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "old_conv",
+                        "messages": [
+                            {
+                                "external_message_id": "old_msg",
+                                "role": "user",
+                                "content": "Old imported evidence.",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            }
+                        ],
+                    },
+                    {
+                        "external_conversation_id": "new_conv",
+                        "messages": [
+                            {
+                                "external_message_id": "new_msg",
+                                "role": "user",
+                                "content": "New imported evidence.",
+                                "created_at": "2026-02-01T00:00:00Z",
+                            }
+                        ],
+                    },
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    old_import = store.get_imported_conversation("chatgpt", "old_conv")
+    new_import = store.get_imported_conversation("chatgpt", "new_conv")
+    assert old_import is not None
+    assert new_import is not None
+    inactive_ids = {"zzzz_ordinary", old_import.session_id, new_import.session_id}
+    ordinary_provider = _RecordingLLMProvider(_llm_json())
+
+    ordinary_report = MemoryExtractionWorker(
+        service,
+        ordinary_provider,
+        inactive_session_ids=inactive_ids,
+    ).run_once()
+
+    assert ordinary_report.emitted == 1
+    ordinary_window = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:zzzz_ordinary",
+    )[0]
+    assert ordinary_window.metadata["source_path"] == "inactive_backlog"
+    assert "Identity: Alpha Agent" in str(ordinary_provider.calls[0]["messages"])
+    import_provider = _RecordingLLMProvider(_llm_json())
+
+    import_report = MemoryExtractionWorker(
+        service,
+        import_provider,
+        inactive_session_ids=inactive_ids,
+    ).run_once()
+
+    assert import_report.emitted == 1
+    old_windows = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit=f"session:{old_import.session_id}",
+    )
+    new_windows = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit=f"session:{new_import.session_id}",
+    )
+    assert len(old_windows) == 1
+    assert new_windows == []
+    assert "Old imported evidence." in str(import_provider.calls[0]["messages"])
+    assert "New imported evidence." not in str(import_provider.calls[0]["messages"])
 
 
 def test_memory_extraction_worker_writes_llm_debug_trace(tmp_path) -> None:

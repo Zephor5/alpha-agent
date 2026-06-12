@@ -12,7 +12,11 @@ from alpha_agent.cognition.processing_ledger import (
 )
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import LLMContextConfig
-from alpha_agent.runtime.chat_messages import TOOL_TRUNCATION_MARKER, wrap_system_reminder
+from alpha_agent.runtime.chat_messages import (
+    TOOL_TRUNCATION_MARKER,
+    source_message_to_chat,
+    wrap_system_reminder,
+)
 from alpha_agent.runtime.session_context import SessionContextAssembler
 from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
@@ -285,6 +289,33 @@ def test_tool_replay_fields_survive_source_schema_refactor(tmp_path) -> None:
     assert reloaded[1].tool_result_id == "trace_1"
 
 
+def test_system_messages_persist_and_replay_as_system_role(tmp_path) -> None:
+    store = _store(tmp_path)
+
+    system = store.append_session_message(
+        session_id="s1",
+        kind="system_message",
+        llm_role="system",
+        raw_content="External system instruction.",
+        created_at="2026-01-01T00:00:00Z",
+    )
+    user = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="hello",
+        created_at="2026-01-01T00:01:00Z",
+    )
+
+    projection = SessionContextAssembler(store).load("s1")
+
+    assert projection.source_messages == [system, user]
+    assert projection.chat_messages == [
+        {"role": "system", "content": "External system instruction."},
+        {"role": "user", "content": "hello"},
+    ]
+
+
 def test_reasoning_content_persists_and_replays_for_assistant_messages(tmp_path) -> None:
     store = _store(tmp_path)
     store.append_session_message(
@@ -342,6 +373,37 @@ def test_reasoning_content_persists_and_replays_for_assistant_messages(tmp_path)
             ],
         },
     ]
+
+
+@pytest.mark.parametrize(
+    ("function", "expected_fragment"),
+    [
+        ({"arguments": "{}"}, "function.name"),
+        ({"name": "lookup"}, "function.arguments"),
+    ],
+)
+def test_source_message_to_chat_rejects_malformed_assistant_tool_calls(
+    tmp_path,
+    function: dict[str, object],
+    expected_fragment: str,
+) -> None:
+    store = _store(tmp_path)
+    message = store.append_session_message(
+        session_id="s1",
+        kind="assistant_message",
+        llm_role="assistant",
+        raw_content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": function,
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match=expected_fragment):
+        source_message_to_chat(message)
 
 
 def test_assembler_uses_all_source_messages_when_no_compression(tmp_path) -> None:

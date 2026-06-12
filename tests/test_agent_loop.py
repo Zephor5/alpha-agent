@@ -44,6 +44,7 @@ from alpha_agent.config import (
     FileToolConfig,
     LLMContextConfig,
 )
+from alpha_agent.daemon.conversation_import import ConversationImportService
 from alpha_agent.llm.base import (
     AssistantChatMessage,
     ChatMessage,
@@ -61,6 +62,7 @@ from alpha_agent.runtime.agent import (
     AgentTurnContext,
     AlphaAgent,
     ContextWindowExceededError,
+    ImportSessionChatError,
 )
 from alpha_agent.runtime.context_handover import (
     DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
@@ -105,6 +107,25 @@ def _store(tmp_path) -> StateStore:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
     return store
+
+
+def _import_conversation_payload() -> dict[str, object]:
+    return {
+        "source_provider": "chatgpt",
+        "conversations": [
+            {
+                "external_conversation_id": "conv_1",
+                "messages": [
+                    {
+                        "external_message_id": "msg_1",
+                        "role": "user",
+                        "content": "I prefer direct feedback.",
+                        "created_at": "2026-01-01T00:00:00Z",
+                    }
+                ],
+            }
+        ],
+    }
 
 
 def _copy_chat_message(message: ChatMessage) -> ChatMessage:
@@ -293,6 +314,25 @@ def test_agent_responds_and_persists_session_messages(tmp_path) -> None:
         "llm.started",
         "llm.completed",
     ]
+
+
+def test_agent_rejects_direct_respond_for_import_session(tmp_path) -> None:
+    store = _store(tmp_path)
+    ConversationImportService(store).import_payload(
+        json.dumps(_import_conversation_payload()),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    agent = AlphaAgent(store=store, llm_provider=MockLLMProvider())
+
+    with pytest.raises(ImportSessionChatError, match="cannot be continued"):
+        agent.respond("hello", session_id=imported.session_id)
+
+    imported_contents = [
+        message.raw_content for message in store.list_session_messages(imported.session_id)
+    ]
+    assert imported_contents == ["I prefer direct feedback."]
 
 
 def test_agent_inserts_session_start_time_reminder_before_first_input(tmp_path) -> None:

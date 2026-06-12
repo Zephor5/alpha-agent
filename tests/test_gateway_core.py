@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from alpha_agent.daemon.conversation_import import ConversationImportService
 from alpha_agent.gateway.adapters import InboundHandler, PlatformAdapter
 from alpha_agent.gateway.models import (
     ConversationSource,
@@ -538,6 +539,72 @@ def test_gateway_bridge_sends_busy_message_when_session_has_active_turn(tmp_path
     assert adapter.sent == [(source, outbound.text)]
     assert agent.calls == []
     assert guard.is_active(mapping.session_id) is True
+
+
+def test_gateway_bridge_rejects_mapping_to_import_session_as_data_error(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    ConversationImportService(store).import_payload(
+        '{"source_provider":"chatgpt","conversations":[{"external_conversation_id":"conv_1",'
+        '"messages":[{"external_message_id":"msg_1","role":"user",'
+        '"content":"Imported source only.",'
+        '"created_at":"2026-01-01T00:00:00Z"}]}]}',
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    source = _source(message_id="msg-1")
+    session_key = generate_session_key(source, SessionMode.GROUP_PER_USER)
+    with store.transaction() as conn:
+        conn.execute(
+            """
+            INSERT INTO gateway_session_mappings
+                (id, platform, chat_id, chat_type, user_id, platform_thread_id,
+                 session_mode, session_key, session_id, source_context,
+                 created_at, updated_at, metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "gateway_session_bad_import",
+                source.platform,
+                source.chat_id,
+                source.chat_type,
+                source.user_id,
+                source.platform_thread_id,
+                SessionMode.GROUP_PER_USER.value,
+                session_key,
+                imported.session_id,
+                "{}",
+                "2026-01-01T00:00:00+00:00",
+                "2026-01-01T00:00:00+00:00",
+                "{}",
+            ),
+        )
+    agent = _FakeAgent()
+    adapter = _FakeAdapter()
+    bridge = GatewayRuntimeBridge(
+        agent_manager=_FakeAgentManager(agent),
+        session_store=GatewaySessionStore(store),
+        deduplicator=GatewayDeduplicator(store),
+        turn_guard=ActiveTurnGuard(),
+        session_mode=SessionMode.GROUP_PER_USER,
+        error_log_path=tmp_path / "errors.log",
+    )
+
+    outbound = bridge.handle_message(
+        adapter,
+        InboundMessage(source=source, text="hello", platform_message_id="msg-1"),
+    )
+
+    assert outbound is not None
+    assert "hidden imported history" in outbound.text
+    assert adapter.sent == [(source, outbound.text)]
+    assert agent.calls == []
+    assert bridge.turn_guard.is_active(imported.session_id) is False
+    assert "gateway.session.data_error" in (tmp_path / "errors.log").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_gateway_bridge_delivers_runtime_failure_and_releases_turn_guard(tmp_path: Path) -> None:

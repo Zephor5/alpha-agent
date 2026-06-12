@@ -154,6 +154,16 @@ class AgentCanceledError(RuntimeError):
         self.stage = stage
 
 
+class ImportSessionChatError(RuntimeError):
+    """Raised when ordinary chat attempts to continue a hidden import session."""
+
+    def __init__(self, session_id: str):
+        super().__init__(
+            f"Import session {session_id} is hidden source material and cannot be continued."
+        )
+        self.session_id = session_id
+
+
 class LLMCallError(RuntimeError):
     """Raised when the provider call fails, with retry metadata preserved."""
 
@@ -368,6 +378,9 @@ class AlphaAgent:
         source_metadata: Mapping[str, Any] | None = None,
     ) -> AgentTurnResult:
         """Run one explicit agent turn."""
+
+        if self.store.is_import_session(session_id):
+            raise ImportSessionChatError(session_id)
 
         acquire_request = LoopAcquireRequest(
             loop_name="runtime_turn",

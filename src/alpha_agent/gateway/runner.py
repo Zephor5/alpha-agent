@@ -17,6 +17,9 @@ BUSY_SESSION_MESSAGE = (
     "This conversation already has an active Alpha turn. Please try again after it finishes."
 )
 RUNTIME_ERROR_MESSAGE = "Alpha failed while processing that message. Please try again."
+IMPORT_SESSION_DATA_ERROR_MESSAGE = (
+    "This gateway conversation is mapped to hidden imported history and cannot process live chat."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +159,16 @@ class GatewayRuntimeBridge:
             chat_id=message.source.chat_id,
             user_id=message.source.user_id,
         )
+        if self.session_store.state_store.is_import_session(mapping.session_id):
+            outbound = self._outbound(message, IMPORT_SESSION_DATA_ERROR_MESSAGE)
+            self._log_error(
+                "gateway.session.data_error",
+                "Gateway session mapping points at a hidden import session.",
+                context=context,
+                metadata={"reason": "import_session_mapping"},
+            )
+            self._cache_and_send(adapter, message, outbound, dedup.dedup_key)
+            return outbound
         turn = self.turn_guard.begin(mapping.session_id, message.text)
         if not turn.accepted:
             outbound = self._outbound(message, self.busy_message)

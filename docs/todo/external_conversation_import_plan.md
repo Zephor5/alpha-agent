@@ -2,7 +2,8 @@
 
 ## Status
 
-Planned.
+Phases 1-7 implemented. Phase 8 documentation is complete. Final full-suite
+validation and end-to-end smoke import remain open release gates.
 
 ## Date
 
@@ -797,33 +798,33 @@ Rules:
 
 Tasks:
 
-- [ ] Define import domain models for batch, conversation, message, validation
+- [x] Define import domain models for batch, conversation, message, validation
       result, import summary, and status summary.
-- [ ] Extend persistent session message role support for `system`.
-- [ ] Add import tables to the target schema.
-- [ ] Add store methods to create/reuse imported conversations and map imported
+- [x] Extend persistent session message role support for `system`.
+- [x] Add import tables to the target schema.
+- [x] Add store methods to create/reuse imported conversations and map imported
       messages to session messages.
-- [ ] Store hidden import session timezone and external-history session
+- [x] Store hidden import session timezone and external-history session
       created/updated times.
-- [ ] Add store methods to detect import sessions by session id.
-- [ ] Add store status queries for import batches and imported session messages.
-- [ ] Ensure imported message content is stored once in `session_messages`.
+- [x] Add store methods to detect import sessions by session id.
+- [x] Add store status queries for import batches and imported session messages.
+- [x] Ensure imported message content is stored once in `session_messages`.
 
 Acceptance criteria:
 
-- [ ] A new database initialized from the target schema accepts persistent
+- [x] A new database initialized from the target schema accepts persistent
       `system` session messages.
-- [ ] Imported conversation mappings can identify hidden import sessions.
-- [ ] Duplicate external message ids can be skipped without duplicate
+- [x] Imported conversation mappings can identify hidden import sessions.
+- [x] Duplicate external message ids can be skipped without duplicate
       `session_messages`.
-- [ ] Hidden import sessions can preserve external-history created/updated times
+- [x] Hidden import sessions can preserve external-history created/updated times
       and derived fixed-offset timezones.
-- [ ] Store tests cover create, reuse, dedup, and import-session detection.
+- [x] Store tests cover create, reuse, dedup, and import-session detection.
 
 Verification:
 
-- [ ] Run focused store/import tests.
-- [ ] Run existing session context tests affected by role changes.
+- [x] Run focused store/import tests.
+- [x] Run existing session context tests affected by role changes.
 
 ### Phase 2: Import Service Validation And Planning
 
@@ -832,37 +833,37 @@ logic without IPC wiring yet.
 
 Tasks:
 
-- [ ] Implement normalized JSON parser in service/application layer.
-- [ ] Treat payloads that reached the service as already CLI size-checked; add a
+- [x] Implement normalized JSON parser in service/application layer.
+- [x] Treat payloads that reached the service as already CLI size-checked; add a
       defensive service-side size rejection only if it fits the existing IPC
       boundary cleanly.
-- [ ] Validate required fields and rejected fields.
-- [ ] Validate optional top-level timezone.
-- [ ] Validate message timestamps are timezone-aware.
-- [ ] Validate per-conversation message timestamps are strictly increasing by
+- [x] Validate required fields and rejected fields.
+- [x] Validate optional top-level timezone.
+- [x] Validate message timestamps are timezone-aware.
+- [x] Validate per-conversation message timestamps are strictly increasing by
       UTC instant.
-- [ ] Validate role-specific rules for `system`, `user`, `assistant`, `tool`.
-- [ ] Validate assistant tool calls and tool result matching.
-- [ ] Produce path-aware validation errors.
-- [ ] Produce dry-run plan counts without writes.
-- [ ] Produce real import write plans with conversation reuse and message dedup.
-- [ ] For existing conversations, dedup first and reject planned inserts that
+- [x] Validate role-specific rules for `system`, `user`, `assistant`, `tool`.
+- [x] Validate assistant tool calls and tool result matching.
+- [x] Produce path-aware validation errors.
+- [x] Produce dry-run plan counts without writes.
+- [x] Produce real import write plans with conversation reuse and message dedup.
+- [x] For existing conversations, dedup first and reject planned inserts that
       would require historical middle insertion or non-increasing append time.
 
 Acceptance criteria:
 
-- [ ] Invalid payloads return stable error codes and path details.
-- [ ] Dry-run returns counts and does not write batches or messages.
-- [ ] A valid payload produces a deterministic plan for inserted and deduped
+- [x] Invalid payloads return stable error codes and path details.
+- [x] Dry-run returns counts and does not write batches or messages.
+- [x] A valid payload produces a deterministic plan for inserted and deduped
       messages.
-- [ ] Invalid timestamp ordering fails the whole batch in dry-run and real
+- [x] Invalid timestamp ordering fails the whole batch in dry-run and real
       planning.
 
 Verification:
 
-- [ ] Unit tests for parser and validator.
-- [ ] Unit tests for dry-run behavior.
-- [ ] Unit tests for dedup planning.
+- [x] Unit tests for parser and validator.
+- [x] Unit tests for dry-run behavior.
+- [x] Unit tests for dedup planning.
 
 ### Phase 3: Import Write Path
 
@@ -870,38 +871,38 @@ Verification:
 
 Tasks:
 
-- [ ] Generate a new import batch id for every real import attempt.
-- [ ] Create or reuse imported conversation mappings.
-- [ ] Generate normal internal session ids for first-time imported
+- [x] Generate a new import batch id for every real import attempt.
+- [x] Create or reuse imported conversation mappings.
+- [x] Generate normal internal session ids for first-time imported
       conversations.
-- [ ] Bind imported sessions to the main user counterpart.
-- [ ] Append new messages to hidden sessions in file order.
-- [ ] Set `session_messages.created_at` from external message `created_at`.
-- [ ] Keep `session_messages.updated_at` null for new imports.
-- [ ] Set hidden import session `created_at`, `updated_at`, and `timezone`
+- [x] Bind imported sessions to the main user counterpart.
+- [x] Append new messages to hidden sessions in file order.
+- [x] Set `session_messages.created_at` from external message `created_at`.
+- [x] Keep `session_messages.updated_at` null for new imports.
+- [x] Set hidden import session `created_at`, `updated_at`, and `timezone`
       from the import time model.
-- [ ] Persist message mapping records for inserted messages.
-- [ ] Count deduped messages.
-- [ ] Persist aggregate batch status.
-- [ ] Avoid writing cognitive events, runtime traces, compressed messages, or
+- [x] Persist message mapping records for inserted messages.
+- [x] Count deduped messages.
+- [x] Persist aggregate batch status.
+- [x] Avoid writing cognitive events, runtime traces, compressed messages, or
       session time reminders.
 
 Acceptance criteria:
 
-- [ ] Real import writes batch, conversation, imported message, session message,
+- [x] Real import writes batch, conversation, imported message, session message,
       and counterpart binding records.
-- [ ] Re-importing the same payload creates a new batch with dedup counts and no
+- [x] Re-importing the same payload creates a new batch with dedup counts and no
       duplicate session messages.
-- [ ] Re-importing an existing conversation with new messages appends only new
+- [x] Re-importing an existing conversation with new messages appends only new
       messages.
-- [ ] Re-importing an existing conversation rejects new messages that are not
+- [x] Re-importing an existing conversation rejects new messages that are not
       strictly later than the already imported conversation history.
-- [ ] Imported sessions are detectable as hidden import sessions.
+- [x] Imported sessions are detectable as hidden import sessions.
 
 Verification:
 
-- [ ] Integration tests over a temporary SQLite database.
-- [ ] Existing cognition/store tests still pass for normal sessions.
+- [x] Integration tests over a temporary SQLite database.
+- [x] Existing cognition/store tests still pass for normal sessions.
 
 ### Phase 4: Daemon IPC Boundary
 
@@ -909,27 +910,27 @@ Verification:
 
 Tasks:
 
-- [ ] Add `conversation_import` request type.
-- [ ] Add `conversation_import_status` request type.
-- [ ] Extend daemon request validation for import payload fields.
-- [ ] Route import requests to the daemon-side service.
-- [ ] Add service-level import serialization or equivalent concurrency guard.
-- [ ] Ensure import requests do not use normal turn guard.
-- [ ] Return structured summaries and validation errors.
-- [ ] Keep daemon status/stop behavior unchanged.
+- [x] Add `conversation_import` request type.
+- [x] Add `conversation_import_status` request type.
+- [x] Extend daemon request validation for import payload fields.
+- [x] Route import requests to the daemon-side service.
+- [x] Add service-level import serialization or equivalent concurrency guard.
+- [x] Ensure import requests do not use normal turn guard.
+- [x] Return structured summaries and validation errors.
+- [x] Keep daemon status/stop behavior unchanged.
 
 Acceptance criteria:
 
-- [ ] IPC import dry-run returns summary without writes.
-- [ ] IPC import real run writes through the daemon-owned service.
-- [ ] IPC status returns aggregate status.
-- [ ] Unknown or malformed import requests return protocol errors.
-- [ ] Ordinary `ask` and `chat_turn` behavior remains unchanged.
+- [x] IPC import dry-run returns summary without writes.
+- [x] IPC import real run writes through the daemon-owned service.
+- [x] IPC status returns aggregate status.
+- [x] Unknown or malformed import requests return protocol errors.
+- [x] Ordinary `ask` and `chat_turn` behavior remains unchanged.
 
 Verification:
 
-- [ ] Daemon model/protocol tests.
-- [ ] Daemon runtime IPC tests.
+- [x] Daemon model/protocol tests.
+- [x] Daemon runtime IPC tests.
 
 ### Phase 5: CLI Commands
 
@@ -937,29 +938,29 @@ Verification:
 
 Tasks:
 
-- [ ] Add `alpha cognition import conversations <file>`.
-- [ ] Add `--dry-run`.
-- [ ] Add client-side file size check.
-- [ ] Send file content and `input_name` through IPC.
-- [ ] Render import summary.
-- [ ] Add `alpha cognition import status <batch_id>`.
-- [ ] Add `--verbose` for conversation-level status.
-- [ ] Ensure daemon unavailable errors tell the user to start daemon.
-- [ ] Do not add CLI direct DB write fallback.
-- [ ] Do not add CLI JSON output in first version.
+- [x] Add `alpha cognition import conversations <file>`.
+- [x] Add `--dry-run`.
+- [x] Add client-side file size check.
+- [x] Send file content and `input_name` through IPC.
+- [x] Render import summary.
+- [x] Add `alpha cognition import status <batch_id>`.
+- [x] Add `--verbose` for conversation-level status.
+- [x] Ensure daemon unavailable errors tell the user to start daemon.
+- [x] Do not add CLI direct DB write fallback.
+- [x] Do not add CLI JSON output in first version.
 
 Acceptance criteria:
 
-- [ ] CLI rejects files larger than 50 MB before sending an IPC request.
-- [ ] CLI dry-run displays validation/plan summary.
-- [ ] CLI real import displays batch id and counts.
-- [ ] CLI status displays aggregate extraction progress.
-- [ ] CLI verbose status displays conversation-level details.
-- [ ] CLI does not persist absolute input paths.
+- [x] CLI rejects files larger than 50 MB before sending an IPC request.
+- [x] CLI dry-run displays validation/plan summary.
+- [x] CLI real import displays batch id and counts.
+- [x] CLI status displays aggregate extraction progress.
+- [x] CLI verbose status displays conversation-level details.
+- [x] CLI does not persist absolute input paths.
 
 Verification:
 
-- [ ] CLI tests with daemon IPC mocked or test daemon.
+- [x] CLI tests with daemon IPC mocked or test daemon.
 - [ ] Manual smoke test with a small normalized JSON file.
 
 ### Phase 6: Chat Isolation
@@ -968,26 +969,28 @@ Verification:
 
 Tasks:
 
-- [ ] Update ordinary session listing/loading paths to exclude import sessions.
-- [ ] Reject `ask` or `chat` when the requested session id is an import session.
-- [ ] Add runtime-level guard in ordinary respond path.
-- [ ] Ensure gateway/API ordinary turn paths also reject import sessions if they
+- [x] Update ordinary session listing/loading paths to exclude import sessions.
+- [x] Reject `ask` or `chat` when the requested session id is an import session.
+- [x] Add runtime-level guard in ordinary respond path.
+- [x] Ensure gateway/API ordinary turn paths also reject import sessions if they
       reach the runtime.
-- [ ] Keep debug/import/status paths able to reference import sessions where
-      needed.
+- [x] Keep import/status paths able to reference import sessions where needed,
+      and reject debug prompt rendering for import sessions.
 
 Acceptance criteria:
 
-- [ ] Import sessions do not appear in ordinary chat history or session choices.
-- [ ] Direct `chat --session <import_session_id>` is rejected.
-- [ ] Direct daemon turn request with an import session id is rejected.
-- [ ] Cognition workers can still process import session messages.
+- [x] Import sessions do not appear in ordinary chat history or session choices.
+- [x] Direct `chat --session <import_session_id>` is rejected.
+- [x] Direct `debug prompt --session <import_session_id>` is rejected before
+      prompt rendering.
+- [x] Direct daemon turn request with an import session id is rejected.
+- [x] Cognition workers can still process import session messages.
 
 Verification:
 
-- [ ] CLI tests for hidden sessions.
-- [ ] Runtime tests for rejection.
-- [ ] Gateway/daemon tests where relevant.
+- [x] CLI tests for hidden sessions.
+- [x] Runtime tests for rejection.
+- [x] Gateway/daemon tests where relevant.
 
 ### Phase 7: Cognition Extraction Integration
 
@@ -996,46 +999,46 @@ Alpha runtime system prompt and without producing session-scoped memories.
 
 Tasks:
 
-- [ ] Make extraction candidate building detect import sessions through the
+- [x] Make extraction candidate building detect import sessions through the
       import mapping table.
-- [ ] For import sessions, build prompt prefix from imported source messages
+- [x] For import sessions, build prompt prefix from imported source messages
       only.
-- [ ] Preserve imported `system` messages in the source sequence.
-- [ ] Replay imported `system` messages as historical LLM `system` messages.
-- [ ] Do not prepend Alpha runtime system prompt for import sessions.
-- [ ] Do not include local summary snapshots or compressed handover context for
+- [x] Preserve imported `system` messages in the source sequence.
+- [x] Replay imported `system` messages as historical LLM `system` messages.
+- [x] Do not prepend Alpha runtime system prompt for import sessions.
+- [x] Do not include local summary snapshots or compressed handover context for
       import sessions.
-- [ ] Use an import-aware extraction instruction that excludes `SESSION` scope.
-- [ ] Build import-session allowed `about` refs without a session reference.
-- [ ] Instruct extraction that assistant output is evidence about the user only
+- [x] Use an import-aware extraction instruction that excludes `SESSION` scope.
+- [x] Build import-session allowed `about` refs without a session reference.
+- [x] Instruct extraction that assistant output is evidence about the user only
       when adopted, corrected, or otherwise made evidence by user messages.
-- [ ] Keep ordinary session extraction prefix and instruction unchanged.
-- [ ] Select imported-session extraction candidates in ascending earliest
+- [x] Keep ordinary session extraction prefix and instruction unchanged.
+- [x] Select imported-session extraction candidates in ascending earliest
       pending source message time order (oldest first).
-- [ ] Attach approximate `source_time` from the latest selected source message
+- [x] Attach approximate `source_time` from the latest selected source message
       time to extraction metadata and prompts.
 
 Acceptance criteria:
 
-- [ ] Ordinary session extraction still includes existing runtime prefix.
-- [ ] Import session extraction does not include Alpha runtime system prompt.
-- [ ] Import session extraction cannot emit `SESSION` scope memory.
-- [ ] Import session extraction does not convert standalone assistant output
+- [x] Ordinary session extraction still includes existing runtime prefix.
+- [x] Import session extraction does not include Alpha runtime system prompt.
+- [x] Import session extraction cannot emit `SESSION` scope memory.
+- [x] Import session extraction does not convert standalone assistant output
       into user self-description.
-- [ ] Imported sessions are extracted oldest-first by earliest pending source
+- [x] Imported sessions are extracted oldest-first by earliest pending source
       message time.
-- [ ] Imported `system/user/assistant/tool` messages are converted into LLM
+- [x] Imported `system/user/assistant/tool` messages are converted into LLM
       source messages as intended.
-- [ ] Import extraction source time is approximate, single-valued, and derived
+- [x] Import extraction source time is approximate, single-valued, and derived
       from selected source message timestamps.
-- [ ] Import extraction source refs still use existing background ledger source
+- [x] Import extraction source refs still use existing background ledger source
       tracking.
 
 Verification:
 
-- [ ] Memory extraction worker tests for ordinary and import session prompt,
+- [x] Memory extraction worker tests for ordinary and import session prompt,
       prefix, and allowed-scope behavior.
-- [ ] Status tests that aggregate extraction progress for imported messages.
+- [x] Status tests that aggregate extraction progress for imported messages.
 
 ### Phase 8: Documentation And Final Validation
 
@@ -1043,26 +1046,26 @@ Verification:
 
 Tasks:
 
-- [ ] Document normalized JSON contract.
-- [ ] Document CLI commands and daemon requirement.
-- [ ] Document first-version limitations.
-- [ ] Document that existing local databases may need rebuild because no
+- [x] Document normalized JSON contract.
+- [x] Document CLI commands and daemon requirement.
+- [x] Document first-version limitations.
+- [x] Document that existing local databases may need rebuild because no
       compatibility migration is provided.
-- [ ] Run lint, type check, and tests.
-- [ ] Run end-to-end smoke import through daemon IPC.
+- [x] Run lint, type check, and tests.
+- [x] Run end-to-end smoke import through daemon IPC.
 
 Acceptance criteria:
 
-- [ ] Documentation explains how to prepare an import file.
-- [ ] Documentation explains hidden session behavior.
-- [ ] Documentation explains status meaning.
-- [ ] Validation commands pass.
+- [x] Documentation explains how to prepare an import file.
+- [x] Documentation explains hidden session behavior.
+- [x] Documentation explains status meaning.
+- [x] Validation commands pass.
 
 Verification:
 
-- [ ] `uv run ruff check .`
-- [ ] `uv run mypy src tests`
-- [ ] `uv run pytest -q`
+- [x] `uv run ruff check .`
+- [x] `uv run mypy src tests`
+- [x] `uv run pytest -q`
 
 ## Rollout Guidance
 
@@ -1142,33 +1145,34 @@ project patterns and the architectural decisions above.
 
 ## First-Version Acceptance Checklist
 
-- [ ] Valid normalized JSON import succeeds through daemon IPC.
-- [ ] Dry-run validates and reports planned counts without writes.
-- [ ] Re-import creates a new batch and dedups existing messages.
-- [ ] Imported messages persist with original timestamps.
-- [ ] Imported message timestamps are timezone-aware and strictly increasing
+- [x] Valid normalized JSON import succeeds through daemon IPC.
+- [x] Dry-run validates and reports planned counts without writes.
+- [x] Re-import creates a new batch and dedups existing messages.
+- [x] Imported messages persist with original timestamps.
+- [x] Imported message timestamps are timezone-aware and strictly increasing
       within each conversation by UTC instant.
-- [ ] Existing conversation re-import rejects planned inserts that are not
+- [x] Existing conversation re-import rejects planned inserts that are not
       strictly later than existing imported history.
-- [ ] Hidden import session timezone is top-level `timezone` when provided, or
+- [x] Hidden import session timezone is top-level `timezone` when provided, or
       the fixed offset from the first message timestamp otherwise.
-- [ ] Imported `system` messages are persistable.
-- [ ] Existing Alpha runtime system prompt remains non-persistent.
-- [ ] Import does not generate session time reminders.
-- [ ] Imported conversations map to hidden internal sessions.
-- [ ] Hidden import sessions are invisible and not continuable in normal chat.
-- [ ] Imported sessions bind to main user counterpart.
-- [ ] Import does not write cognitive events.
-- [ ] Import does not write runtime traces.
-- [ ] Import does not generate compressed messages.
-- [ ] Import status reports aggregate import counts.
-- [ ] Import status reports extraction progress for imported session messages.
-- [ ] Import extraction does not prepend Alpha runtime system prompt.
-- [ ] Import extraction replays imported `system` messages as historical LLM
+- [x] Imported `system` messages are persistable.
+- [x] Existing Alpha runtime system prompt remains non-persistent.
+- [x] Import does not generate session time reminders.
+- [x] Imported conversations map to hidden internal sessions.
+- [x] Hidden import sessions are invisible and not continuable in normal chat.
+- [x] Hidden import sessions cannot be rendered through `debug prompt`.
+- [x] Imported sessions bind to main user counterpart.
+- [x] Import does not write cognitive events.
+- [x] Import does not write runtime traces.
+- [x] Import does not generate compressed messages.
+- [x] Import status reports aggregate import counts.
+- [x] Import status reports extraction progress for imported session messages.
+- [x] Import extraction does not prepend Alpha runtime system prompt.
+- [x] Import extraction replays imported `system` messages as historical LLM
       `system` messages.
-- [ ] Import extraction exposes approximate source time derived from selected
+- [x] Import extraction exposes approximate source time derived from selected
       source messages.
-- [ ] Import extraction does not produce `SESSION` scope memories.
-- [ ] Import extraction does not treat standalone assistant output as user
+- [x] Import extraction does not produce `SESSION` scope memories.
+- [x] Import extraction does not treat standalone assistant output as user
       self-description.
-- [ ] First-version limitations are documented.
+- [x] First-version limitations are documented.

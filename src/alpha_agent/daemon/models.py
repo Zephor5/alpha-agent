@@ -5,9 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
-RequestType = Literal["ask", "chat_turn", "status", "stop"]
+RequestType = Literal[
+    "ask",
+    "chat_turn",
+    "status",
+    "stop",
+    "conversation_import",
+    "conversation_import_status",
+]
 StopPolicyValue = Literal["graceful", "immediate"]
 STOP_POLICIES: frozenset[str] = frozenset(("graceful", "immediate"))
+REQUEST_TYPES: frozenset[str] = frozenset(
+    (
+        "ask",
+        "chat_turn",
+        "status",
+        "stop",
+        "conversation_import",
+        "conversation_import_status",
+    )
+)
 
 
 class DaemonProtocolError(ValueError):
@@ -28,6 +45,11 @@ class DaemonRequest:
     session_id: str | None = None
     source_metadata: dict[str, Any] | None = None
     stop_policy: StopPolicyValue = "graceful"
+    input_name: str | None = None
+    payload_json: str | None = None
+    dry_run: bool = False
+    batch_id: str | None = None
+    verbose: bool = False
 
 
 def parse_request(payload: Any) -> DaemonRequest:
@@ -38,7 +60,7 @@ def parse_request(payload: Any) -> DaemonRequest:
     request_type = payload.get("type")
     if not isinstance(request_type, str):
         raise DaemonProtocolError("INVALID_REQUEST", "Request type is required.")
-    if request_type not in {"ask", "chat_turn", "status", "stop"}:
+    if request_type not in REQUEST_TYPES:
         raise DaemonProtocolError(
             "UNKNOWN_REQUEST_TYPE",
             f"Unknown daemon request type: {request_type}",
@@ -75,12 +97,48 @@ def parse_request(payload: Any) -> DaemonRequest:
             "policy is only supported for stop requests.",
         )
 
+    input_name = payload.get("input_name")
+    if request_type == "conversation_import":
+        if input_name is not None and not isinstance(input_name, str):
+            raise DaemonProtocolError(
+                "INVALID_REQUEST",
+                "input_name must be a string or null.",
+            )
+        payload_json = payload.get("payload_json")
+        if not isinstance(payload_json, str):
+            raise DaemonProtocolError("INVALID_REQUEST", "payload_json must be a string.")
+        dry_run = payload.get("dry_run", False)
+        if not isinstance(dry_run, bool):
+            raise DaemonProtocolError("INVALID_REQUEST", "dry_run must be a boolean.")
+    else:
+        payload_json = None
+        dry_run = False
+
+    batch_id = payload.get("batch_id")
+    verbose = payload.get("verbose", False)
+    if request_type == "conversation_import_status":
+        if not isinstance(batch_id, str) or not batch_id.strip():
+            raise DaemonProtocolError(
+                "INVALID_REQUEST",
+                "batch_id must be a non-empty string.",
+            )
+        if not isinstance(verbose, bool):
+            raise DaemonProtocolError("INVALID_REQUEST", "verbose must be a boolean.")
+    else:
+        batch_id = None
+        verbose = False
+
     return DaemonRequest(
         type=cast(RequestType, request_type),
         message=message,
         session_id=session_id,
         source_metadata=dict(source_metadata) if source_metadata is not None else None,
         stop_policy=cast(StopPolicyValue, stop_policy),
+        input_name=input_name if isinstance(input_name, str) else None,
+        payload_json=payload_json,
+        dry_run=dry_run,
+        batch_id=batch_id.strip() if isinstance(batch_id, str) else None,
+        verbose=verbose,
     )
 
 
@@ -90,7 +148,15 @@ def ok_response(**fields: Any) -> dict[str, Any]:
     return {"ok": True, **fields}
 
 
-def error_response(code: str, message: str) -> dict[str, Any]:
+def error_response(
+    code: str,
+    message: str,
+    *,
+    details: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Build a stable daemon IPC error response."""
 
-    return {"ok": False, "error": {"code": code, "message": message}}
+    error: dict[str, Any] = {"code": code, "message": message}
+    if details is not None:
+        error["details"] = details
+    return {"ok": False, "error": error}

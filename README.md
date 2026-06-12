@@ -101,6 +101,11 @@ uv run alpha config get llm.provider
 uv run alpha skills list
 uv run alpha debug prompt "summarize this session" --session <id> --trace
 uv run alpha cognition consolidate --now --dry-run
+
+# Import normalized external conversation history for background cognition
+uv run alpha cognition import conversations path/to/conversations.json --dry-run
+uv run alpha cognition import conversations path/to/conversations.json
+uv run alpha cognition import status <batch-id> --verbose
 ```
 
 Run `uv run alpha --help` (or `--help` on any subcommand) for the full list.
@@ -189,6 +194,138 @@ mode. Tool specs do not use a `group` field.
 - **Pluggable providers.** `mock`, `openai-compatible`, `deepseek`, `mimo`, and
   `codex` share one interface; the rest of the runtime doesn't care which you
   use.
+
+## External conversation import
+
+Alpha can import a first-version normalized JSON conversation file through the
+daemon. Import commands require a running daemon and never write directly to the
+local database:
+
+```bash
+uv run alpha daemon start
+uv run alpha cognition import conversations path/to/conversations.json --dry-run
+uv run alpha cognition import conversations path/to/conversations.json
+uv run alpha cognition import status <batch-id>
+uv run alpha cognition import status <batch-id> --verbose
+```
+
+The CLI checks the 50 MB UTF-8 JSON payload limit before IPC, sends only the file
+content and basename to the daemon, and has no direct-write fallback when the
+daemon is down. The daemon also rejects payloads over 50 MB.
+
+The normalized file is a JSON object:
+
+```json
+{
+  "source_provider": "chatgpt",
+  "timezone": "Asia/Shanghai",
+  "metadata": {"export": "normalized"},
+  "conversations": [
+    {
+      "external_conversation_id": "conv_1",
+      "title": "Design discussion",
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:04:00+08:00",
+      "metadata": {"topic": "design"},
+      "messages": [
+        {
+          "external_message_id": "msg_1",
+          "role": "user",
+          "content": "I prefer direct feedback.",
+          "created_at": "2026-01-01T10:01:00+08:00"
+        },
+        {
+          "external_message_id": "msg_2",
+          "role": "assistant",
+          "content": "Understood.",
+          "created_at": "2026-01-01T10:02:00+08:00"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Top-level fields:
+
+- Required: `source_provider` as a non-empty string, and `conversations` as a
+  non-empty array.
+- Optional: `timezone` as an IANA timezone such as `Asia/Shanghai` or a fixed
+  offset such as `+08:00`; `metadata` as an object.
+- Unknown top-level fields are rejected.
+
+Conversation fields:
+
+- Required: `external_conversation_id` as a non-empty string unique within the
+  file, and `messages` as a non-empty array.
+- Optional: `title` string, `created_at` and `updated_at` ISO-8601 datetimes
+  with an explicit offset or `Z`, and `metadata` object.
+- Unknown conversation fields are rejected. The tuple
+  `source_provider + external_conversation_id` maps to one hidden internal
+  session. Re-imports deduplicate existing `external_message_id` values and only
+  append new messages that are strictly later than the latest imported message.
+
+Message fields:
+
+- Required: `external_message_id` as a non-empty string unique within its
+  conversation, `role` as one of `system`, `user`, `assistant`, or `tool`, and
+  `created_at` as an ISO-8601 datetime with an explicit offset or `Z`.
+- `content` must be a string and non-empty for `system`, `user`, `tool`, and
+  assistant messages without tool calls. Assistant messages with `tool_calls`
+  may omit `content` or provide a string.
+- Optional: `metadata` object; assistant `tool_calls`; tool `tool_call_id`.
+  Tool calls must use `{ "id": "...", "type": "function", "function": { "name":
+  "...", "arguments": "{}" } }`, where `arguments` is a JSON string. A `tool`
+  message must include `tool_call_id` and match a preceding assistant tool call.
+- First-version imports reject reasoning, attachment, file, image, audio, video,
+  multimodal, and `parts` fields. Imported tool calls and results are historical
+  text/context only; Alpha does not execute imported tools.
+
+Timestamp and timezone rules:
+
+- Every message `created_at` is required, timezone-aware, and compared by parsed
+  UTC instant, not by raw string.
+- Message timestamps must be strictly increasing within each new conversation.
+  For re-imports, already imported message ids are deduplicated before ordering
+  checks, and newly appended messages must be strictly increasing and later than
+  the existing imported history.
+- Message times are stored as the same instant normalized to UTC. Conversation
+  `created_at` and `updated_at` are metadata/status fields, not source ordering
+  fields.
+- The hidden session timezone uses top-level `timezone` when present; otherwise
+  it uses the fixed offset from the first message timestamp.
+
+Imported conversations become hidden, non-continuable source sessions for
+background cognition. `ask`, `chat`, daemon turns, gateway turns, and
+`debug prompt --session <import_session_id>` reject those session ids. Default
+`import status` output does not show hidden session ids; `--verbose` can show
+them for troubleshooting.
+
+Import summary `background_cognition=eligible` means inserted source messages
+can be picked up by background cognition after import. It does not mean
+extraction, consolidation, or profile summaries have completed. `import status`
+reports batch write counts and extraction progress over inserted imported
+messages: `extraction_pending`, `extraction_claimed`,
+`extraction_processed`, `extraction_failed`, and `extraction_skipped`.
+
+First-version limitations:
+
+- The input must already be normalized; there are no platform-specific export
+  converters.
+- Imports are whole-batch: one invalid conversation or message rejects the full
+  payload.
+- Status covers import completion and extraction source progress only, not
+  consolidation or summary quality.
+- There is no raw imported-message search/list/show command and no CLI JSON
+  output mode yet.
+- All imported user messages are treated as the owner of this Alpha instance.
+  Assistant text is evidence about the user only when surrounding user messages
+  adopt, correct, or otherwise make it evidence.
+
+Existing local databases created before this schema may need to be rebuilt.
+There is no compatibility migration for the first-version import tables or role
+constraints. Archive or remove the configured state database, run
+`uv run alpha init`, and re-import any external files you still need.
 
 ## Configuration
 

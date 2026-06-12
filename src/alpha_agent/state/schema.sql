@@ -12,13 +12,14 @@ CREATE TABLE IF NOT EXISTS session_messages (
     kind TEXT NOT NULL CHECK (
         kind IN (
             'system_reminder',
+            'system_message',
             'user_message',
             'assistant_message',
             'tool_message',
             'compressed_message'
         )
     ),
-    llm_role TEXT CHECK (llm_role IN ('user', 'assistant', 'tool')),
+    llm_role TEXT CHECK (llm_role IN ('system', 'user', 'assistant', 'tool')),
     raw_content TEXT NOT NULL,
     model_content TEXT,
     reasoning_content TEXT,
@@ -95,6 +96,74 @@ CREATE TABLE IF NOT EXISTS session_counterparts (
 
 CREATE INDEX IF NOT EXISTS idx_session_counterparts_counterpart
     ON session_counterparts(counterpart_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS import_batches (
+    id TEXT PRIMARY KEY,
+    source_provider TEXT NOT NULL,
+    input_name TEXT,
+    payload_digest TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+    conversations_seen INTEGER NOT NULL DEFAULT 0,
+    messages_seen INTEGER NOT NULL DEFAULT 0,
+    conversations_created INTEGER NOT NULL DEFAULT 0,
+    conversations_reused INTEGER NOT NULL DEFAULT 0,
+    messages_inserted INTEGER NOT NULL DEFAULT 0,
+    messages_deduped INTEGER NOT NULL DEFAULT 0,
+    error_summary TEXT,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_batches_provider_created
+    ON import_batches(source_provider, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_import_batches_status_created
+    ON import_batches(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS imported_conversations (
+    id TEXT PRIMARY KEY,
+    source_provider TEXT NOT NULL,
+    external_conversation_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    title TEXT,
+    external_created_at TEXT,
+    external_updated_at TEXT,
+    first_import_batch_id TEXT NOT NULL,
+    latest_import_batch_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_provider, external_conversation_id),
+    UNIQUE(session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_imported_conversations_session
+    ON imported_conversations(session_id);
+CREATE INDEX IF NOT EXISTS idx_imported_conversations_latest_batch
+    ON imported_conversations(latest_import_batch_id);
+
+CREATE TABLE IF NOT EXISTS imported_messages (
+    id TEXT PRIMARY KEY,
+    source_provider TEXT NOT NULL,
+    external_conversation_id TEXT NOT NULL,
+    external_message_id TEXT NOT NULL,
+    imported_conversation_id TEXT NOT NULL,
+    session_message_id TEXT NOT NULL,
+    import_batch_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
+    external_created_at TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    UNIQUE(source_provider, external_conversation_id, external_message_id),
+    UNIQUE(session_message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_imported_messages_conversation_created
+    ON imported_messages(source_provider, external_conversation_id, external_created_at);
+CREATE INDEX IF NOT EXISTS idx_imported_messages_batch
+    ON imported_messages(import_batch_id);
+CREATE INDEX IF NOT EXISTS idx_imported_messages_session_message
+    ON imported_messages(session_message_id);
 
 CREATE TABLE IF NOT EXISTS session_summary_snapshots (
     session_id TEXT NOT NULL,

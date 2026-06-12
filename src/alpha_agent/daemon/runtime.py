@@ -6,7 +6,7 @@ import signal
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 from types import FrameType
 from typing import Any
 
@@ -17,7 +17,13 @@ from alpha_agent.cognition.loops import (
     RealtimeFeedbackAttributionService,
 )
 from alpha_agent.cognition.models.subject import SUBJECT_SELF
+from alpha_agent.cognition.processing_ledger import BackgroundSourceRef, BackgroundStage
+from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import AlphaConfig
+from alpha_agent.daemon.conversation_import import (
+    ConversationImportService,
+    ConversationImportValidationFailed,
+)
 from alpha_agent.daemon.manager import (
     AgentFactory,
     AgentManager,
@@ -52,14 +58,26 @@ from alpha_agent.gateway.config import (
     ensure_gateway_runtime_files,
     gateway_runtime_config,
 )
+from alpha_agent.gateway.logging import append_gateway_log
 from alpha_agent.gateway.runner import ActiveTurnGuard, GatewayRuntimeBridge
 from alpha_agent.gateway.session import GatewayDeduplicator, GatewaySessionStore, SessionMode
 from alpha_agent.llm.tracing import LLMTraceLogger
 from alpha_agent.runtime.session import new_session_id
+from alpha_agent.state.models import ImportBatchRecord, ImportStatusSummary
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.default import build_tool_registry
 
 LOCAL_BUSY_MESSAGE = "This session already has an active Alpha turn."
+IMPORT_SESSION_CHAT_MESSAGE = (
+    "Import sessions are hidden source material and cannot be continued with ordinary chat."
+)
+_IMPORT_EXTRACTION_STATUS_KEYS = (
+    "extraction_pending",
+    "extraction_claimed",
+    "extraction_processed",
+    "extraction_failed",
+    "extraction_skipped",
+)
 
 
 class StopPolicy(StrEnum):
@@ -88,6 +106,8 @@ class AlphaDaemon:
         self.config = config
         self.runtime = runtime or daemon_runtime_config(config)
         self.store = store or initialize_store(config)
+        self.conversation_import_service = ConversationImportService(self.store)
+        self._conversation_import_lock = Lock()
         self.loop_coordinator = LoopCoordinator(SUBJECT_SELF)
         background_provider = build_provider(config)
         background_tools = build_tool_registry(config).to_llm_tool_definitions()
@@ -145,6 +165,10 @@ class AlphaDaemon:
         if request.type == "stop":
             self.stop(StopPolicy(request.stop_policy))
             return ok_response(status=self.status().to_json())
+        if request.type == "conversation_import":
+            return self._handle_conversation_import(request)
+        if request.type == "conversation_import_status":
+            return self._handle_conversation_import_status(request)
         if request.type in {"ask", "chat_turn"}:
             return self._handle_turn(request)
         return error_response("UNKNOWN_REQUEST_TYPE", f"Unknown request type: {request.type}")
@@ -304,6 +328,8 @@ class AlphaDaemon:
     def _handle_turn(self, request: DaemonRequest) -> dict[str, Any]:
         session_id = request.session_id or new_session_id()
         message = request.message or ""
+        if self.store.is_import_session(session_id):
+            return error_response("IMPORT_SESSION_NOT_CHAT", IMPORT_SESSION_CHAT_MESSAGE)
         turn = self.turn_guard.begin(session_id, message)
         if not turn.accepted:
             return error_response("ACTIVE_TURN_IN_PROGRESS", LOCAL_BUSY_MESSAGE)
@@ -325,6 +351,95 @@ class AlphaDaemon:
         if request.source_metadata:
             metadata["client"] = dict(request.source_metadata)
         return metadata
+
+    def _handle_conversation_import(self, request: DaemonRequest) -> dict[str, Any]:
+        payload_json = request.payload_json
+        if payload_json is None:
+            return error_response("INVALID_REQUEST", "payload_json must be a string.")
+        try:
+            with self._conversation_import_lock:
+                summary = self.conversation_import_service.import_payload(
+                    payload_json,
+                    input_name=request.input_name,
+                    dry_run=request.dry_run,
+                )
+        except ConversationImportValidationFailed as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                str(exc),
+                details=[error.to_dict() for error in exc.errors],
+            )
+        return ok_response(summary=summary.to_dict())
+
+    def _handle_conversation_import_status(self, request: DaemonRequest) -> dict[str, Any]:
+        batch_id = request.batch_id
+        if batch_id is None:
+            return error_response("INVALID_REQUEST", "batch_id must be a non-empty string.")
+        summary = self.store.get_import_status_summary(batch_id)
+        if summary is None:
+            return error_response(
+                "IMPORT_BATCH_NOT_FOUND",
+                f"Import batch not found: {batch_id}",
+            )
+        response = ok_response(status=_import_status_summary_dict(summary))
+        if request.verbose:
+            response["conversations"] = self._import_status_conversation_details(batch_id)
+        return response
+
+    def _import_status_conversation_details(self, batch_id: str) -> list[dict[str, Any]]:
+        batch = self.store.get_import_batch(batch_id)
+        metadata_items = _import_status_conversation_metadata(batch)
+        details: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+
+        for item in metadata_items:
+            external_id = str(item.get("external_conversation_id") or "")
+            if not external_id:
+                continue
+            details[external_id] = {
+                "external_conversation_id": external_id,
+                "title": item.get("title") if isinstance(item.get("title"), str) else None,
+                "session_id": None,
+                "messages_inserted": _int_value(item.get("messages_inserted")),
+                "messages_deduped": _int_value(item.get("messages_deduped")),
+                "session_reused": bool(item.get("session_reused", False)),
+                **_empty_import_extraction_counts(),
+            }
+            order.append(external_id)
+
+        state_service = CognitionStateStore(self.store)
+        for message in self.store.list_imported_messages(import_batch_id=batch_id):
+            external_id = message.external_conversation_id
+            conversation = self.store.get_imported_conversation(
+                message.source_provider,
+                external_id,
+            )
+            if external_id not in details:
+                details[external_id] = {
+                    "external_conversation_id": external_id,
+                    "title": conversation.title if conversation is not None else None,
+                    "session_id": (
+                        conversation.session_id if conversation is not None else None
+                    ),
+                    "messages_inserted": 0,
+                    "messages_deduped": 0,
+                    "session_reused": False,
+                    **_empty_import_extraction_counts(),
+                }
+                order.append(external_id)
+            if conversation is not None:
+                details[external_id]["title"] = conversation.title
+                details[external_id]["session_id"] = conversation.session_id
+                status = _imported_message_extraction_status(
+                    state_service,
+                    session_id=conversation.session_id,
+                    session_message_id=message.session_message_id,
+                )
+            else:
+                status = "pending"
+            details[external_id][f"extraction_{status}"] += 1
+
+        return [details[external_id] for external_id in order]
 
     def _assert_single_owner(self) -> None:
         existing = read_daemon_status(self.runtime.status_path)
@@ -373,6 +488,82 @@ class AlphaDaemon:
         for adapter in adapters:
             try:
                 adapter.disconnect()
-            except Exception:
+            except Exception as exc:
                 if not error_log_path.parent.exists():
                     error_log_path.parent.mkdir(parents=True, exist_ok=True)
+                append_gateway_log(
+                    error_log_path,
+                    event="gateway.adapter.disconnect_failed",
+                    message="Gateway adapter disconnect failed.",
+                    level="error",
+                    metadata={
+                        "adapter": adapter_name(adapter),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+
+
+def _import_status_summary_dict(summary: ImportStatusSummary) -> dict[str, Any]:
+    return {
+        "batch_id": summary.batch_id,
+        "source_provider": summary.source_provider,
+        "status": summary.status,
+        "conversations_seen": summary.conversations_seen,
+        "messages_seen": summary.messages_seen,
+        "conversations_created": summary.conversations_created,
+        "conversations_reused": summary.conversations_reused,
+        "messages_inserted": summary.messages_inserted,
+        "messages_deduped": summary.messages_deduped,
+        "extraction_pending": summary.extraction_pending,
+        "extraction_claimed": summary.extraction_claimed,
+        "extraction_processed": summary.extraction_processed,
+        "extraction_failed": summary.extraction_failed,
+        "extraction_skipped": summary.extraction_skipped,
+        "created_at": summary.created_at,
+        "updated_at": summary.updated_at,
+        "error_summary": summary.error_summary,
+    }
+
+
+def _import_status_conversation_metadata(
+    batch: ImportBatchRecord | None,
+) -> list[dict[str, Any]]:
+    if batch is None:
+        return []
+    conversations = batch.metadata.get("conversations")
+    if not isinstance(conversations, list):
+        return []
+    return [dict(item) for item in conversations if isinstance(item, dict)]
+
+
+def _empty_import_extraction_counts() -> dict[str, int]:
+    return {key: 0 for key in _IMPORT_EXTRACTION_STATUS_KEYS}
+
+
+def _imported_message_extraction_status(
+    state_service: CognitionStateStore,
+    *,
+    session_id: str,
+    session_message_id: str,
+) -> str:
+    try:
+        progress = state_service.ledger.get_source_progress(
+            BackgroundSourceRef("session_message", session_message_id),
+            stage=BackgroundStage.EXTRACTION,
+            target_unit=f"session:{session_id}",
+        )
+    except KeyError:
+        return "pending"
+    status = str(progress.status)
+    if status not in {"pending", "claimed", "processed", "failed", "skipped"}:
+        return "pending"
+    return status
+
+
+def _int_value(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    return 0

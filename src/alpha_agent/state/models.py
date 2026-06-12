@@ -7,12 +7,13 @@ from typing import Any, Literal
 
 SessionMessageKind = Literal[
     "system_reminder",
+    "system_message",
     "user_message",
     "assistant_message",
     "tool_message",
     "compressed_message",
 ]
-LLMRole = Literal["user", "assistant", "tool"]
+LLMRole = Literal["system", "user", "assistant", "tool"]
 
 
 @dataclass(frozen=True)
@@ -81,4 +82,84 @@ class RuntimeTrace:
     event_type: str
     content: str
     timestamp: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ImportBatchRecord:
+    """Durable summary for one external conversation import attempt."""
+
+    id: str
+    source_provider: str
+    input_name: str | None
+    payload_digest: str
+    status: str
+    conversations_seen: int
+    messages_seen: int
+    conversations_created: int
+    conversations_reused: int
+    messages_inserted: int
+    messages_deduped: int
+    created_at: str
+    updated_at: str
+    error_summary: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ImportedConversationRecord:
+    """Mapping from one external conversation to one hidden Alpha session."""
+
+    id: str
+    source_provider: str
+    external_conversation_id: str
+    session_id: str
+    title: str | None
+    external_created_at: str | None
+    external_updated_at: str | None
+    first_import_batch_id: str
+    latest_import_batch_id: str
+    created_at: str
+    updated_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ImportedMessageRecord:
+    """Mapping from one external message identity to one session message."""
+
+    id: str
+    source_provider: str
+    external_conversation_id: str
+    external_message_id: str
+    imported_conversation_id: str
+    session_message_id: str
+    import_batch_id: str
+    role: str
+    external_created_at: str
+    imported_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ImportStatusSummary:
+    """Aggregate import and extraction progress for one batch."""
+
+    batch_id: str
+    source_provider: str
+    status: str
+    conversations_seen: int
+    messages_seen: int
+    conversations_created: int
+    conversations_reused: int
+    messages_inserted: int
+    messages_deduped: int
+    extraction_pending: int
+    extraction_claimed: int
+    extraction_processed: int
+    extraction_failed: int
+    extraction_skipped: int
+    created_at: str
+    updated_at: str
+    error_summary: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

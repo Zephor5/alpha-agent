@@ -48,6 +48,7 @@ from alpha_agent.config import (
     write_default_config,
 )
 from alpha_agent.daemon.client import DaemonClient
+from alpha_agent.daemon.conversation_import import MAX_CONVERSATION_IMPORT_PAYLOAD_BYTES
 from alpha_agent.daemon.manager import build_provider, initialize_store
 from alpha_agent.daemon.runtime import AlphaDaemon, DaemonAlreadyRunningError
 from alpha_agent.daemon.status import (
@@ -91,6 +92,7 @@ gateway_app = typer.Typer(help="Gateway operational commands.")
 config_app = typer.Typer(help="Configuration commands.")
 daemon_app = typer.Typer(help="Daemon runtime commands.")
 cognition_app = typer.Typer(help="Cognition inspection commands.")
+cognition_import_app = typer.Typer(help="External conversation import commands.")
 goals_app = typer.Typer(help="Drive Loop goal commands.")
 app.add_typer(skills_app, name="skills")
 app.add_typer(debug_app, name="debug")
@@ -98,6 +100,7 @@ app.add_typer(gateway_app, name="gateway")
 app.add_typer(config_app, name="config")
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(cognition_app, name="cognition")
+cognition_app.add_typer(cognition_import_app, name="import")
 cognition_app.add_typer(goals_app, name="goals")
 
 DAEMON_START_TIMEOUT_SECONDS = 5.0
@@ -559,9 +562,35 @@ def _client_response_or_exit(response: dict[str, Any]) -> dict[str, Any]:
         if error.get("code") == "DAEMON_NOT_RUNNING":
             message = _daemon_not_running_message()
         console.print(message)
+        _render_error_details(error)
     else:
         console.print("Daemon request failed.")
     raise typer.Exit(1)
+
+
+def _render_error_details(error: dict[str, Any]) -> None:
+    details = error.get("details")
+    if not isinstance(details, list) or not details:
+        return
+    table = Table(title="Validation Details", box=box.SIMPLE_HEAVY)
+    table.add_column("Path")
+    table.add_column("Code")
+    table.add_column("Message")
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        table.add_row(
+            str(item.get("path") or "-"),
+            str(item.get("code") or "-"),
+            str(item.get("message") or ""),
+        )
+        typer.echo(
+            "validation_error "
+            f"path={item.get('path') or '-'} "
+            f"code={item.get('code') or '-'} "
+            f"message={item.get('message') or ''}"
+        )
+    console.print(table)
 
 
 def _source_metadata(command: str) -> dict[str, str]:
@@ -920,6 +949,9 @@ def chat(
     client = DaemonClient(runtime.socket_path)
     store = _store(config)
     session_id = session or new_session_id()
+    if session is not None and store.is_import_session(session_id):
+        console.print("Import sessions are hidden source material and cannot be opened in chat.")
+        raise typer.Exit(1)
     _render_chat_header(session_id)
     if session is not None:
         _render_chat_history_preview(store, session_id)
@@ -1011,6 +1043,11 @@ def prompt(
     config = load_config()
     store = _store(config)
     session_id = session or new_session_id()
+    if session is not None and store.is_import_session(session_id):
+        console.print(
+            "Import sessions are hidden source material and cannot be rendered with debug prompt."
+        )
+        raise typer.Exit(1)
     context = SessionContextAssembler(store).load(session_id)
     session_history = (
         context.chat_messages
@@ -1209,6 +1246,227 @@ def _linked_cognitive_event_ids(
 def _event_belongs_to_session(event: CognitiveEvent, session_id: str) -> bool:
     raw_session_id = event.payload.get("session_id")
     return isinstance(raw_session_id, str) and raw_session_id == session_id
+
+
+@cognition_import_app.command("conversations")
+def cognition_import_conversations(
+    file: Annotated[
+        Path,
+        typer.Argument(
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Normalized conversation import JSON file.",
+        ),
+    ],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Validate and report planned counts without writes."),
+    ] = False,
+) -> None:
+    """Import normalized external conversation JSON through the daemon."""
+
+    payload_json = _read_conversation_import_file(file)
+    config = load_config()
+    runtime = daemon_runtime_config(config)
+    response = _client_response_or_exit(
+        DaemonClient(runtime.socket_path).request(
+            {
+                "type": "conversation_import",
+                "input_name": file.name,
+                "payload_json": payload_json,
+                "dry_run": dry_run,
+            }
+        )
+    )
+    summary = response.get("summary")
+    if not isinstance(summary, dict):
+        console.print("Daemon response did not include an import summary.")
+        raise typer.Exit(1)
+    _render_conversation_import_summary(summary)
+
+
+@cognition_import_app.command("status")
+def cognition_import_status(
+    batch_id: Annotated[str, typer.Argument(help="Import batch id.")],
+    verbose: Annotated[
+        bool,
+        typer.Option("--verbose", help="Show conversation-level import status."),
+    ] = False,
+) -> None:
+    """Show daemon-owned conversation import and extraction status."""
+
+    config = load_config()
+    runtime = daemon_runtime_config(config)
+    response = _client_response_or_exit(
+        DaemonClient(runtime.socket_path).request(
+            {
+                "type": "conversation_import_status",
+                "batch_id": batch_id,
+                "verbose": verbose,
+            }
+        )
+    )
+    status = response.get("status")
+    if not isinstance(status, dict):
+        console.print("Daemon response did not include import status.")
+        raise typer.Exit(1)
+    _render_conversation_import_status(status)
+    if verbose:
+        conversations = response.get("conversations")
+        _render_conversation_import_status_details(
+            conversations if isinstance(conversations, list) else []
+        )
+
+
+def _read_conversation_import_file(file: Path) -> str:
+    try:
+        size = file.stat().st_size
+    except OSError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if size > MAX_CONVERSATION_IMPORT_PAYLOAD_BYTES:
+        console.print("Conversation import file exceeds the 50 MB conversation import limit.")
+        raise typer.Exit(1)
+    try:
+        return file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise typer.BadParameter("Import file must be UTF-8 encoded JSON.") from exc
+    except OSError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _render_conversation_import_summary(summary: dict[str, Any]) -> None:
+    table = Table(title="Conversation Import")
+    table.add_column("Field")
+    table.add_column("Value")
+    rows = {
+        "batch_id": _display_optional(summary.get("batch_id")),
+        "source_provider": str(summary.get("source_provider") or ""),
+        "dry_run": _display_bool(summary.get("dry_run")),
+        "status": str(summary.get("status") or ""),
+        "input_name": _display_optional(summary.get("input_name")),
+        "conversations_seen": _display_count(summary.get("conversations_seen")),
+        "messages_seen": _display_count(summary.get("messages_seen")),
+        "conversations_created": _display_count(summary.get("conversations_created")),
+        "conversations_reused": _display_count(summary.get("conversations_reused")),
+        "messages_inserted": _display_count(summary.get("messages_inserted")),
+        "messages_deduped": _display_count(summary.get("messages_deduped")),
+        "background_cognition": "eligible",
+    }
+    for key, value in rows.items():
+        table.add_row(key, value)
+    console.print(table)
+    typer.echo(
+        "import "
+        f"batch_id={rows['batch_id']} "
+        f"source_provider={rows['source_provider']} "
+        f"dry_run={rows['dry_run']} "
+        f"status={rows['status']} "
+        f"conversations_seen={rows['conversations_seen']} "
+        f"messages_seen={rows['messages_seen']} "
+        f"conversations_created={rows['conversations_created']} "
+        f"conversations_reused={rows['conversations_reused']} "
+        f"messages_inserted={rows['messages_inserted']} "
+        f"messages_deduped={rows['messages_deduped']} "
+        f"background_cognition={rows['background_cognition']}"
+    )
+
+
+def _render_conversation_import_status(status: dict[str, Any]) -> None:
+    table = Table(title="Conversation Import Status")
+    table.add_column("Field")
+    table.add_column("Value")
+    rows = {
+        "batch_id": str(status.get("batch_id") or ""),
+        "source_provider": str(status.get("source_provider") or ""),
+        "status": str(status.get("status") or ""),
+        "conversations_seen": _display_count(status.get("conversations_seen")),
+        "messages_seen": _display_count(status.get("messages_seen")),
+        "conversations_created": _display_count(status.get("conversations_created")),
+        "conversations_reused": _display_count(status.get("conversations_reused")),
+        "messages_inserted": _display_count(status.get("messages_inserted")),
+        "messages_deduped": _display_count(status.get("messages_deduped")),
+        "extraction_pending": _display_count(status.get("extraction_pending")),
+        "extraction_claimed": _display_count(status.get("extraction_claimed")),
+        "extraction_processed": _display_count(status.get("extraction_processed")),
+        "extraction_failed": _display_count(status.get("extraction_failed")),
+        "extraction_skipped": _display_count(status.get("extraction_skipped")),
+        "created_at": str(status.get("created_at") or ""),
+        "updated_at": str(status.get("updated_at") or ""),
+    }
+    error_summary = status.get("error_summary")
+    if error_summary:
+        rows["error_summary"] = str(error_summary)
+    for key, value in rows.items():
+        table.add_row(key, value)
+    console.print(table)
+    typer.echo(
+        "import_status "
+        f"batch_id={rows['batch_id']} "
+        f"source_provider={rows['source_provider']} "
+        f"status={rows['status']} "
+        f"messages_inserted={rows['messages_inserted']} "
+        f"messages_deduped={rows['messages_deduped']} "
+        f"extraction_pending={rows['extraction_pending']} "
+        f"extraction_claimed={rows['extraction_claimed']} "
+        f"extraction_processed={rows['extraction_processed']} "
+        f"extraction_failed={rows['extraction_failed']} "
+        f"extraction_skipped={rows['extraction_skipped']}"
+    )
+
+
+def _render_conversation_import_status_details(conversations: list[object]) -> None:
+    table = Table(title="Conversation Import Details")
+    table.add_column("External ID")
+    table.add_column("Title")
+    table.add_column("Session ID")
+    table.add_column("Inserted", justify="right")
+    table.add_column("Deduped", justify="right")
+    table.add_column("Pending", justify="right")
+    table.add_column("Processed", justify="right")
+    table.add_column("Failed", justify="right")
+    for item in conversations:
+        if not isinstance(item, dict):
+            continue
+        table.add_row(
+            str(item.get("external_conversation_id") or ""),
+            str(item.get("title") or ""),
+            str(item.get("session_id") or ""),
+            _display_count(item.get("messages_inserted")),
+            _display_count(item.get("messages_deduped")),
+            _display_count(item.get("extraction_pending")),
+            _display_count(item.get("extraction_processed")),
+            _display_count(item.get("extraction_failed")),
+        )
+        typer.echo(
+            "import_conversation "
+            f"external_conversation_id={item.get('external_conversation_id') or ''} "
+            f"session_id={item.get('session_id') or ''} "
+            f"messages_inserted={_display_count(item.get('messages_inserted'))} "
+            f"messages_deduped={_display_count(item.get('messages_deduped'))} "
+            f"extraction_pending={_display_count(item.get('extraction_pending'))} "
+            f"extraction_processed={_display_count(item.get('extraction_processed'))} "
+            f"extraction_failed={_display_count(item.get('extraction_failed'))}"
+        )
+    console.print(table)
+
+
+def _display_optional(value: object) -> str:
+    if value is None or value == "":
+        return "-"
+    return str(value)
+
+
+def _display_bool(value: object) -> str:
+    return str(bool(value)).lower()
+
+
+def _display_count(value: object) -> str:
+    if isinstance(value, bool):
+        return "0"
+    if isinstance(value, int):
+        return str(value)
+    return "0"
 
 
 @cognition_app.command("consolidate")
