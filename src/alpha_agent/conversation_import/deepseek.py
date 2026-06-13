@@ -280,6 +280,7 @@ def _linear_message_node_ids(
 
     node_ids: list[str] = []
     visited: set[str] = set()
+    ignored_node_ids: set[str] = set()
     current_id = "root"
     while True:
         if current_id in visited:
@@ -318,14 +319,27 @@ def _linear_message_node_ids(
         if children is None:
             return node_ids
         if len(children) > 1:
-            errors.append(
-                DeepSeekConversionErrorDetail(
-                    f"{path}.{current_id}.children",
-                    "branched mappings are not supported by the DeepSeek converter",
-                    code="branched_mapping",
-                )
+            children = _filter_server_busy_response_children(
+                mapping,
+                path,
+                current_id,
+                children,
+                ignored_node_ids,
+                errors,
             )
-            return node_ids
+            if children is None:
+                return node_ids
+            if len(children) > 1:
+                errors.append(
+                    DeepSeekConversionErrorDetail(
+                        f"{path}.{current_id}.children",
+                        "branched mappings are not supported by the DeepSeek converter",
+                        code="branched_mapping",
+                    )
+                )
+                return node_ids
+            if not children:
+                break
         if not children:
             break
 
@@ -353,7 +367,7 @@ def _linear_message_node_ids(
         node_ids.append(child_id)
         current_id = child_id
 
-    unreachable_ids = sorted(set(mapping) - visited)
+    unreachable_ids = sorted(set(mapping) - visited - ignored_node_ids)
     if unreachable_ids:
         errors.append(
             DeepSeekConversionErrorDetail(
@@ -364,6 +378,85 @@ def _linear_message_node_ids(
             )
         )
     return node_ids
+
+
+def _filter_server_busy_response_children(
+    mapping: Mapping[str, Any],
+    path: str,
+    current_id: str,
+    children: Sequence[str],
+    ignored_node_ids: set[str],
+    errors: list[DeepSeekConversionErrorDetail],
+) -> list[str] | None:
+    remaining_children: list[str] = []
+    for index, child_id in enumerate(children):
+        child_node = mapping.get(child_id)
+        if not isinstance(child_node, dict):
+            errors.append(
+                DeepSeekConversionErrorDetail(
+                    f"{path}.{current_id}.children[{index}]",
+                    f"child node {child_id!r} is missing from mapping",
+                    code="missing_child_node",
+                )
+            )
+            return None
+        parent = child_node.get("parent")
+        if parent != current_id:
+            errors.append(
+                DeepSeekConversionErrorDetail(
+                    f"{path}.{child_id}.parent",
+                    f"child node parent must be {current_id!r}",
+                    code="invalid_parent",
+                )
+            )
+            return None
+        if _is_server_busy_response_node(child_node):
+            ignored_node_ids.update(_collect_subtree_node_ids(mapping, child_id))
+        else:
+            remaining_children.append(child_id)
+    return remaining_children
+
+
+def _is_server_busy_response_node(raw_node: Mapping[str, Any]) -> bool:
+    raw_message = raw_node.get("message")
+    if not isinstance(raw_message, dict):
+        return False
+    raw_fragments = raw_message.get("fragments")
+    if not isinstance(raw_fragments, list):
+        return False
+    response_parts: list[str] = []
+    for raw_fragment in raw_fragments:
+        if not isinstance(raw_fragment, dict):
+            continue
+        fragment_type = raw_fragment.get("type")
+        if fragment_type == _REQUEST_FRAGMENT:
+            return False
+        if fragment_type != _RESPONSE_FRAGMENT:
+            continue
+        raw_content = raw_fragment.get("content")
+        if isinstance(raw_content, str):
+            response_parts.append(raw_content)
+    if not response_parts:
+        return False
+    return "\n\n".join(response_parts).lstrip().startswith("服务器繁忙")
+
+
+def _collect_subtree_node_ids(mapping: Mapping[str, Any], root_id: str) -> set[str]:
+    collected: set[str] = set()
+    pending = [root_id]
+    while pending:
+        node_id = pending.pop()
+        if node_id in collected:
+            continue
+        collected.add(node_id)
+        raw_node = mapping.get(node_id)
+        if not isinstance(raw_node, dict):
+            continue
+        raw_children = raw_node.get("children")
+        if not isinstance(raw_children, list):
+            continue
+        pending.extend(child_id for child_id in raw_children if isinstance(child_id, str))
+    return collected
 
 
 def _convert_message_node(

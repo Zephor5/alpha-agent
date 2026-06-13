@@ -151,7 +151,22 @@ def test_cognition_import_convert_deepseek_renders_conversion_errors(tmp_path: P
     source_path = tmp_path / "deepseek.json"
     output_path = tmp_path / "normalized.json"
     source = _deepseek_export()
-    source[0]["mapping"]["root"]["children"] = ["1", "2"]  # type: ignore[index]
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    root = mapping["root"]
+    assert isinstance(root, dict)
+    root["children"] = ["1", "alt"]
+    mapping["alt"] = {
+        "id": "alt",
+        "parent": "root",
+        "children": [],
+        "message": {
+            "files": [],
+            "model": "deepseek-chat",
+            "inserted_at": "2026-01-01T10:01:00.000000+08:00",
+            "fragments": [{"type": "REQUEST", "content": "alternate request"}],
+        },
+    }
     _write_deepseek_export(source_path, source)
     runner = CliRunner()
 

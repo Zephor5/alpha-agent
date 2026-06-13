@@ -160,6 +160,99 @@ def test_adjusts_timestamps_by_tree_order_when_deepseek_times_move_backwards(tmp
     _assert_import_validator_accepts(payload, tmp_path)
 
 
+def test_filters_server_busy_response_child_from_deepseek_branch(tmp_path) -> None:
+    source = _deepseek_export()
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    first_node = mapping["1"]
+    assert isinstance(first_node, dict)
+    first_node["children"] = ["busy", "2"]
+    mapping["busy"] = {
+        "id": "busy",
+        "parent": "1",
+        "children": [],
+        "message": {
+            "files": [],
+            "model": "deepseek-chat",
+            "inserted_at": "2026-01-01T10:01:00.000000+08:00",
+            "fragments": [
+                {
+                    "type": "RESPONSE",
+                    "content": "服务器繁忙，请稍后再试。",
+                }
+            ],
+        },
+    }
+
+    payload = _convert(source)
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    conversation = conversations[0]
+    assert isinstance(conversation, dict)
+    messages = conversation["messages"]
+    assert isinstance(messages, list)
+    assert [message["external_message_id"] for message in messages] == ["1", "2"]
+    assert all("服务器繁忙" not in message["content"] for message in messages)
+    _assert_import_validator_accepts(payload, tmp_path)
+
+
+def test_filters_terminal_server_busy_response_children_from_deepseek_branch() -> None:
+    source = _deepseek_export()
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    first_node = mapping["1"]
+    assert isinstance(first_node, dict)
+    first_node["children"] = ["busy_1", "busy_2"]
+    del mapping["2"]
+    for index, busy_id in enumerate(("busy_1", "busy_2"), start=1):
+        mapping[busy_id] = {
+            "id": busy_id,
+            "parent": "1",
+            "children": [],
+            "message": {
+                "files": [],
+                "model": "deepseek-chat",
+                "inserted_at": f"2026-01-01T10:01:0{index}.000000+08:00",
+                "fragments": [
+                    {
+                        "type": "RESPONSE",
+                        "content": "服务器繁忙，请稍后再试。",
+                    }
+                ],
+            },
+        }
+
+    payload = _convert(source)
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    conversation = conversations[0]
+    assert isinstance(conversation, dict)
+    messages = conversation["messages"]
+    assert isinstance(messages, list)
+    assert [message["external_message_id"] for message in messages] == ["1"]
+
+
+def _add_non_busy_root_branch(source: list[dict[str, object]]) -> None:
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    root = mapping["root"]
+    assert isinstance(root, dict)
+    root["children"] = ["1", "alt"]
+    mapping["alt"] = {
+        "id": "alt",
+        "parent": "root",
+        "children": [],
+        "message": {
+            "files": [],
+            "model": "deepseek-chat",
+            "inserted_at": "2026-01-01T10:01:00.000000+08:00",
+            "fragments": [{"type": "REQUEST", "content": "alternate request"}],
+        },
+    }
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected_fragment"),
     [
@@ -170,9 +263,7 @@ def test_adjusts_timestamps_by_tree_order_when_deepseek_times_move_backwards(tmp
             "files are not supported",
         ),
         (
-            lambda source: source[0]["mapping"]["root"].update(
-                {"children": ["1", "2"]}
-            ),
+            _add_non_busy_root_branch,
             "branched mappings are not supported",
         ),
         (
