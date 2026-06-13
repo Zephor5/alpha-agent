@@ -304,6 +304,55 @@ def test_skips_internal_think_only_interrupted_assistant_message_and_continues(
     _assert_import_validator_accepts(payload, tmp_path)
 
 
+def test_converts_deepseek_files_to_user_messages_before_request(tmp_path) -> None:
+    source = _deepseek_export()
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    user_node = mapping["1"]
+    assert isinstance(user_node, dict)
+    user_message = user_node["message"]
+    assert isinstance(user_message, dict)
+    user_message["files"] = [
+        {
+            "id": "file-301f4afb-6972-4dff-8787-febf7b10a3de",
+            "file_name": "README.md",
+        }
+    ]
+
+    payload = _convert(source)
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    conversation = conversations[0]
+    assert isinstance(conversation, dict)
+    messages = conversation["messages"]
+    assert isinstance(messages, list)
+    assert messages[:2] == [
+        {
+            "external_message_id": "1:file:0",
+            "role": "user",
+            "content": "file: README.md",
+            "created_at": "2026-01-01T10:01:00.000000+08:00",
+            "metadata": {
+                "deepseek": {
+                    "model": "deepseek-chat",
+                    "file_id": "file-301f4afb-6972-4dff-8787-febf7b10a3de",
+                }
+            },
+        },
+        {
+            "external_message_id": "1",
+            "role": "user",
+            "content": "Why did stocks fall?",
+            "created_at": "2026-01-01T10:01:00.000001+08:00",
+            "metadata": {"deepseek": {"model": "deepseek-chat"}},
+        },
+    ]
+    assert messages[2]["external_message_id"] == "2"
+    assert messages[2]["created_at"] == "2026-01-01T10:01:00.000002+08:00"
+    _assert_import_validator_accepts(payload, tmp_path, expected_messages=3)
+
+
 def _add_non_busy_root_branch(source: list[dict[str, object]]) -> None:
     mapping = source[0]["mapping"]
     assert isinstance(mapping, dict)
@@ -328,9 +377,9 @@ def _add_non_busy_root_branch(source: list[dict[str, object]]) -> None:
     [
         (
             lambda source: source[0]["mapping"]["1"]["message"].update(
-                {"files": [{"name": "source.pdf"}]}
+                {"files": [{"id": "file_1", "file_name": ""}]}
             ),
-            "files are not supported",
+            "file_name must be a non-empty string",
         ),
         (
             _add_non_busy_root_branch,

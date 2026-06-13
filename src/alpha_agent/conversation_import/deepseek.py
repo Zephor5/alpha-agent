@@ -212,15 +212,14 @@ def _convert_conversation(
     converted_messages: list[_ConvertedMessage] = []
     for node_id in message_node_ids:
         raw_node = raw_mapping.get(node_id)
-        message = _convert_message_node(
+        messages = _convert_message_node(
             raw_node,
             f"{path}.mapping.{node_id}",
             node_id,
             context=context,
             errors=errors,
         )
-        if message is not None:
-            converted_messages.append(message)
+        converted_messages.extend(messages)
 
     normalized_messages: list[dict[str, Any]] = []
     previous_created_at: datetime | None = None
@@ -466,7 +465,7 @@ def _convert_message_node(
     *,
     context: _ConversionContext,
     errors: list[DeepSeekConversionErrorDetail],
-) -> _ConvertedMessage | None:
+) -> list[_ConvertedMessage]:
     if not isinstance(raw_node, dict):
         errors.append(
             DeepSeekConversionErrorDetail(
@@ -475,7 +474,7 @@ def _convert_message_node(
                 code="invalid_mapping_node",
             )
         )
-        return None
+        return []
 
     raw_message = raw_node.get("message")
     if not isinstance(raw_message, dict):
@@ -486,25 +485,7 @@ def _convert_message_node(
                 code="invalid_message",
             )
         )
-        return None
-
-    files = raw_message.get("files", [])
-    if not isinstance(files, list):
-        errors.append(
-            DeepSeekConversionErrorDetail(
-                f"{path}.message.files",
-                "DeepSeek message files must be an array",
-                code="invalid_files",
-            )
-        )
-    elif files:
-        errors.append(
-            DeepSeekConversionErrorDetail(
-                f"{path}.message.files",
-                "files are not supported by the DeepSeek converter",
-                code="unsupported_files",
-            )
-        )
+        return []
 
     model = _optional_non_empty_string(raw_message, "model", f"{path}.message.model", errors)
     created_at = _required_timestamp(
@@ -515,6 +496,14 @@ def _convert_message_node(
     )
     if created_at is not None:
         _record_message_offset(created_at, f"{path}.message.inserted_at", context, errors)
+    file_messages = _convert_file_messages(
+        raw_message.get("files", []),
+        f"{path}.message.files",
+        node_id=node_id,
+        model=model,
+        created_at=created_at,
+        errors=errors,
+    )
 
     raw_fragments = raw_message.get("fragments")
     if not isinstance(raw_fragments, list) or not raw_fragments:
@@ -525,7 +514,7 @@ def _convert_message_node(
                 code="invalid_fragments",
             )
         )
-        return None
+        return file_messages
 
     request_parts: list[str] = []
     response_parts: list[str] = []
@@ -585,10 +574,12 @@ def _convert_message_node(
                 code="mixed_message_role",
             )
         )
-        return None
+        return []
     if not request_parts and not response_parts:
+        if file_messages:
+            return file_messages
         if omitted_fragment_types:
-            return None
+            return []
         errors.append(
             DeepSeekConversionErrorDetail(
                 f"{path}.message.fragments",
@@ -596,9 +587,9 @@ def _convert_message_node(
                 code="missing_message_content",
             )
         )
-        return None
+        return []
     if created_at is None:
-        return None
+        return file_messages
 
     role: _DeepSeekRole = "user" if request_parts else "assistant"
     parts = request_parts if request_parts else response_parts
@@ -608,13 +599,95 @@ def _convert_message_node(
         think_fragment_count=think_fragment_count,
         search_result_count=search_result_count,
     )
-    return _ConvertedMessage(
-        external_message_id=node_id,
-        role=role,
-        content="\n\n".join(parts),
-        created_at=created_at,
-        metadata=metadata,
-    )
+    return [
+        *file_messages,
+        _ConvertedMessage(
+            external_message_id=node_id,
+            role=role,
+            content="\n\n".join(parts),
+            created_at=created_at,
+            metadata=metadata,
+        ),
+    ]
+
+
+def _convert_file_messages(
+    raw_files: Any,
+    path: str,
+    *,
+    node_id: str,
+    model: str | None,
+    created_at: datetime | None,
+    errors: list[DeepSeekConversionErrorDetail],
+) -> list[_ConvertedMessage]:
+    if not isinstance(raw_files, list):
+        errors.append(
+            DeepSeekConversionErrorDetail(
+                path,
+                "DeepSeek message files must be an array",
+                code="invalid_files",
+            )
+        )
+        return []
+
+    messages: list[_ConvertedMessage] = []
+    for index, raw_file in enumerate(raw_files):
+        file_path = f"{path}[{index}]"
+        if not isinstance(raw_file, dict):
+            errors.append(
+                DeepSeekConversionErrorDetail(
+                    file_path,
+                    "DeepSeek file entry must be an object",
+                    code="invalid_file",
+                )
+            )
+            continue
+        file_name = _optional_non_empty_string(
+            raw_file,
+            "file_name",
+            f"{file_path}.file_name",
+            errors,
+        )
+        raw_file_id = raw_file.get("id")
+        file_id: str | None = None
+        if raw_file_id is not None:
+            if not isinstance(raw_file_id, str) or not raw_file_id.strip():
+                errors.append(
+                    DeepSeekConversionErrorDetail(
+                        f"{file_path}.id",
+                        "DeepSeek file id must be a non-empty string when present",
+                        code="invalid_file_id",
+                    )
+                )
+            else:
+                file_id = raw_file_id.strip()
+        if file_name is None or created_at is None:
+            continue
+        messages.append(
+            _ConvertedMessage(
+                external_message_id=f"{node_id}:file:{index}",
+                role="user",
+                content=f"file: {file_name}",
+                created_at=created_at,
+                metadata=_file_message_metadata(model=model, file_id=file_id),
+            )
+        )
+    return messages
+
+
+def _file_message_metadata(
+    *,
+    model: str | None,
+    file_id: str | None,
+) -> dict[str, Any]:
+    deepseek_metadata: dict[str, Any] = {}
+    if model is not None:
+        deepseek_metadata["model"] = model
+    if file_id is not None:
+        deepseek_metadata["file_id"] = file_id
+    if not deepseek_metadata:
+        return {}
+    return {"deepseek": deepseek_metadata}
 
 
 def _message_metadata(
