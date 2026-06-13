@@ -231,9 +231,10 @@ The first-version DeepSeek converter is intentionally strict:
   `assistant` messages. Multiple same-role fragments in one node are joined
   with a blank line. A node containing both `REQUEST` and `RESPONSE` is
   rejected.
-- `THINK` and `SEARCH` fragments are omitted from message content. Message
-  metadata records the DeepSeek model and small omission counts only; full
-  reasoning text and search results are not copied into the normalized file.
+- `THINK`, `SEARCH`, `TOOL_OPEN`, and `TOOL_SEARCH` fragments are omitted from
+  message content. Message metadata records the DeepSeek model and small
+  omission counts only; full reasoning text and search/tool details are not
+  copied into the normalized file.
 - Non-empty `files` arrays, unknown fragment types, empty message content, and
   inconsistent message timestamp offsets are rejected.
 - Message order follows the DeepSeek tree. If source timestamps are equal or

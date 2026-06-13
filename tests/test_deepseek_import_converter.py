@@ -58,6 +58,8 @@ def _deepseek_export() -> list[dict[str, object]]:
                                     {"url": "https://example.test/b", "title": "B"},
                                 ],
                             },
+                            {"type": "TOOL_OPEN", "content": "tool open details"},
+                            {"type": "TOOL_SEARCH", "content": "tool search details"},
                             {"type": "THINK", "content": "hidden reasoning"},
                             {"type": "RESPONSE", "content": "Because risk appetite weakened."},
                         ],
@@ -115,7 +117,12 @@ def test_converts_linear_deepseek_export_to_normalized_import_payload(tmp_path) 
                 "metadata": {
                     "deepseek": {
                         "model": "deepseek-reasoner",
-                        "omitted_fragment_types": ["SEARCH", "THINK"],
+                        "omitted_fragment_types": [
+                            "SEARCH",
+                            "TOOL_OPEN",
+                            "TOOL_SEARCH",
+                            "THINK",
+                        ],
                         "think_fragment_count": 1,
                         "search_result_count": 2,
                     }
@@ -125,6 +132,8 @@ def test_converts_linear_deepseek_export_to_normalized_import_payload(tmp_path) 
     }
     assert "hidden reasoning" not in json.dumps(payload)
     assert "large text" not in json.dumps(payload)
+    assert "tool open details" not in json.dumps(payload)
+    assert "tool search details" not in json.dumps(payload)
     assert "original_inserted_at" not in json.dumps(payload)
     _assert_import_validator_accepts(payload, tmp_path)
 
