@@ -153,20 +153,13 @@ def test_cognition_import_convert_deepseek_renders_conversion_errors(tmp_path: P
     source = _deepseek_export()
     mapping = source[0]["mapping"]
     assert isinstance(mapping, dict)
-    root = mapping["root"]
-    assert isinstance(root, dict)
-    root["children"] = ["1", "alt"]
-    mapping["alt"] = {
-        "id": "alt",
-        "parent": "root",
-        "children": [],
-        "message": {
-            "files": [],
-            "model": "deepseek-chat",
-            "inserted_at": "2026-01-01T10:01:00.000000+08:00",
-            "fragments": [{"type": "REQUEST", "content": "alternate request"}],
-        },
-    }
+    node = mapping["1"]
+    assert isinstance(node, dict)
+    message = node["message"]
+    assert isinstance(message, dict)
+    fragments = message["fragments"]
+    assert isinstance(fragments, list)
+    fragments.append({"type": "AUDIO", "content": "unsupported"})
     _write_deepseek_export(source_path, source)
     runner = CliRunner()
 
@@ -178,5 +171,5 @@ def test_cognition_import_convert_deepseek_renders_conversion_errors(tmp_path: P
 
     assert result.exit_code == 1
     assert "Invalid DeepSeek conversation export." in result.output
-    assert "branched mappings are not supported" in result.output
+    assert "unsupported fragment type" in result.output
     assert not output_path.exists()

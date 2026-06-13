@@ -202,6 +202,50 @@ def test_filters_server_busy_response_child_from_deepseek_branch(tmp_path) -> No
     _assert_import_validator_accepts(payload, tmp_path)
 
 
+def test_chooses_last_child_after_filtering_busy_deepseek_branch(tmp_path) -> None:
+    source = _deepseek_export()
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    first_node = mapping["1"]
+    assert isinstance(first_node, dict)
+    first_node["children"] = ["busy", "2", "alt"]
+    mapping["busy"] = {
+        "id": "busy",
+        "parent": "1",
+        "children": [],
+        "message": {
+            "files": [],
+            "model": "deepseek-chat",
+            "inserted_at": "2026-01-01T10:01:00.000000+08:00",
+            "fragments": [{"type": "RESPONSE", "content": "服务器繁忙，请稍后再试。"}],
+        },
+    }
+    mapping["alt"] = {
+        "id": "alt",
+        "parent": "1",
+        "children": [],
+        "message": {
+            "files": [],
+            "model": "deepseek-chat",
+            "inserted_at": "2026-01-01T10:01:01.000000+08:00",
+            "fragments": [{"type": "RESPONSE", "content": "alternate final answer"}],
+        },
+    }
+
+    payload = _convert(source)
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    conversation = conversations[0]
+    assert isinstance(conversation, dict)
+    messages = conversation["messages"]
+    assert isinstance(messages, list)
+    assert [message["external_message_id"] for message in messages] == ["1", "alt"]
+    assert messages[1]["content"] == "alternate final answer"
+    assert all("服务器繁忙" not in message["content"] for message in messages)
+    _assert_import_validator_accepts(payload, tmp_path)
+
+
 def test_filters_terminal_server_busy_response_children_from_deepseek_branch() -> None:
     source = _deepseek_export()
     mapping = source[0]["mapping"]
@@ -261,6 +305,28 @@ def test_skips_terminal_think_only_interrupted_assistant_message(tmp_path) -> No
     assert isinstance(messages, list)
     assert [message["external_message_id"] for message in messages] == ["1"]
     assert "interrupted reasoning only" not in json.dumps(payload)
+    _assert_import_validator_accepts(payload, tmp_path, expected_messages=1)
+
+
+def test_skips_empty_fragments_interrupted_message(tmp_path) -> None:
+    source = _deepseek_export()
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    assistant_node = mapping["2"]
+    assert isinstance(assistant_node, dict)
+    assistant_message = assistant_node["message"]
+    assert isinstance(assistant_message, dict)
+    assistant_message["fragments"] = []
+
+    payload = _convert(source)
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    conversation = conversations[0]
+    assert isinstance(conversation, dict)
+    messages = conversation["messages"]
+    assert isinstance(messages, list)
+    assert [message["external_message_id"] for message in messages] == ["1"]
     _assert_import_validator_accepts(payload, tmp_path, expected_messages=1)
 
 
@@ -353,25 +419,6 @@ def test_converts_deepseek_files_to_user_messages_before_request(tmp_path) -> No
     _assert_import_validator_accepts(payload, tmp_path, expected_messages=3)
 
 
-def _add_non_busy_root_branch(source: list[dict[str, object]]) -> None:
-    mapping = source[0]["mapping"]
-    assert isinstance(mapping, dict)
-    root = mapping["root"]
-    assert isinstance(root, dict)
-    root["children"] = ["1", "alt"]
-    mapping["alt"] = {
-        "id": "alt",
-        "parent": "root",
-        "children": [],
-        "message": {
-            "files": [],
-            "model": "deepseek-chat",
-            "inserted_at": "2026-01-01T10:01:00.000000+08:00",
-            "fragments": [{"type": "REQUEST", "content": "alternate request"}],
-        },
-    }
-
-
 @pytest.mark.parametrize(
     ("mutate", "expected_fragment"),
     [
@@ -380,10 +427,6 @@ def _add_non_busy_root_branch(source: list[dict[str, object]]) -> None:
                 {"files": [{"id": "file_1", "file_name": ""}]}
             ),
             "file_name must be a non-empty string",
-        ),
-        (
-            _add_non_busy_root_branch,
-            "branched mappings are not supported",
         ),
         (
             lambda source: source[0]["mapping"]["root"].update(

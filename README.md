@@ -225,10 +225,10 @@ The first-version DeepSeek converter is intentionally strict:
 - The raw export must be a top-level array of conversation objects with
   `id`, `title`, `inserted_at`, `updated_at`, and `mapping` fields matching the
   current DeepSeek export shape.
-- `mapping` must resolve to one linear path from `root`; ordinary branched or
-  unreachable nodes are rejected instead of silently choosing a branch. A branch
-  child whose own `RESPONSE` content starts with `服务器繁忙` is treated as a
-  failed DeepSeek retry and filtered before linear-path validation.
+- `mapping` is resolved to one linear path from `root`. Branch children whose
+  own `RESPONSE` content starts with `服务器繁忙` are treated as failed DeepSeek
+  retries and filtered first. If multiple children remain after that, the
+  converter follows the last remaining child and skips the others.
 - `REQUEST` fragments become `user` messages, and `RESPONSE` fragments become
   `assistant` messages. Multiple same-role fragments in one node are joined
   with a blank line. A node containing both `REQUEST` and `RESPONSE` is
@@ -240,8 +240,9 @@ The first-version DeepSeek converter is intentionally strict:
   message content. Message metadata records the DeepSeek model and small
   omission counts only; full reasoning text and search/tool details are not
   copied into the normalized file.
-- Nodes that contain only known omitted fragment types are treated as
-  interrupted DeepSeek output and skipped without creating an import message.
+- Nodes that contain empty `fragments` or only known omitted fragment types are
+  treated as interrupted DeepSeek output and skipped without creating an import
+  message.
 - Malformed `files` arrays, unknown fragment types, empty message content, and
   inconsistent message timestamp offsets are rejected.
 - Message order follows the DeepSeek tree. If source timestamps are equal or

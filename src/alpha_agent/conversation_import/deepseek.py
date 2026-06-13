@@ -329,14 +329,9 @@ def _linear_message_node_ids(
             if children is None:
                 return node_ids
             if len(children) > 1:
-                errors.append(
-                    DeepSeekConversionErrorDetail(
-                        f"{path}.{current_id}.children",
-                        "branched mappings are not supported by the DeepSeek converter",
-                        code="branched_mapping",
-                    )
-                )
-                return node_ids
+                for skipped_child_id in children[:-1]:
+                    ignored_node_ids.update(_collect_subtree_node_ids(mapping, skipped_child_id))
+                children = [children[-1]]
             if not children:
                 break
         if not children:
@@ -506,14 +501,16 @@ def _convert_message_node(
     )
 
     raw_fragments = raw_message.get("fragments")
-    if not isinstance(raw_fragments, list) or not raw_fragments:
+    if not isinstance(raw_fragments, list):
         errors.append(
             DeepSeekConversionErrorDetail(
                 f"{path}.message.fragments",
-                "DeepSeek message fragments must be a non-empty array",
+                "DeepSeek message fragments must be an array",
                 code="invalid_fragments",
             )
         )
+        return file_messages
+    if not raw_fragments:
         return file_messages
 
     request_parts: list[str] = []
