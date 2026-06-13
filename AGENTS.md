@@ -14,51 +14,94 @@ pyproject.toml        Package metadata, Python version, dependencies, console sc
 uv.lock               Locked dependency graph for uv-based installs.
 config.example.toml   Example runtime configuration.
 .env.example          Environment variable template for local runtime paths, LLM providers, and memory limits.
-.github/              GitHub Actions CI workflow definition.
+.github/workflows/    GitHub Actions CI workflow definition.
 .gitignore            Ignore rules for local environments, caches, build artifacts, and runtime state.
 LICENSE               Project license.
 docs/
-  cognition/          Reference docs for cognition.
+  cognition/          Ideal cognition descriptions, just for the big picture of the design.
   develop_record/     Historical archive only; skip by default and never treat as current implementation evidence.
   doing/              Execution ledger for active tasks only; record during execution, then clear after self-check.
-  todo/               Project todo docs.
+  todo/               Planning docs.
 src/
   alpha_agent/
-    cli.py            Typer CLI entry point for init, ask/chat, config, daemon, gateway, skills, debug, cognition, goals, lens, and self-model commands.
+    cli.py            Typer CLI for init, ask/chat, config, daemon, gateway, skills, debug, cognition import/inspection, and Drive goals.
     config.py         Runtime configuration loading, defaults, environment overrides, and persistent config handling.
-    daemon/           Local daemon process lifecycle, IPC client/server, runtime loop, status, and manager.
-    gateway/          Gateway operation shell, adapter contracts, session routing, status, logging, and gateway config.
+    conversation_import/ DeepSeek export conversion into normalized session/import records.
+    daemon/           Local daemon process lifecycle, IPC client/server, runtime loop, status, manager, and import service.
+    gateway/          Gateway operation shell, adapter contracts, session routing, status, logging, and gateway runtime config.
       adapters/       External gateway adapter interfaces.
-    runtime/          Agent turn/session execution, event models, context budget/handover, session context, counterpart routing, and runtime tool wiring.
-      chat_messages.py ChatMessage formatting, source replay conversion, system-reminder helpers, and chat token estimates.
+    runtime/          Agent turn/session execution, prompts, events, context budget/handover, session context, counterpart routing, and tool wiring.
+      chat_messages.py ChatMessage formatting, source replay conversion, system-reminder stripping, and token estimates.
       counterpart_router.py Source metadata to CounterpartRef routing and first-observed event handling.
-    cognition/        Cognition foundations, Reactive/background loop orchestration, event emission, state services, payload contracts, projections, and search/tokenization helpers.
+      prompt_builder.py Answer prompt assembly from session context, memory, and runtime state.
+    cognition/        Cognition event-sourced memory, reactive/background loop coordination, projections, and Drive goals.
+      __init__.py     Cognition package export surface.
       authority.py    Authority and consent helpers for cognition writes.
-      background_llm_contract.py Validation contracts for LLM-mediated background cognition outputs.
-      controller.py   CognitiveController orchestration for one Reactive tick.
-      coordinator.py  LoopCoordinator lock/lease control for Reactive and background cognition loops.
-      domain_guidance.py Domain guidance assembly for background cognition prompts.
+      background_llm_contract.py JSON schemas and validators for LLM-mediated extraction, consolidation, summaries, and feedback attribution.
+      controller.py   Default cognition projection registry construction.
+      coordinator.py  LoopCoordinator lock, priority, yield, and lease control for cognition loops.
+      domain_guidance.py Active summary-derived guidance and memory proposal confirmation policy.
       emitter.py      Cognitive event emission helpers.
       payload_contract.py Fail-fast validation for consumed cognition event payload fields.
-      processing_ledger.py Background processing ledger stage/status helpers.
-      projection_runner.py Projection registry execution and rebuild helpers.
+      processing_ledger.py Background source/window/stage ledger, status tracking, idempotency keys, and recovery helpers.
+      projection_runner.py Projection registry execution and projection rebuild helpers.
       search_tokenizer.py Deterministic tokenization for mixed CJK and technical search text.
-      state_service.py State service for atomic beliefs, summaries, background operations, and audit writes.
-      models/         Frozen cognition data contracts for events, beliefs, goals, subjects, situations, enums, and loop metadata.
-      event_log/      In-memory and SQLite cognitive event log implementations.
-      loops/          In-process scheduler, checkpoint storage, daemon background drain service, and DriveLoop.
-        workers/      LLM-mediated memory extraction, consolidation, summary workers, plus expired-belief archival.
-      goals/          GoalRegistry event write path for DriveLoop goals.
-      projections/    SQLite-backed projections for counterpart, belief, goal, subject, and event counts.
+      source_time.py  Source message and belief time-range resolution for prompts and audit text.
+      state_service.py Canonical cognition state write/query facade for atomic beliefs, summaries, background operations, feedback, and audits.
+      event_log/
+        __init__.py   Event log package exports.
+        base.py       EventLog protocol.
+        memory.py     In-memory event log for focused tests and ephemeral runs.
+        sqlite.py     SQLite-backed cognitive event log persisted through StateStore.
+      goals/
+        __init__.py   Goal registry package exports.
+        registry.py   GoalRegistry event write path for Drive Loop goal lifecycle and progress events.
+      loops/
+        __init__.py   Loop service, Drive Loop, feedback attribution, and scheduler exports.
+        README.md     Notes on retained loop infrastructure and worker direction.
+        background_service.py Daemon-owned background cognition drain for extraction, consolidation, conflict review, summaries, and archival.
+        compact_extraction.py Direct extraction service for compacted session outputs.
+        drive.py      Synchronous Drive Loop that turns eligible active goals into self-signal turns.
+        feedback_attribution.py Realtime attribution of user feedback to recalled beliefs from the previous turn.
+        scheduler.py  Worker checkpoint storage, worker reports, and scheduled worker protocols.
+        workers/
+          __init__.py Worker exports and default worker list.
+          _common.py  Shared worker report, cursor, prompt JSON, and trace metadata helpers.
+          archive_expired.py Worker that archives expired beliefs.
+          memory_extraction.py LLM-mediated source-window extraction of atomic belief drafts.
+          memory_consolidation.py LLM-mediated consolidation and conflict review for active beliefs.
+          memory_summary.py LLM-mediated summary belief generation and refresh.
+      models/
+        __init__.py   Public cognition model export surface.
+        _ids.py       Typed reference/id helpers for subjects, counterparts, beliefs, entities, situations, and actors.
+        _serialization.py Dataclass record serialization helpers.
+        belief.py     AtomicBelief, SummaryBelief, validity windows, relation records, and belief validation.
+        counterpart.py Counterpart relationship, service commitment, and style hint data contracts.
+        enums.py      Cognition enums for memory kinds, authority, lifecycle, event kinds, loop priority, and stimulus kinds.
+        event.py      CognitiveEvent event-sourcing contract.
+        goal.py       Drive Loop goal contract.
+        perception.py Perception data contract.
+        situation.py  Situation, social context, and authority hint contracts.
+        subject.py    Subject data contract and self-subject constant.
+      projections/
+        __init__.py   Projection package export surface.
+        base.py       Projection and EventProjection base protocols.
+        registry.py   Projection registration and typed lookup.
+        belief.py     SQLite-backed belief projection, FTS search, recall ranking inputs, and rebuild behavior.
+        counterpart.py Counterpart projection from observed counterpart events.
+        event_count.py Event count projection by cognitive event kind.
+        goal.py       Goal lifecycle projection and active-goal queries.
+        subject.py    Subject projection from subject/situation events.
     state/            SQLite-backed state store/schema/models for session messages, runtime traces, gateway mappings/dedup, cognitive events, and projection tables.
-    llm/              LLM provider interface and concrete providers, including mock, OpenAI-compatible, DeepSeek, and Codex.
-    tools/            Tool abstractions and registry used by the runtime.
+    llm/              LLM provider interface, chat-completion adapters, tracing, and concrete mock, OpenAI-compatible, DeepSeek, MiMo, and Codex providers.
+    tools/            Tool abstractions, default registry, bash/web tools, URL safety, memory recall/propose tools, and file tools.
+      files/          Sandboxed file glob/read/search/patch/write tools plus path validation, atomic IO, and patch planning.
       shell/          Structured local shell execution backend, output capture, policy, and command semantics.
     skills/           Procedural skill manager and built-in Markdown skills.
       builtin/        Built-in Markdown skills such as debug-loop and summarize.
     utils/            Shared utility helpers for IDs and time.
-tests/                Test coverage for CLI, runtime, config, daemon, gateway, LLM providers, tools, and session/context behavior.
-  cognition/          Cognition-specific tests for events, projections, renderers, loops, goals, memory tools, tokenization, and CLI inspection commands.
+tests/                Test coverage for CLI, runtime, config, daemon, gateway, LLM providers, tools, imports, and session/context behavior.
+  cognition/          Cognition-specific tests for event logs, payload contracts, projections, loop coordination, background workers, goals, memory tools, feedback attribution, source time, and tokenization.
 ```
 
 ## Validation Commands
