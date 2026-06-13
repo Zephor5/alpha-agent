@@ -587,6 +587,8 @@ def _convert_message_node(
         )
         return None
     if not request_parts and not response_parts:
+        if omitted_fragment_types:
+            return None
         errors.append(
             DeepSeekConversionErrorDetail(
                 f"{path}.message.fragments",

@@ -237,6 +237,8 @@ The first-version DeepSeek converter is intentionally strict:
   message content. Message metadata records the DeepSeek model and small
   omission counts only; full reasoning text and search/tool details are not
   copied into the normalized file.
+- Nodes that contain only known omitted fragment types are treated as
+  interrupted DeepSeek output and skipped without creating an import message.
 - Non-empty `files` arrays, unknown fragment types, empty message content, and
   inconsistent message timestamp offsets are rejected.
 - Message order follows the DeepSeek tree. If source timestamps are equal or

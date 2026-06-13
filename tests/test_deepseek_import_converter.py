@@ -74,12 +74,17 @@ def _convert(source: object) -> dict[str, object]:
     return convert_deepseek_export(json.dumps(source))
 
 
-def _assert_import_validator_accepts(payload: dict[str, object], tmp_path) -> None:
+def _assert_import_validator_accepts(
+    payload: dict[str, object],
+    tmp_path,
+    *,
+    expected_messages: int = 2,
+) -> None:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
     summary = ConversationImportService(store).import_payload(json.dumps(payload), dry_run=True)
     assert summary.source_provider == "deepseek"
-    assert summary.messages_inserted == 2
+    assert summary.messages_inserted == expected_messages
 
 
 def test_converts_linear_deepseek_export_to_normalized_import_payload(tmp_path) -> None:
@@ -232,6 +237,71 @@ def test_filters_terminal_server_busy_response_children_from_deepseek_branch() -
     messages = conversation["messages"]
     assert isinstance(messages, list)
     assert [message["external_message_id"] for message in messages] == ["1"]
+
+
+def test_skips_terminal_think_only_interrupted_assistant_message(tmp_path) -> None:
+    source = _deepseek_export()
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    assistant_node = mapping["2"]
+    assert isinstance(assistant_node, dict)
+    assistant_message = assistant_node["message"]
+    assert isinstance(assistant_message, dict)
+    assistant_message["fragments"] = [
+        {"type": "THINK", "content": "interrupted reasoning only"}
+    ]
+
+    payload = _convert(source)
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    conversation = conversations[0]
+    assert isinstance(conversation, dict)
+    messages = conversation["messages"]
+    assert isinstance(messages, list)
+    assert [message["external_message_id"] for message in messages] == ["1"]
+    assert "interrupted reasoning only" not in json.dumps(payload)
+    _assert_import_validator_accepts(payload, tmp_path, expected_messages=1)
+
+
+def test_skips_internal_think_only_interrupted_assistant_message_and_continues(
+    tmp_path,
+) -> None:
+    source = _deepseek_export()
+    mapping = source[0]["mapping"]
+    assert isinstance(mapping, dict)
+    assistant_node = mapping["2"]
+    assert isinstance(assistant_node, dict)
+    assistant_node["children"] = ["3"]
+    assistant_message = assistant_node["message"]
+    assert isinstance(assistant_message, dict)
+    assistant_message["fragments"] = [
+        {"type": "THINK", "content": "interrupted reasoning only"}
+    ]
+    mapping["3"] = {
+        "id": "3",
+        "parent": "2",
+        "children": [],
+        "message": {
+            "files": [],
+            "model": "deepseek-chat",
+            "inserted_at": "2026-01-01T10:02:00.000000+08:00",
+            "fragments": [{"type": "REQUEST", "content": "continue with a new prompt"}],
+        },
+    }
+
+    payload = _convert(source)
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    conversation = conversations[0]
+    assert isinstance(conversation, dict)
+    messages = conversation["messages"]
+    assert isinstance(messages, list)
+    assert [message["external_message_id"] for message in messages] == ["1", "3"]
+    assert [message["role"] for message in messages] == ["user", "user"]
+    assert "interrupted reasoning only" not in json.dumps(payload)
+    _assert_import_validator_accepts(payload, tmp_path)
 
 
 def _add_non_busy_root_branch(source: list[dict[str, object]]) -> None:
