@@ -29,7 +29,7 @@ class OpenAICompatibleProvider:
             raise ValueError("compatible.api_key is required for openai-compatible provider")
         self.base_url = config.compatible_base_url.rstrip("/")
         self.api_key = config.compatible_api_key
-        self.model = config.llm_model or OPENAI_COMPATIBLE_DEFAULT_MODEL
+        self.model = config.compatible_model or OPENAI_COMPATIBLE_DEFAULT_MODEL
         self.timeout = timeout
 
     def complete(

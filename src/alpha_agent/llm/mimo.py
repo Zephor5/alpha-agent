@@ -29,7 +29,7 @@ class MiMoProvider:
             raise ValueError("mimo.api_key is required for mimo provider")
         self.base_url = MIMO_BASE_URL
         self.api_key = api_key
-        self.model = config.llm_model or MIMO_DEFAULT_MODEL
+        self.model = config.mimo_model or MIMO_DEFAULT_MODEL
         self.timeout = timeout
 
     def complete(

@@ -37,7 +37,7 @@ class CodexResponsesProvider:
             )
         self.base_url = CODEX_BASE_URL
         self.access_token = access_token
-        self.model = config.llm_model or CODEX_DEFAULT_MODEL
+        self.model = config.codex_model or CODEX_DEFAULT_MODEL
         self.timeout = timeout
 
     def complete(

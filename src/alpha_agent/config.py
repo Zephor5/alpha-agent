@@ -23,12 +23,12 @@ daemon_status_path = "daemon-status.json"
 
 [llm]
 provider = "mock"
-model = ""
 debug_logging = false
 
 [compatible]
 base_url = "https://api.openai.com/v1"
 api_key = ""
+model = ""
 
 [llm.context]
 # Active runtime context maintenance settings.
@@ -93,14 +93,17 @@ active_goal_limit = 8
 
 [deepseek]
 api_key = ""
+model = ""
 reasoning_enabled = true
 reasoning_effort = ""
 
 [mimo]
 api_key = ""
+model = ""
 
 [codex]
 access_token = ""
+model = ""
 
 [tavily]
 api_key = ""
@@ -114,7 +117,6 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "runtime.daemon_socket_path": str,
     "runtime.daemon_status_path": str,
     "llm.provider": str,
-    "llm.model": str,
     "llm.debug_logging": bool,
     "llm.context.tool_truncate_threshold_ratio": float,
     "llm.context.handover_compress_threshold_ratio": float,
@@ -127,6 +129,7 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "llm.providers.mimo.max_context_tokens": int,
     "compatible.base_url": str,
     "compatible.api_key": str,
+    "compatible.model": str,
     "tools.bash.enabled": bool,
     "tools.bash.default_workdir": str,
     "tools.bash.allowed_workdirs": list,
@@ -158,10 +161,13 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "cognition.drive.goal_cooldown_seconds": int,
     "cognition.drive.active_goal_limit": int,
     "deepseek.api_key": str,
+    "deepseek.model": str,
     "deepseek.reasoning_enabled": bool,
     "deepseek.reasoning_effort": str,
     "mimo.api_key": str,
+    "mimo.model": str,
     "codex.access_token": str,
+    "codex.model": str,
     "tavily.api_key": str,
 }
 
@@ -188,6 +194,7 @@ REMOVED_CONFIG_SECTIONS = (
 )
 
 REMOVED_CONFIG_FIELDS = (
+    "llm.model",
     "cognition.background.tick_timeout_seconds",
     "cognition.background.extraction.batch_size",
     "cognition.background.extraction.min_sources",
@@ -330,7 +337,6 @@ class AlphaConfig:
     daemon_socket_path: Path = Path("~/.alpha-agent/daemon.sock").expanduser()
     daemon_status_path: Path = Path("~/.alpha-agent/daemon-status.json").expanduser()
     llm_provider: str = "mock"
-    llm_model: str = ""
     llm_debug_logging: bool = False
     llm_context: LLMContextConfig = field(default_factory=LLMContextConfig)
     bash_tool: BashToolConfig = field(default_factory=BashToolConfig)
@@ -340,6 +346,7 @@ class AlphaConfig:
     )
     compatible_base_url: str | None = None
     compatible_api_key: str | None = None
+    compatible_model: str | None = None
     cognition_background: CognitionBackgroundConfig = field(
         default_factory=CognitionBackgroundConfig
     )
@@ -348,10 +355,13 @@ class AlphaConfig:
     cognition_drive_goal_cooldown_seconds: int = 3600
     cognition_drive_active_goal_limit: int = 8
     deepseek_api_key: str | None = None
+    deepseek_model: str | None = None
     deepseek_reasoning_enabled: bool = True
     deepseek_reasoning_effort: str | None = None
     mimo_api_key: str | None = None
+    mimo_model: str | None = None
     codex_access_token: str | None = None
+    codex_model: str | None = None
     tavily_api_key: str | None = None
 
     def max_context_tokens_for_provider(self, provider_name: str | None = None) -> int:
@@ -528,7 +538,6 @@ def load_config(
             _env_or_config("ALPHA_LLM_PROVIDER", config_data, "llm", "provider", "mock")
             or "mock"
         ).strip().lower(),
-        llm_model=_env_or_config("ALPHA_LLM_MODEL", config_data, "llm", "model", "") or "",
         llm_debug_logging=_bool_env(
             "ALPHA_LLM_DEBUG_LOGGING",
             _bool_value(llm.get("debug_logging"), False),
@@ -574,6 +583,12 @@ def load_config(
             "compatible",
             "api_key",
         ),
+        compatible_model=_env_or_config(
+            "ALPHA_COMPATIBLE_MODEL",
+            config_data,
+            "compatible",
+            "model",
+        ),
         cognition_background=_background_config(background),
         cognition_drive_enabled=_bool_env(
             "ALPHA_COGNITION_DRIVE_ENABLED",
@@ -597,6 +612,12 @@ def load_config(
             "deepseek",
             "api_key",
         ),
+        deepseek_model=_env_or_config(
+            "ALPHA_DEEPSEEK_MODEL",
+            config_data,
+            "deepseek",
+            "model",
+        ),
         deepseek_reasoning_enabled=_bool_env(
             "ALPHA_DEEPSEEK_REASONING_ENABLED",
             _bool_value(deepseek.get("reasoning_enabled"), True),
@@ -613,9 +634,21 @@ def load_config(
             "mimo",
             "api_key",
         ),
+        mimo_model=_env_or_config(
+            "ALPHA_MIMO_MODEL",
+            config_data,
+            "mimo",
+            "model",
+        ),
         codex_access_token=(
             os.getenv("ALPHA_CODEX_ACCESS_TOKEN")
             or _string_setting(config_data, "codex", "access_token")
+        ),
+        codex_model=_env_or_config(
+            "ALPHA_CODEX_MODEL",
+            config_data,
+            "codex",
+            "model",
         ),
         tavily_api_key=(
             os.getenv("ALPHA_TAVILY_API_KEY")

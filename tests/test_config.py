@@ -31,12 +31,12 @@ daemon_status_path = "~/custom-alpha/daemon-status.json"
 
 [llm]
 provider = "deepseek"
-model = "deepseek-v4-pro"
 debug_logging = true
 
 [compatible]
 base_url = "https://compatible.example/v1"
 api_key = "compatible-key"
+model = "gpt-compatible"
 
 [llm.context]
 tool_truncate_threshold_ratio = 0.55
@@ -93,11 +93,17 @@ invalidated_source_min = 12
 
 [deepseek]
 api_key = "deepseek-key"
+model = "deepseek-v4-pro"
 reasoning_enabled = false
 reasoning_effort = "high"
 
 [mimo]
 api_key = "mimo-file-key"
+model = "mimo-custom"
+
+[codex]
+access_token = "codex-file-token"
+model = "gpt-5.3-codex-custom"
 
 [tavily]
 api_key = "tvly-file-key"
@@ -151,9 +157,13 @@ api_key = "tvly-file-key"
     assert config.file_tool.max_output_chars == 555
     assert config.deepseek_api_key == "deepseek-key"
     assert config.mimo_api_key == "mimo-file-key"
-    assert config.llm_model == "deepseek-v4-pro"
     assert config.compatible_base_url == "https://compatible.example/v1"
     assert config.compatible_api_key == "compatible-key"
+    assert config.compatible_model == "gpt-compatible"
+    assert config.deepseek_model == "deepseek-v4-pro"
+    assert config.mimo_model == "mimo-custom"
+    assert config.codex_access_token == "codex-file-token"
+    assert config.codex_model == "gpt-5.3-codex-custom"
     assert config.deepseek_reasoning_enabled is False
     assert config.deepseek_reasoning_effort == "high"
     assert config.tavily_api_key == "tvly-file-key"
@@ -240,13 +250,19 @@ provider = "deepseek"
 
 [deepseek]
 api_key = "from-file"
+model = "deepseek-file-model"
 
 [mimo]
 api_key = "mimo-file-key"
+model = "mimo-file-model"
 
 [compatible]
 base_url = "from-file"
 api_key = "compatible-file-key"
+model = "compatible-file-model"
+
+[codex]
+model = "codex-file-model"
 
 [tavily]
 api_key = "tvly-file-key"
@@ -263,9 +279,13 @@ allowed_workdirs = ["."]
     monkeypatch.setenv("ALPHA_LLM_PROVIDER", "mock")
     monkeypatch.setenv("ALPHA_LLM_DEBUG_LOGGING", "true")
     monkeypatch.setenv("ALPHA_DEEPSEEK_API_KEY", "from-env")
+    monkeypatch.setenv("ALPHA_DEEPSEEK_MODEL", "deepseek-env-model")
     monkeypatch.setenv("ALPHA_MIMO_API_KEY", "mimo-env-key")
+    monkeypatch.setenv("ALPHA_MIMO_MODEL", "mimo-env-model")
     monkeypatch.setenv("ALPHA_COMPATIBLE_BASE_URL", "from-env")
     monkeypatch.setenv("ALPHA_COMPATIBLE_API_KEY", "compatible-env-key")
+    monkeypatch.setenv("ALPHA_COMPATIBLE_MODEL", "compatible-env-model")
+    monkeypatch.setenv("ALPHA_CODEX_MODEL", "codex-env-model")
     monkeypatch.setenv("ALPHA_TAVILY_API_KEY", "tvly-env-key")
     monkeypatch.setenv("ALPHA_BASH_TOOL_ENABLED", "true")
     monkeypatch.setenv("ALPHA_BASH_TOOL_DEFAULT_WORKDIR", "~")
@@ -302,9 +322,13 @@ allowed_workdirs = ["."]
     assert config.llm_provider == "mock"
     assert config.llm_debug_logging is True
     assert config.deepseek_api_key == "from-env"
+    assert config.deepseek_model == "deepseek-env-model"
     assert config.mimo_api_key == "mimo-env-key"
+    assert config.mimo_model == "mimo-env-model"
     assert config.compatible_base_url == "from-env"
     assert config.compatible_api_key == "compatible-env-key"
+    assert config.compatible_model == "compatible-env-model"
+    assert config.codex_model == "codex-env-model"
     assert config.tavily_api_key == "tvly-env-key"
     assert config.bash_tool.enabled is True
     assert config.bash_tool.default_workdir == Path("~").expanduser().resolve()
@@ -499,6 +523,7 @@ def test_config_cli_set_and_get(
 
     set_home_dir = runner.invoke(app, ["config", "set", "runtime.home_dir", str(home_dir)])
     set_provider = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
+    set_codex_model = runner.invoke(app, ["config", "set", "codex.model", "gpt-5.3-codex"])
     set_debug = runner.invoke(app, ["config", "set", "llm.debug_logging", "true"])
     set_context = runner.invoke(
         app,
@@ -544,11 +569,13 @@ def test_config_cli_set_and_get(
         ["config", "set", "llm.providers.deepseek.max_context_tokens", "900000"],
     )
     set_mimo_key = runner.invoke(app, ["config", "set", "mimo.api_key", "mimo-test"])
+    set_mimo_model = runner.invoke(app, ["config", "set", "mimo.model", "mimo-test-model"])
     set_mimo_provider_limit = runner.invoke(
         app,
         ["config", "set", "llm.providers.mimo.max_context_tokens", "1000000"],
     )
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
+    get_codex_model = runner.invoke(app, ["config", "get", "codex.model"])
     get_home_dir = runner.invoke(app, ["config", "get", "runtime.home_dir"])
     get_bash_enabled = runner.invoke(app, ["config", "get", "tools.bash.enabled"])
     get_files_enabled = runner.invoke(app, ["config", "get", "tools.files.enabled"])
@@ -559,6 +586,7 @@ def test_config_cli_set_and_get(
 
     assert set_home_dir.exit_code == 0
     assert set_provider.exit_code == 0
+    assert set_codex_model.exit_code == 0
     assert set_debug.exit_code == 0
     assert set_context.exit_code == 0
     assert set_tavily.exit_code == 0
@@ -574,13 +602,16 @@ def test_config_cli_set_and_get(
     assert set_files_create_parent_dirs.exit_code == 0
     assert set_provider_limit.exit_code == 0
     assert set_mimo_key.exit_code == 0
+    assert set_mimo_model.exit_code == 0
     assert set_mimo_provider_limit.exit_code == 0
     assert get_provider.exit_code == 0
+    assert get_codex_model.exit_code == 0
     assert get_home_dir.exit_code == 0
     assert get_bash_enabled.exit_code == 0
     assert get_files_enabled.exit_code == 0
     assert get_files_patch_enabled.exit_code == 0
     assert "codex" in get_provider.output
+    assert "gpt-5.3-codex" in get_codex_model.output
     assert str(home_dir) in get_home_dir.output
     assert "true" in get_bash_enabled.output
     assert "true" in get_files_enabled.output
@@ -588,11 +619,13 @@ def test_config_cli_set_and_get(
     config = load_config(env_file=None, config_file=config_path)
     assert config.home_dir == home_dir.resolve()
     assert config.llm_provider == "codex"
+    assert config.codex_model == "gpt-5.3-codex"
     assert config.llm_debug_logging is True
     assert config.llm_context.expected_output_reserve_tokens == 2048
     assert config.max_context_tokens_for_provider("deepseek") == 900000
     assert config.max_context_tokens_for_provider("mimo") == 1000000
     assert config.mimo_api_key == "mimo-test"
+    assert config.mimo_model == "mimo-test-model"
     assert config.tavily_api_key == "tvly-test"
     assert config.bash_tool.enabled is True
     assert config.bash_tool.allowed_workdirs == (
@@ -714,6 +747,7 @@ def test_config_set_strips_removed_background_fields_from_retained_sections(
         """
 [llm]
 provider = "mock"
+model = "legacy-global-model"
 
 [cognition.background]
 enabled = false
@@ -752,6 +786,8 @@ invalidated_source_min = 12
     assert "[cognition.background]" in saved
     assert "[cognition.background.extraction]" in saved
     assert "[cognition.background.summary]" in saved
+    assert "legacy-global-model" not in saved
+    assert "model =" not in saved
     assert "interval_seconds = 7" in saved
     assert "tick_timeout_seconds" not in saved
     assert "[cognition.background.intake]" not in saved
@@ -835,12 +871,10 @@ def test_config_set_rejects_unknown_key(
         "deepseek.base_url",
         "mimo.base_url",
         "codex.base_url",
-        "deepseek.model",
-        "mimo.model",
-        "codex.model",
+        "llm.model",
     ],
 )
-def test_provider_specific_transport_and_model_keys_are_not_configurable(
+def test_unsupported_llm_and_provider_transport_keys_are_not_configurable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     key: str,

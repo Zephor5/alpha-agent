@@ -134,15 +134,21 @@ class _DaemonRequestClient(Protocol):
 
 
 def _display_model(config: AlphaConfig) -> str:
-    if config.llm_model:
-        return config.llm_model
     if config.llm_provider == "deepseek":
+        if config.deepseek_model:
+            return config.deepseek_model
         return f"{DEEPSEEK_DEFAULT_MODEL} (provider default)"
     if config.llm_provider == "mimo":
+        if config.mimo_model:
+            return config.mimo_model
         return f"{MIMO_DEFAULT_MODEL} (provider default)"
     if config.llm_provider in {"codex", "openai-codex", "openai_codex"}:
+        if config.codex_model:
+            return config.codex_model
         return f"{CODEX_DEFAULT_MODEL} (provider default)"
     if config.llm_provider in {"openai-compatible", "openai", "compatible"}:
+        if config.compatible_model:
+            return config.compatible_model
         return f"{OPENAI_COMPATIBLE_DEFAULT_MODEL} (provider default)"
     return ""
 
@@ -686,7 +692,7 @@ def config_show() -> None:
         "daemon_socket_path": str(config.daemon_socket_path),
         "daemon_status_path": str(config.daemon_status_path),
         "llm_provider": config.llm_provider,
-        "llm_model": _display_model(config),
+        "provider_model": _display_model(config),
         "llm_debug_logging": str(config.llm_debug_logging).lower(),
         "llm_context_tool_truncate_threshold_ratio": str(
             config.llm_context.tool_truncate_threshold_ratio

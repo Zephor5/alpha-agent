@@ -390,8 +390,9 @@ defaults < config.toml < .env / environment variables
 
 See [`config.example.toml`](config.example.toml) for every available key with
 inline comments, and [`.env.example`](.env.example) for environment variables
-read by the loader. Common starting points: `llm.provider`, `llm.model`,
-`tools.bash.enabled`, and `tavily.api_key`.
+read by the loader. Common starting points: `llm.provider`, provider-specific
+model keys such as `deepseek.model` or `mimo.model`, `tools.bash.enabled`, and
+`tavily.api_key`.
 
 ## Status & roadmap
 

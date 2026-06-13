@@ -11,14 +11,14 @@ daemon_status_path = "daemon-status.json"
 
 [llm]
 provider = "mock"
-# Leave empty to use the selected provider's default model.
-model = ""
 # Writes full LLM request/response payloads to debug logs when true.
 debug_logging = false
 
 [compatible]
 base_url = "https://api.openai.com/v1"
 api_key = ""
+# Leave empty to use the provider's default model.
+model = ""
 
 [llm.context]
 # Active runtime context maintenance settings.
@@ -86,6 +86,8 @@ active_goal_limit = 8
 
 [deepseek]
 api_key = ""
+# Leave empty to use the provider's default model.
+model = ""
 reasoning_enabled = true
 reasoning_effort = ""
 
@@ -93,9 +95,13 @@ reasoning_effort = ""
 # Xiaomi MiMo API key. Environment variables ALPHA_MIMO_API_KEY or MIMO_API_KEY
 # override this value.
 api_key = ""
+# Leave empty to use the provider's default model.
+model = ""
 
 [codex]
 access_token = ""
+# Leave empty to use the provider's default model.
+model = ""
 
 [tavily]
 # Enables the built-in web_search and web_fetch tools when set.

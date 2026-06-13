@@ -31,7 +31,7 @@ class DeepSeekProvider:
             raise ValueError("deepseek.api_key is required for deepseek provider")
         self.base_url = DEEPSEEK_BASE_URL
         self.api_key = api_key
-        self.model = config.llm_model or DEEPSEEK_DEFAULT_MODEL
+        self.model = config.deepseek_model or DEEPSEEK_DEFAULT_MODEL
         self.reasoning_enabled = config.deepseek_reasoning_enabled
         self.reasoning_effort = config.deepseek_reasoning_effort
         self.timeout = timeout

@@ -166,7 +166,7 @@ def test_deepseek_provider_replays_assistant_reasoning_content(
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+    config = _config(deepseek_api_key="deepseek-key", deepseek_model="deepseek-chat")
     messages: list[ChatMessage] = [
         cast(ChatMessage, {"role": "user", "content": "ping", "reasoning_content": "drop"}),
         {
@@ -209,7 +209,7 @@ def test_deepseek_v4_request_includes_thinking_wire_shape(
     monkeypatch.setattr(httpx, "post", fake_post)
     config = _config(
         deepseek_api_key="deepseek-key",
-        llm_model="deepseek-v4-pro",
+        deepseek_model="deepseek-v4-pro",
         deepseek_reasoning_effort="high",
     )
 
@@ -240,7 +240,7 @@ def test_deepseek_provider_sends_tools_and_tool_choice_wire_shape(
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+    config = _config(deepseek_api_key="deepseek-key", deepseek_model="deepseek-chat")
 
     DeepSeekProvider(config).complete(
         [{"role": "user", "content": "ping"}],
@@ -295,7 +295,7 @@ def test_deepseek_provider_sends_response_format_wire_shape(
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+    config = _config(deepseek_api_key="deepseek-key", deepseek_model="deepseek-chat")
 
     DeepSeekProvider(config).complete(
         [{"role": "user", "content": "Return JSON."}],
@@ -337,7 +337,7 @@ def test_deepseek_provider_parses_tool_calls(monkeypatch: pytest.MonkeyPatch) ->
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+    config = _config(deepseek_api_key="deepseek-key", deepseek_model="deepseek-chat")
 
     response = DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
 
@@ -390,7 +390,7 @@ def test_deepseek_provider_preserves_invalid_tool_call_arguments(
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+    config = _config(deepseek_api_key="deepseek-key", deepseek_model="deepseek-chat")
 
     response = DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
 
@@ -417,7 +417,7 @@ def test_deepseek_response_without_reasoning_content_leaves_field_absent(
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+    config = _config(deepseek_api_key="deepseek-key", deepseek_model="deepseek-chat")
 
     response = DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
 
@@ -440,7 +440,7 @@ def test_deepseek_chat_omits_thinking_for_v3(monkeypatch: pytest.MonkeyPatch) ->
         )
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    config = _config(deepseek_api_key="deepseek-key", llm_model="deepseek-chat")
+    config = _config(deepseek_api_key="deepseek-key", deepseek_model="deepseek-chat")
 
     DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
 
@@ -481,7 +481,7 @@ def test_openai_compatible_provider_parses_tool_calls(monkeypatch: pytest.Monkey
     config = _config(
         compatible_base_url="https://compatible.example",
         compatible_api_key="compatible-key",
-        llm_model="gpt-compatible",
+        compatible_model="gpt-compatible",
     )
 
     response = OpenAICompatibleProvider(config).complete(
@@ -524,7 +524,7 @@ def test_openai_compatible_provider_preserves_tool_messages_in_request(
     config = _config(
         compatible_base_url="https://compatible.example",
         compatible_api_key="compatible-key",
-        llm_model="gpt-compatible",
+        compatible_model="gpt-compatible",
     )
     messages: list[ChatMessage] = [
         {
@@ -566,7 +566,7 @@ def test_openai_compatible_provider_strips_internal_reasoning_content(
     config = _config(
         compatible_base_url="https://compatible.example",
         compatible_api_key="compatible-key",
-        llm_model="gpt-compatible",
+        compatible_model="gpt-compatible",
     )
     messages: list[ChatMessage] = [
         {
@@ -630,7 +630,7 @@ def test_openai_compatible_provider_sends_tools_with_none_tool_choice(
     config = _config(
         compatible_base_url="https://compatible.example",
         compatible_api_key="compatible-key",
-        llm_model="gpt-compatible",
+        compatible_model="gpt-compatible",
     )
 
     OpenAICompatibleProvider(config).complete(
@@ -686,7 +686,7 @@ def test_openai_compatible_provider_sends_response_format_wire_shape(
     config = _config(
         compatible_base_url="https://compatible.example",
         compatible_api_key="compatible-key",
-        llm_model="gpt-compatible",
+        compatible_model="gpt-compatible",
     )
 
     OpenAICompatibleProvider(config).complete(
@@ -732,7 +732,7 @@ def test_codex_provider_uses_responses_payload(monkeypatch: pytest.MonkeyPatch) 
         return _response(200, {"id": "resp-1", "output_text": "codex pong"})
 
     monkeypatch.setattr(httpx, "post", fake_post)
-    config = _config(codex_access_token="codex-token", llm_model="gpt-5.3-codex")
+    config = _config(codex_access_token="codex-token", codex_model="gpt-5.3-codex")
 
     response = CodexResponsesProvider(config).complete(
         [
