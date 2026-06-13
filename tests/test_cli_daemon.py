@@ -732,6 +732,54 @@ def test_cognition_import_status_renders_summary_and_verbose_conversations(
     ]
 
 
+def test_daemon_status_renders_timestamps_in_local_timezone(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _reset_fake_client()
+    _FakeDaemonClient.status_responses = [
+        {
+            "ok": True,
+            "status": {
+                "state": "running",
+                "running": True,
+                "pid": 12345,
+                "socket_path": str(tmp_path / "daemon.sock"),
+                "status_path": str(tmp_path / "daemon-status.json"),
+                "db_path": str(tmp_path / "alpha.db"),
+                "log_dir": str(tmp_path / "logs"),
+                "updated_at": "2026-01-01T00:00:00+00:00",
+                "started_at": "2026-01-01T00:01:00+00:00",
+                "adapters": [],
+                "message": "Daemon is running.",
+                "background_enabled": True,
+                "background_state": "sleeping",
+                "background_last_tick": "2026-01-01T00:02:00+00:00",
+                "background_last_success": "2026-01-01T00:03:00+00:00",
+                "background_last_error": "last failure text",
+                "background_next_tick": "2026-01-01T00:04:00+00:00",
+            },
+        }
+    ]
+    monkeypatch.setattr("alpha_agent.cli.DaemonClient", _FakeDaemonClient)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["daemon", "status"],
+        env={**_env(tmp_path), "TZ": "Asia/Shanghai"},
+    )
+
+    assert result.exit_code == 0
+    assert "2026-01-01T08:00:00+08:00" in result.output
+    assert "2026-01-01T08:01:00+08:00" in result.output
+    assert "2026-01-01T08:02:00+08:00" in result.output
+    assert "2026-01-01T08:03:00+08:00" in result.output
+    assert "2026-01-01T08:04:00+08:00" in result.output
+    assert "last failure text" in result.output
+    assert "2026-01-01T00:02:00+00:00" not in result.output
+
+
 def test_daemon_start_spawns_background_run_and_waits_for_running(
     tmp_path: Path,
     monkeypatch,

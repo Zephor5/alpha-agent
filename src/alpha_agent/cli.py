@@ -9,8 +9,10 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Annotated, Any, Protocol
+from zoneinfo import ZoneInfo
 
 import typer
 from prompt_toolkit import prompt as _terminal_prompt
@@ -91,6 +93,7 @@ from alpha_agent.skills.manager import SkillManager
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
 from alpha_agent.state.store import StateStore
 from alpha_agent.tools.default import build_tool_registry
+from alpha_agent.utils.time import local_timezone_identifier
 
 console = Console()
 app = typer.Typer(help="Alpha Agent cognition runtime.")
@@ -438,14 +441,41 @@ def _truncate_chat_history_content(content: str) -> str:
     return f"{content[: CHAT_HISTORY_MESSAGE_MAX_CHARS - 3].rstrip()}..."
 
 
+def _local_display_timezone() -> tzinfo:
+    identifier = local_timezone_identifier()
+    if len(identifier) == 6 and identifier[0] in "+-" and identifier[3] == ":":
+        hours = int(identifier[1:3])
+        minutes = int(identifier[4:6])
+        offset = timedelta(hours=hours, minutes=minutes)
+        if identifier[0] == "-":
+            offset = -offset
+        return timezone(offset, name=identifier)
+    return ZoneInfo(identifier)
+
+
+def _display_local_timestamp(value: str | None, local_timezone: tzinfo) -> str:
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return value
+    return parsed.astimezone(local_timezone).isoformat()
+
+
 def _render_daemon_status(status: DaemonStatus) -> None:
     process = "running" if status.running else "not running"
+    local_timezone = _local_display_timezone()
     table = Table(title="Daemon Status")
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("State", status.state)
     table.add_row("Process", process)
     table.add_row("PID", str(status.pid) if status.pid is not None else "-")
+    table.add_row("Updated at", _display_local_timestamp(status.updated_at, local_timezone))
+    table.add_row("Started at", _display_local_timestamp(status.started_at, local_timezone))
     table.add_row("Socket path", status.socket_path)
     table.add_row("Status path", status.status_path)
     table.add_row("DB path", status.db_path)
@@ -453,10 +483,19 @@ def _render_daemon_status(status: DaemonStatus) -> None:
     table.add_row("Adapters", ", ".join(status.adapters) if status.adapters else "none")
     table.add_row("Background enabled", str(status.background_enabled).lower())
     table.add_row("Background state", status.background_state)
-    table.add_row("Background last tick", status.background_last_tick or "-")
-    table.add_row("Background last success", status.background_last_success or "-")
+    table.add_row(
+        "Background last tick",
+        _display_local_timestamp(status.background_last_tick, local_timezone),
+    )
+    table.add_row(
+        "Background last success",
+        _display_local_timestamp(status.background_last_success, local_timezone),
+    )
     table.add_row("Background last error", status.background_last_error or "-")
-    table.add_row("Background next tick", status.background_next_tick or "-")
+    table.add_row(
+        "Background next tick",
+        _display_local_timestamp(status.background_next_tick, local_timezone),
+    )
     table.add_row("Message", status.message)
     console.print(table)
     typer.echo(f"Socket path: {status.socket_path}")
