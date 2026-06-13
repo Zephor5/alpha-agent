@@ -70,6 +70,15 @@ def _deepseek_export() -> list[dict[str, object]]:
     ]
 
 
+def _deepseek_export_with_two_conversations() -> list[dict[str, object]]:
+    source = _deepseek_export()
+    second = deepcopy(source[0])
+    second["id"] = "conv_2"
+    second["title"] = "Second conversation"
+    source.append(second)
+    return source
+
+
 def _convert(source: object) -> dict[str, object]:
     return convert_deepseek_export(json.dumps(source))
 
@@ -141,6 +150,37 @@ def test_converts_linear_deepseek_export_to_normalized_import_payload(tmp_path) 
     assert "tool search details" not in json.dumps(payload)
     assert "original_inserted_at" not in json.dumps(payload)
     _assert_import_validator_accepts(payload, tmp_path)
+
+
+def test_limits_converted_deepseek_conversations(tmp_path) -> None:
+    payload = convert_deepseek_export(
+        json.dumps(_deepseek_export_with_two_conversations()),
+        limit=1,
+    )
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    assert len(conversations) == 1
+    assert conversations[0]["external_conversation_id"] == "conv_1"
+    assert "conv_2" not in json.dumps(payload)
+    _assert_import_validator_accepts(payload, tmp_path)
+
+
+def test_converts_all_deepseek_conversations_by_default(tmp_path) -> None:
+    payload = _convert(_deepseek_export_with_two_conversations())
+
+    conversations = payload["conversations"]
+    assert isinstance(conversations, list)
+    assert [conversation["external_conversation_id"] for conversation in conversations] == [
+        "conv_1",
+        "conv_2",
+    ]
+    _assert_import_validator_accepts(payload, tmp_path, expected_messages=4)
+
+
+def test_rejects_invalid_deepseek_conversation_limit() -> None:
+    with pytest.raises(ValueError, match="limit"):
+        convert_deepseek_export(json.dumps(_deepseek_export()), limit=0)
 
 
 def test_adjusts_timestamps_by_tree_order_when_deepseek_times_move_backwards(tmp_path) -> None:

@@ -217,6 +217,7 @@ import contract before writing:
 
 ```bash
 uv run alpha cognition import convert deepseek path/to/deepseek-export.json path/to/conversations.json
+uv run alpha cognition import convert deepseek path/to/deepseek-export.json path/to/conversations.json --limit 100
 uv run alpha cognition import convert deepseek path/to/deepseek-export.json path/to/conversations.json --force
 ```
 
@@ -224,7 +225,8 @@ The first-version DeepSeek converter is intentionally strict:
 
 - The raw export must be a top-level array of conversation objects with
   `id`, `title`, `inserted_at`, `updated_at`, and `mapping` fields matching the
-  current DeepSeek export shape.
+  current DeepSeek export shape. By default all conversations are converted;
+  `--limit` converts only the first N conversations.
 - `mapping` is resolved to one linear path from `root`. Branch children whose
   own `RESPONSE` content starts with `服务器繁忙` are treated as failed DeepSeek
   retries and filtered first. If multiple children remain after that, the

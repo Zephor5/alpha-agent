@@ -1277,6 +1277,10 @@ def cognition_import_convert_deepseek(
         bool,
         typer.Option("--force", help="Overwrite an existing output file."),
     ] = False,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", min=1, help="Maximum number of conversations to convert."),
+    ] = None,
 ) -> None:
     """Convert a raw DeepSeek export into normalized import JSON."""
 
@@ -1293,7 +1297,7 @@ def cognition_import_convert_deepseek(
         raise typer.Exit(1)
     raw_json = _read_deepseek_export_file(source)
     try:
-        payload = convert_deepseek_export(raw_json)
+        payload = convert_deepseek_export(raw_json, limit=limit)
     except DeepSeekExportConversionError as exc:
         console.print(str(exc))
         _render_error_details({"details": [error.to_dict() for error in exc.errors]})

@@ -62,6 +62,15 @@ def _deepseek_export() -> list[dict[str, object]]:
     ]
 
 
+def _deepseek_export_with_two_conversations() -> list[dict[str, object]]:
+    source = _deepseek_export()
+    second = json.loads(json.dumps(source[0]))
+    second["id"] = "deepseek_conv_2"
+    second["title"] = "CLI conversion 2"
+    source.append(second)
+    return source
+
+
 def _write_deepseek_export(path: Path, payload: object | None = None) -> None:
     content = json.dumps(payload if payload is not None else _deepseek_export())
     path.write_text(content, encoding="utf-8")
@@ -97,6 +106,38 @@ def test_cognition_import_convert_deepseek_writes_normalized_file(tmp_path: Path
     assert payload["source_provider"] == "deepseek"
     assert payload["timezone"] == "+08:00"
     assert payload["conversations"][0]["messages"][1]["created_at"].endswith("000001+08:00")
+    _assert_import_validator_accepts(output_path, tmp_path)
+
+
+def test_cognition_import_convert_deepseek_limits_conversation_count(
+    tmp_path: Path,
+) -> None:
+    source_path = tmp_path / "deepseek.json"
+    output_path = tmp_path / "normalized.json"
+    _write_deepseek_export(source_path, _deepseek_export_with_two_conversations())
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        [
+            "cognition",
+            "import",
+            "convert",
+            "deepseek",
+            str(source_path),
+            str(output_path),
+            "--limit",
+            "1",
+        ],
+        env=_env(tmp_path),
+    )
+
+    assert result.exit_code == 0
+    assert "conversion source_provider=deepseek conversations=1 messages=2" in result.output
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert [item["external_conversation_id"] for item in payload["conversations"]] == [
+        "deepseek_conv"
+    ]
     _assert_import_validator_accepts(output_path, tmp_path)
 
 

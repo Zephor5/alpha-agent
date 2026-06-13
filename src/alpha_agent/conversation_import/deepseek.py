@@ -63,8 +63,15 @@ class _ConvertedMessage:
     metadata: dict[str, Any]
 
 
-def convert_deepseek_export(payload_json: str | bytes) -> NormalizedImportPayload:
+def convert_deepseek_export(
+    payload_json: str | bytes,
+    *,
+    limit: int | None = None,
+) -> NormalizedImportPayload:
     """Return Alpha's normalized import payload for one raw DeepSeek export."""
+
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be greater than or equal to 1")
 
     errors: list[DeepSeekConversionErrorDetail] = []
     decoded = _parse_payload(payload_json, errors)
@@ -95,7 +102,10 @@ def convert_deepseek_export(payload_json: str | bytes) -> NormalizedImportPayloa
     context = _ConversionContext()
     conversations: list[dict[str, Any]] = []
     seen_conversation_ids: set[str] = set()
-    for index, raw_conversation in enumerate(decoded):
+    raw_conversations = decoded
+    if limit is not None:
+        raw_conversations = decoded[:limit]
+    for index, raw_conversation in enumerate(raw_conversations):
         conversation = _convert_conversation(
             raw_conversation,
             f"$[{index}]",
