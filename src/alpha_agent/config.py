@@ -71,34 +71,16 @@ max_read_lines = 200
 create_parent_dirs_enabled = false
 max_output_chars = 30000
 
-[cognition.consolidation]
-enabled = true
-interval_seconds = 300
-
 [cognition.background]
 enabled = true
 startup_delay_seconds = 5
 interval_seconds = 300
-tick_timeout_seconds = 60
-
-[cognition.background.intake]
-batch_size = 64
-min_sources = 1
 
 [cognition.background.extraction]
-min_sources = 1
 inactivity_threshold_hours = 24
-
-[cognition.background.consolidation]
-batch_size = 12
-min_drafts = 1
-
-[cognition.background.conflict]
-batch_size = 4
-min_conflicts = 1
+max_sessions_per_pass = 10
 
 [cognition.background.summary]
-batch_size = 4
 initial_min_beliefs = 12
 changed_source_min = 6
 invalidated_source_min = 1
@@ -166,16 +148,8 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "cognition.background.enabled": bool,
     "cognition.background.startup_delay_seconds": int,
     "cognition.background.interval_seconds": int,
-    "cognition.background.tick_timeout_seconds": int,
-    "cognition.background.intake.batch_size": int,
-    "cognition.background.intake.min_sources": int,
-    "cognition.background.extraction.min_sources": int,
     "cognition.background.extraction.inactivity_threshold_hours": int,
-    "cognition.background.consolidation.batch_size": int,
-    "cognition.background.consolidation.min_drafts": int,
-    "cognition.background.conflict.batch_size": int,
-    "cognition.background.conflict.min_conflicts": int,
-    "cognition.background.summary.batch_size": int,
+    "cognition.background.extraction.max_sessions_per_pass": int,
     "cognition.background.summary.initial_min_beliefs": int,
     "cognition.background.summary.changed_source_min": int,
     "cognition.background.summary.invalidated_source_min": int,
@@ -206,22 +180,24 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
     "deepseek.reasoning_effort": {"", "low", "medium", "high", "max", "xhigh"},
 }
 
-DEPRECATED_SECTION_FIELDS = {
-    ("cognition.background.extraction", "batch_size"),
-}
+REMOVED_CONFIG_SECTIONS = (
+    "cognition.consolidation",
+    "cognition.background.intake",
+    "cognition.background.consolidation",
+    "cognition.background.conflict",
+)
+
+REMOVED_CONFIG_FIELDS = (
+    "cognition.background.tick_timeout_seconds",
+    "cognition.background.extraction.batch_size",
+    "cognition.background.extraction.min_sources",
+    "cognition.background.summary.batch_size",
+)
 
 POSITIVE_INT_CONFIG_KEYS = {
     "cognition.background.interval_seconds",
-    "cognition.background.tick_timeout_seconds",
-    "cognition.background.intake.batch_size",
-    "cognition.background.intake.min_sources",
-    "cognition.background.extraction.min_sources",
     "cognition.background.extraction.inactivity_threshold_hours",
-    "cognition.background.consolidation.batch_size",
-    "cognition.background.consolidation.min_drafts",
-    "cognition.background.conflict.batch_size",
-    "cognition.background.conflict.min_conflicts",
-    "cognition.background.summary.batch_size",
+    "cognition.background.extraction.max_sessions_per_pass",
     "cognition.background.summary.initial_min_beliefs",
     "cognition.background.summary.changed_source_min",
     "cognition.background.summary.invalidated_source_min",
@@ -316,42 +292,17 @@ class FileToolConfig:
 
 
 @dataclass(frozen=True)
-class BackgroundIntakeConfig:
-    """Source intake gating and batch size for daemon background cognition."""
-
-    batch_size: int = 64
-    min_sources: int = 1
-
-
-@dataclass(frozen=True)
 class BackgroundExtractionConfig:
     """Memory extraction gating for daemon background cognition."""
 
-    min_sources: int = 1
     inactivity_threshold_hours: int = 24
-
-
-@dataclass(frozen=True)
-class BackgroundConsolidationConfig:
-    """Memory consolidation gating and batch size for daemon background cognition."""
-
-    batch_size: int = 12
-    min_drafts: int = 1
-
-
-@dataclass(frozen=True)
-class BackgroundConflictConfig:
-    """Conflict review gating and batch size for daemon background cognition."""
-
-    batch_size: int = 4
-    min_conflicts: int = 1
+    max_sessions_per_pass: int = 10
 
 
 @dataclass(frozen=True)
 class BackgroundSummaryConfig:
     """Summary gate placeholders for later background summary phases."""
 
-    batch_size: int = 4
     initial_min_beliefs: int = 12
     changed_source_min: int = 6
     invalidated_source_min: int = 1
@@ -364,13 +315,7 @@ class CognitionBackgroundConfig:
     enabled: bool = True
     startup_delay_seconds: int = 5
     interval_seconds: int = 300
-    tick_timeout_seconds: int = 60
-    intake: BackgroundIntakeConfig = field(default_factory=BackgroundIntakeConfig)
     extraction: BackgroundExtractionConfig = field(default_factory=BackgroundExtractionConfig)
-    consolidation: BackgroundConsolidationConfig = field(
-        default_factory=BackgroundConsolidationConfig
-    )
-    conflict: BackgroundConflictConfig = field(default_factory=BackgroundConflictConfig)
     summary: BackgroundSummaryConfig = field(default_factory=BackgroundSummaryConfig)
 
 
@@ -395,8 +340,6 @@ class AlphaConfig:
     )
     compatible_base_url: str | None = None
     compatible_api_key: str | None = None
-    cognition_consolidation_enabled: bool = True
-    cognition_consolidation_interval_seconds: int = 300
     cognition_background: CognitionBackgroundConfig = field(
         default_factory=CognitionBackgroundConfig
     )
@@ -501,8 +444,6 @@ def load_config(
     file_tool = tools.get("files")
     file_tool = file_tool if isinstance(file_tool, dict) else {}
     cognition = _section(config_data, "cognition")
-    consolidation = cognition.get("consolidation")
-    consolidation = consolidation if isinstance(consolidation, dict) else {}
     background = cognition.get("background")
     background = background if isinstance(background, dict) else {}
     drive = cognition.get("drive")
@@ -632,14 +573,6 @@ def load_config(
             config_data,
             "compatible",
             "api_key",
-        ),
-        cognition_consolidation_enabled=_bool_env(
-            "ALPHA_COGNITION_CONSOLIDATION_ENABLED",
-            _bool_value(consolidation.get("enabled"), True),
-        ),
-        cognition_consolidation_interval_seconds=_int_env(
-            "ALPHA_COGNITION_CONSOLIDATION_INTERVAL_SECONDS",
-            _int_value(consolidation.get("interval_seconds"), 300),
         ),
         cognition_background=_background_config(background),
         cognition_drive_enabled=_bool_env(
@@ -805,35 +738,11 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         "cognition.background.interval_seconds": (
             config.cognition_background.interval_seconds
         ),
-        "cognition.background.tick_timeout_seconds": (
-            config.cognition_background.tick_timeout_seconds
-        ),
-        "cognition.background.intake.batch_size": (
-            config.cognition_background.intake.batch_size
-        ),
-        "cognition.background.intake.min_sources": (
-            config.cognition_background.intake.min_sources
-        ),
-        "cognition.background.extraction.min_sources": (
-            config.cognition_background.extraction.min_sources
-        ),
         "cognition.background.extraction.inactivity_threshold_hours": (
             config.cognition_background.extraction.inactivity_threshold_hours
         ),
-        "cognition.background.consolidation.batch_size": (
-            config.cognition_background.consolidation.batch_size
-        ),
-        "cognition.background.consolidation.min_drafts": (
-            config.cognition_background.consolidation.min_drafts
-        ),
-        "cognition.background.conflict.batch_size": (
-            config.cognition_background.conflict.batch_size
-        ),
-        "cognition.background.conflict.min_conflicts": (
-            config.cognition_background.conflict.min_conflicts
-        ),
-        "cognition.background.summary.batch_size": (
-            config.cognition_background.summary.batch_size
+        "cognition.background.extraction.max_sessions_per_pass": (
+            config.cognition_background.extraction.max_sessions_per_pass
         ),
         "cognition.background.summary.initial_min_beliefs": (
             config.cognition_background.summary.initial_min_beliefs
@@ -870,52 +779,16 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         raise ValueError("tools.files.allowed_roots must not be empty")
     positive_values = (
         (
-            "cognition.consolidation.interval_seconds",
-            config.cognition_consolidation_interval_seconds,
-        ),
-        (
             "cognition.background.interval_seconds",
             config.cognition_background.interval_seconds,
-        ),
-        (
-            "cognition.background.tick_timeout_seconds",
-            config.cognition_background.tick_timeout_seconds,
-        ),
-        (
-            "cognition.background.intake.batch_size",
-            config.cognition_background.intake.batch_size,
-        ),
-        (
-            "cognition.background.intake.min_sources",
-            config.cognition_background.intake.min_sources,
-        ),
-        (
-            "cognition.background.extraction.min_sources",
-            config.cognition_background.extraction.min_sources,
         ),
         (
             "cognition.background.extraction.inactivity_threshold_hours",
             config.cognition_background.extraction.inactivity_threshold_hours,
         ),
         (
-            "cognition.background.consolidation.batch_size",
-            config.cognition_background.consolidation.batch_size,
-        ),
-        (
-            "cognition.background.consolidation.min_drafts",
-            config.cognition_background.consolidation.min_drafts,
-        ),
-        (
-            "cognition.background.conflict.batch_size",
-            config.cognition_background.conflict.batch_size,
-        ),
-        (
-            "cognition.background.conflict.min_conflicts",
-            config.cognition_background.conflict.min_conflicts,
-        ),
-        (
-            "cognition.background.summary.batch_size",
-            config.cognition_background.summary.batch_size,
+            "cognition.background.extraction.max_sessions_per_pass",
+            config.cognition_background.extraction.max_sessions_per_pass,
         ),
         (
             "cognition.background.summary.initial_min_beliefs",
@@ -1018,6 +891,7 @@ def _validate_config_data(config_data: dict[str, Any]) -> None:
 
 
 def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
+    _strip_removed_config_entries(config_data)
     sections = (
         "runtime",
         "llm",
@@ -1028,12 +902,8 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         "compatible",
         "tools.bash",
         "tools.files",
-        "cognition.consolidation",
         "cognition.background",
-        "cognition.background.intake",
         "cognition.background.extraction",
-        "cognition.background.consolidation",
-        "cognition.background.conflict",
         "cognition.background.summary",
         "cognition.drive",
         "deepseek",
@@ -1054,12 +924,26 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         for field_name, value in section.items():
             if isinstance(value, dict):
                 continue
-            if (section_name, field_name) in DEPRECATED_SECTION_FIELDS:
-                continue
             lines.append(f"{field_name} = {_toml_literal(value)}")
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def _strip_removed_config_entries(config_data: dict[str, Any]) -> None:
+    for dotted_name in (*REMOVED_CONFIG_SECTIONS, *REMOVED_CONFIG_FIELDS):
+        _remove_nested_value(config_data, dotted_name)
+
+
+def _remove_nested_value(config_data: dict[str, Any], dotted_name: str) -> None:
+    parts = dotted_name.split(".")
+    current: Any = config_data
+    for part in parts[:-1]:
+        if not isinstance(current, dict):
+            return
+        current = current.get(part)
+    if isinstance(current, dict):
+        current.pop(parts[-1], None)
 
 
 def _toml_literal(value: Any) -> str:
@@ -1119,10 +1003,7 @@ def _float_value(value: Any, default: float) -> float:
 
 
 def _background_config(section: dict[str, Any]) -> CognitionBackgroundConfig:
-    intake = _mapping_section(section, "intake")
     extraction = _mapping_section(section, "extraction")
-    consolidation = _mapping_section(section, "consolidation")
-    conflict = _mapping_section(section, "conflict")
     summary = _mapping_section(section, "summary")
     return CognitionBackgroundConfig(
         enabled=_bool_env(
@@ -1137,55 +1018,17 @@ def _background_config(section: dict[str, Any]) -> CognitionBackgroundConfig:
             "ALPHA_COGNITION_BACKGROUND_INTERVAL_SECONDS",
             _int_value(section.get("interval_seconds"), 300),
         ),
-        tick_timeout_seconds=_int_env(
-            "ALPHA_COGNITION_BACKGROUND_TICK_TIMEOUT_SECONDS",
-            _int_value(section.get("tick_timeout_seconds"), 60),
-        ),
-        intake=BackgroundIntakeConfig(
-            batch_size=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_INTAKE_BATCH_SIZE",
-                _int_value(intake.get("batch_size"), 64),
-            ),
-            min_sources=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_INTAKE_MIN_SOURCES",
-                _int_value(intake.get("min_sources"), 1),
-            ),
-        ),
         extraction=BackgroundExtractionConfig(
-            min_sources=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_EXTRACTION_MIN_SOURCES",
-                _int_value(extraction.get("min_sources"), 1),
-            ),
             inactivity_threshold_hours=_int_env(
                 "ALPHA_COGNITION_BACKGROUND_EXTRACTION_INACTIVITY_THRESHOLD_HOURS",
                 _int_value(extraction.get("inactivity_threshold_hours"), 24),
             ),
-        ),
-        consolidation=BackgroundConsolidationConfig(
-            batch_size=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_BATCH_SIZE",
-                _int_value(consolidation.get("batch_size"), 12),
-            ),
-            min_drafts=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MIN_DRAFTS",
-                _int_value(consolidation.get("min_drafts"), 1),
-            ),
-        ),
-        conflict=BackgroundConflictConfig(
-            batch_size=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_CONFLICT_BATCH_SIZE",
-                _int_value(conflict.get("batch_size"), 4),
-            ),
-            min_conflicts=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_CONFLICT_MIN_CONFLICTS",
-                _int_value(conflict.get("min_conflicts"), 1),
+            max_sessions_per_pass=_int_env(
+                "ALPHA_COGNITION_BACKGROUND_EXTRACTION_MAX_SESSIONS_PER_PASS",
+                _int_value(extraction.get("max_sessions_per_pass"), 10),
             ),
         ),
         summary=BackgroundSummaryConfig(
-            batch_size=_int_env(
-                "ALPHA_COGNITION_BACKGROUND_SUMMARY_BATCH_SIZE",
-                _int_value(summary.get("batch_size"), 4),
-            ),
             initial_min_beliefs=_int_env(
                 "ALPHA_COGNITION_BACKGROUND_SUMMARY_INITIAL_MIN_BELIEFS",
                 _int_value(summary.get("initial_min_beliefs"), 12),

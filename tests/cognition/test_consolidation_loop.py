@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from threading import Event, Thread
 from types import SimpleNamespace
 from typing import TypedDict
 
 import pytest
 
-import alpha_agent.cognition.loops.background_service as background_service_module
 import alpha_agent.cognition.state_service as state_service_module
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
@@ -22,7 +22,6 @@ from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.loops import BackgroundCognitionService
 from alpha_agent.cognition.loops.scheduler import (
-    ScheduleTrigger,
     WorkerCheckpoint,
     WorkerReport,
     YieldingCoordinator,
@@ -32,14 +31,18 @@ from alpha_agent.cognition.loops.workers.memory_consolidation import (
     MemoryConflictReviewWorker,
     MemoryConsolidationWorker,
 )
-from alpha_agent.cognition.loops.workers.memory_extraction import MemoryExtractionWorker
+from alpha_agent.cognition.loops.workers.memory_extraction import (
+    MemoryExtractionWorker,
+    _session_backlog_candidate,
+    _window_idempotency_key,
+)
+from alpha_agent.cognition.loops.workers.memory_summary import MemorySummaryWorker
 from alpha_agent.cognition.models import (
     AtomicBelief,
     Authority,
     BeliefId,
     BeliefLifecycle,
     BeliefScope,
-    CognitiveEventKind,
     DerivationStage,
     Instant,
     MemoryKind,
@@ -60,10 +63,7 @@ from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
 from alpha_agent.config import (
     AlphaConfig,
-    BackgroundConflictConfig,
-    BackgroundConsolidationConfig,
     BackgroundExtractionConfig,
-    BackgroundIntakeConfig,
     CognitionBackgroundConfig,
 )
 from alpha_agent.daemon.conversation_import import ConversationImportService
@@ -173,28 +173,28 @@ def test_processing_ledger_tracks_source_window_and_stage_run_without_mutating_r
 
     service.ledger.mark_source_pending(
         user_source,
-        stage=BackgroundStage.INTAKE,
+        stage=BackgroundStage.EXTRACTION,
         target_unit="session:s1",
-        idempotency_key="intake:user",
+        idempotency_key="extraction:user",
     )
     service.ledger.claim_source(
         user_source,
-        stage=BackgroundStage.INTAKE,
+        stage=BackgroundStage.EXTRACTION,
         target_unit="session:s1",
         claimed_by="worker-a",
     )
     service.ledger.mark_source_failed(
         user_source,
-        stage=BackgroundStage.INTAKE,
+        stage=BackgroundStage.EXTRACTION,
         target_unit="session:s1",
         error="fixture failure",
     )
     service.ledger.mark_source_skipped(
         trace_source,
-        stage=BackgroundStage.INTAKE,
+        stage=BackgroundStage.EXTRACTION,
         target_unit="session:s1",
         reason="unsupported trace",
-        idempotency_key="intake:trace",
+        idempotency_key="extraction:trace",
     )
     window = service.ledger.create_source_window(
         stage=BackgroundStage.EXTRACTION,
@@ -218,12 +218,12 @@ def test_processing_ledger_tracks_source_window_and_stage_run_without_mutating_r
 
     assert service.ledger.get_source_progress(
         user_source,
-        stage=BackgroundStage.INTAKE,
+        stage=BackgroundStage.EXTRACTION,
         target_unit="session:s1",
     ).status == BackgroundProgressStatus.FAILED
     assert service.ledger.get_source_progress(
         trace_source,
-        stage=BackgroundStage.INTAKE,
+        stage=BackgroundStage.EXTRACTION,
         target_unit="session:s1",
     ).status == BackgroundProgressStatus.SKIPPED
     assert claimed_window.status == BackgroundProgressStatus.CLAIMED
@@ -232,51 +232,195 @@ def test_processing_ledger_tracks_source_window_and_stage_run_without_mutating_r
     assert store.list_runtime_traces("s1")[0].content == runtime_trace.content
 
 
-def test_background_service_tick_runs_bounded_intake_chunk(tmp_path) -> None:
+def test_background_service_start_recovers_abandoned_ledger_work_without_touching_pending(
+    tmp_path,
+) -> None:
     store = _store(tmp_path)
-    messages = [
-        store.append_session_message(
-            session_id="s1",
-            kind="user_message",
-            llm_role="user",
-            raw_content=f"message {index}",
-        )
-        for index in range(3)
-    ]
     service = CognitionStateStore(store)
+    claimed_source = BackgroundSourceRef("session_message", "msg_claimed")
+    pending_source = BackgroundSourceRef("session_message", "msg_pending")
+    claimed_window_source = BackgroundSourceRef("session_message", "msg_window_claimed")
+    pending_window_source = BackgroundSourceRef("session_message", "msg_window_pending")
+    reason = "recovered abandoned claimed background work"
+
+    service.ledger.claim_source(
+        claimed_source,
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        claimed_by="worker-a",
+    )
+    service.ledger.mark_source_pending(
+        pending_source,
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    claimed_window = service.ledger.create_source_window(
+        stage=BackgroundStage.CONFLICT_REVIEW,
+        target_unit="scope:global",
+        source_refs=(claimed_window_source,),
+        idempotency_key="claimed-window",
+    )
+    service.ledger.claim_source_window(claimed_window.window_id, claimed_by="worker-a")
+    pending_window = service.ledger.create_source_window(
+        stage=BackgroundStage.CONFLICT_REVIEW,
+        target_unit="scope:global",
+        source_refs=(pending_window_source,),
+        idempotency_key="pending-window",
+    )
+    started_run = service.ledger.start_stage_run(
+        worker_id="summary-worker",
+        stage=BackgroundStage.SUMMARY,
+        target_unit="scope:global",
+        window_id=None,
+        input_refs=(),
+    )
     background = BackgroundCognitionService(
         store=store,
         config=CognitionBackgroundConfig(
             enabled=True,
-            startup_delay_seconds=0,
-            interval_seconds=1,
-            tick_timeout_seconds=1,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
-            extraction=BackgroundExtractionConfig(min_sources=99),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
+            startup_delay_seconds=60,
+            interval_seconds=60,
         ),
         state_service=service,
+        workers=[],
     )
 
-    reports = background.tick_once()
+    background.start()
+    background.stop(immediate=True, timeout=1)
 
-    assert [report.worker for report in reports] == ["source_intake"]
-    assert reports[0].emitted == 1
+    recovered_source = service.ledger.get_source_progress(
+        claimed_source,
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    still_pending_source = service.ledger.get_source_progress(
+        pending_source,
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    recovered_window = service.ledger.get_source_window(claimed_window.window_id)
+    still_pending_window = service.ledger.get_source_window(pending_window.window_id)
+    recovered_run = service.ledger.get_stage_run(started_run.run_id)
 
-    def intake_status(message_id: str) -> BackgroundProgressStatus | None:
-        try:
-            return service.ledger.get_source_progress(
-                BackgroundSourceRef("session_message", message_id),
-                stage=BackgroundStage.INTAKE,
-                target_unit="session:s1",
-            ).status
-        except KeyError:
-            return None
+    assert recovered_source.status == BackgroundProgressStatus.FAILED
+    assert recovered_source.last_error == reason
+    assert still_pending_source.status == BackgroundProgressStatus.PENDING
+    assert still_pending_source.last_error is None
+    assert recovered_window.status == BackgroundProgressStatus.FAILED
+    assert recovered_window.last_error == reason
+    assert still_pending_window.status == BackgroundProgressStatus.PENDING
+    assert still_pending_window.last_error is None
+    assert recovered_run.status == BackgroundStageRunStatus.FAILED
+    assert recovered_run.error == reason
+    assert recovered_run.finished_at is not None
 
-    statuses = [intake_status(message.id) for message in messages]
-    assert statuses == [BackgroundProgressStatus.PROCESSED, None, None]
-    assert background.status().last_success is not None
+
+def test_background_service_wake_is_noop_when_disabled_or_stopped(tmp_path) -> None:
+    disabled = BackgroundCognitionService(
+        store=_store(tmp_path),
+        config=CognitionBackgroundConfig(enabled=False),
+        workers=[],
+    )
+    stopped = BackgroundCognitionService(
+        store=_store(tmp_path),
+        config=CognitionBackgroundConfig(enabled=True),
+        workers=[],
+    )
+
+    assert disabled.wake() is False
+    assert stopped.wake() is False
+
+
+def test_background_service_wake_runs_async_and_preserves_singleflight(tmp_path) -> None:
+    store = _store(tmp_path)
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=60,
+            interval_seconds=60,
+        ),
+        workers=[],
+    )
+    tick_started = Event()
+    release_tick = Event()
+    calls = 0
+
+    def blocking_tick() -> list[WorkerReport]:
+        nonlocal calls
+        calls += 1
+        tick_started.set()
+        release_tick.wait(timeout=2)
+        return []
+
+    background._tick_once_locked = blocking_tick  # type: ignore[method-assign]
+    background.start()
+    wake_results: list[bool] = []
+    wake_finished = Event()
+
+    def call_wake() -> None:
+        wake_results.append(background.wake())
+        wake_finished.set()
+
+    wake_thread = Thread(target=call_wake, daemon=True)
+
+    try:
+        wake_thread.start()
+
+        assert wake_finished.wait(timeout=1) is True
+        assert wake_results == [True]
+        assert tick_started.wait(timeout=1) is True
+        assert background.wake() is False
+    finally:
+        release_tick.set()
+        background.stop(immediate=True, timeout=1)
+        wake_thread.join(timeout=1)
+
+    assert calls == 1
+
+
+def test_background_service_wake_retries_after_error_state(tmp_path) -> None:
+    background = BackgroundCognitionService(
+        store=_store(tmp_path),
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=60,
+        ),
+        workers=[],
+    )
+    first_tick_done = Event()
+    retry_tick_done = Event()
+    calls = 0
+
+    def fail_then_succeed_tick() -> list[WorkerReport]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            with background._lock:
+                background._state = "error"
+                background._last_error = "simulated background failure"
+            first_tick_done.set()
+        else:
+            with background._lock:
+                background._state = "running"
+                background._last_error = None
+            retry_tick_done.set()
+        return []
+
+    background._tick_once_locked = fail_then_succeed_tick  # type: ignore[method-assign]
+
+    try:
+        background.start()
+
+        assert first_tick_done.wait(timeout=1) is True
+        assert background.status().state == "error"
+        assert background.wake() is True
+        assert retry_tick_done.wait(timeout=1) is True
+    finally:
+        background.stop(immediate=True, timeout=1)
+
+    assert calls == 2
 
 
 def test_background_service_writes_worker_llm_debug_trace(tmp_path) -> None:
@@ -290,21 +434,16 @@ def test_background_service_writes_worker_llm_debug_trace(tmp_path) -> None:
     service = CognitionStateStore(store)
     trace_logger = _llm_trace_logger(tmp_path, enabled=True)
     assert trace_logger.trace_log_path is not None
-    provider = _RecordingLLMProvider(_llm_json())
+    provider = _RecordingLLMProvider(_llm_json(payload=_extraction_payload()))
     background = BackgroundCognitionService(
         store=store,
         config=CognitionBackgroundConfig(
             enabled=True,
             startup_delay_seconds=0,
             interval_seconds=1,
-            tick_timeout_seconds=1,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
             extraction=BackgroundExtractionConfig(
-                min_sources=1,
                 inactivity_threshold_hours=0,
             ),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
         state_service=service,
         llm_provider=provider,
@@ -313,10 +452,7 @@ def test_background_service_writes_worker_llm_debug_trace(tmp_path) -> None:
 
     reports = background.tick_once()
 
-    assert [report.worker for report in reports] == [
-        "source_intake",
-        "memory_extraction",
-    ]
+    assert [report.worker for report in reports] == ["memory_extraction"]
     entries = [
         json.loads(line)
         for line in trace_logger.trace_log_path.read_text(encoding="utf-8").splitlines()
@@ -336,18 +472,13 @@ def test_background_service_skips_extraction_for_session_under_inactivity_thresh
         raw_content="Alpha Agent uses uv.",
     )
     service = CognitionStateStore(store)
-    provider = _RecordingLLMProvider(_llm_json())
+    provider = _RecordingLLMProvider(_llm_json(payload=_extraction_payload()))
     background = BackgroundCognitionService(
         store=store,
         config=CognitionBackgroundConfig(
             enabled=True,
             startup_delay_seconds=0,
             interval_seconds=1,
-            tick_timeout_seconds=1,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=99),
-            extraction=BackgroundExtractionConfig(min_sources=1),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
         state_service=service,
         llm_provider=provider,
@@ -372,18 +503,13 @@ def test_background_service_runs_extraction_for_session_past_inactivity_threshol
         created_at=created_at,
     )
     service = CognitionStateStore(store)
-    provider = _RecordingLLMProvider(_llm_json())
+    provider = _RecordingLLMProvider(_llm_json(payload=_extraction_payload()))
     background = BackgroundCognitionService(
         store=store,
         config=CognitionBackgroundConfig(
             enabled=True,
             startup_delay_seconds=0,
             interval_seconds=1,
-            tick_timeout_seconds=1,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=99),
-            extraction=BackgroundExtractionConfig(min_sources=1),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
         state_service=service,
         llm_provider=provider,
@@ -393,6 +519,119 @@ def test_background_service_runs_extraction_for_session_past_inactivity_threshol
 
     assert [report.worker for report in reports] == ["memory_extraction"]
     assert provider.calls
+
+
+def test_background_service_tick_drains_multiple_extraction_sessions(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.create_session_record("s1", created_at="2026-06-01T00:00:00+00:00")
+    store.create_session_record("s2", created_at="2026-06-02T00:00:00+00:00")
+    created_at = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+        created_at=created_at,
+    )
+    store.append_session_message(
+        session_id="s2",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent runs ruff.",
+        created_at=created_at,
+    )
+    service = CognitionStateStore(store)
+    provider = _RecordingLLMProvider(
+        _llm_json(payload=_extraction_payload()),
+        _llm_json(payload=_extraction_payload()),
+    )
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+        ),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == [
+        "memory_extraction",
+        "memory_extraction",
+    ]
+    assert len(provider.calls) == 2
+    assert [
+        service.ledger.list_source_windows(
+            stage=BackgroundStage.EXTRACTION,
+            target_unit=f"session:{session_id}",
+        )[0].status
+        for session_id in ("s1", "s2")
+    ] == [BackgroundProgressStatus.PROCESSED, BackgroundProgressStatus.PROCESSED]
+
+
+def test_background_service_extraction_rotates_downstream_after_session_cap(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.create_session_record("s1", created_at="2026-06-01T00:00:00+00:00")
+    store.create_session_record("s2", created_at="2026-06-02T00:00:00+00:00")
+    created_at = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+        created_at=created_at,
+    )
+    store.append_session_message(
+        session_id="s2",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent runs ruff.",
+        created_at=created_at,
+    )
+    service = CognitionStateStore(store)
+    provider = _RecordingLLMProvider(
+        _llm_json(),
+        _llm_json(
+            operation="create",
+            payload={
+                "atomic_belief_draft": {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "content": "Alpha Agent uses uv.",
+                }
+            },
+        ),
+        _llm_json(payload=_extraction_payload()),
+    )
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            extraction=BackgroundExtractionConfig(
+                inactivity_threshold_hours=0,
+                max_sessions_per_pass=1,
+            ),
+        ),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == [
+        "memory_extraction",
+        "memory_consolidation",
+        "memory_extraction",
+    ]
+    assert len(provider.calls) == 3
 
 
 def test_background_service_does_not_count_reminder_only_session_for_extraction(
@@ -409,18 +648,13 @@ def test_background_service_does_not_count_reminder_only_session_for_extraction(
         created_at=created_at,
     )
     service = CognitionStateStore(store)
-    provider = _RecordingLLMProvider(_llm_json())
+    provider = _RecordingLLMProvider(_llm_json(payload=_extraction_payload()))
     background = BackgroundCognitionService(
         store=store,
         config=CognitionBackgroundConfig(
             enabled=True,
             startup_delay_seconds=0,
             interval_seconds=1,
-            tick_timeout_seconds=1,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=99),
-            extraction=BackgroundExtractionConfig(min_sources=1),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
         state_service=service,
         llm_provider=provider,
@@ -432,7 +666,7 @@ def test_background_service_does_not_count_reminder_only_session_for_extraction(
     assert provider.calls == []
 
 
-def test_background_service_excludes_active_session_from_extraction(
+def test_background_service_processes_active_session_when_inactive_threshold_passed(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -445,28 +679,129 @@ def test_background_service_excludes_active_session_from_extraction(
         created_at=created_at,
     )
     service = CognitionStateStore(store)
-    provider = _RecordingLLMProvider(_llm_json())
+    provider = _RecordingLLMProvider(_llm_json(payload=_extraction_payload()))
     background = BackgroundCognitionService(
         store=store,
         config=CognitionBackgroundConfig(
             enabled=True,
             startup_delay_seconds=0,
             interval_seconds=1,
-            tick_timeout_seconds=1,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=99),
-            extraction=BackgroundExtractionConfig(min_sources=1),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
         state_service=service,
         llm_provider=provider,
-        active_session_ids=lambda: ("s1",),
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == ["memory_extraction"]
+    assert provider.calls
+
+
+def test_background_service_does_not_save_checkpoint_for_normal_no_backlog(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(enabled=True),
+    )
+    background.checkpoints.save(
+        WorkerCheckpoint(
+            worker_name="memory_extraction",
+            last_status="ok",
+            metadata={"last_window_id": "window:previous"},
+        )
     )
 
     reports = background.tick_once()
 
     assert reports == []
-    assert provider.calls == []
+    checkpoint = background.checkpoints.load("memory_extraction")
+    assert checkpoint.last_status == "ok"
+    assert checkpoint.metadata == {"last_window_id": "window:previous"}
+
+
+def test_background_service_missing_provider_is_error_when_downstream_backlog_exists(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    extracted = _atomic_belief(
+        "belief:extracted-uv",
+        "Alpha Agent uses uv.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    service.write_atomic_belief(extracted, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(enabled=True),
+        state_service=service,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == ["memory_consolidation"]
+    assert reports[0].new_checkpoint.last_status == "error"
+    assert reports[0].notes == [
+        "memory consolidation failed: no LLM provider configured"
+    ]
+    assert background.status().last_error == (
+        "memory_consolidation: memory consolidation failed: no LLM provider configured"
+    )
+
+
+def test_background_service_failure_aborts_tick_and_next_tick_retries(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.create_session_record("s1", created_at="2026-06-01T00:00:00+00:00")
+    store.create_session_record("s2", created_at="2026-06-02T00:00:00+00:00")
+    created_at = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    first_message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+        created_at=created_at,
+    )
+    store.append_session_message(
+        session_id="s2",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent runs ruff.",
+        created_at=created_at,
+    )
+    service = CognitionStateStore(store)
+    provider = _RecordingLLMProvider(
+        "{not json",
+        _llm_json(payload=_extraction_payload()),
+        _llm_json(payload=_extraction_payload()),
+    )
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+        ),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    first_reports = background.tick_once()
+    second_reports = background.tick_once()
+
+    assert [report.new_checkpoint.last_status for report in first_reports] == ["error"]
+    assert len(provider.calls) == 3
+    assert [report.worker for report in second_reports] == [
+        "memory_extraction",
+        "memory_extraction",
+    ]
+    progress = service.ledger.get_source_progress(
+        BackgroundSourceRef("session_message", first_message.id),
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    assert progress.status == BackgroundProgressStatus.PROCESSED
 
 
 def test_background_service_default_workers_share_service_llm_trace_logger(tmp_path) -> None:
@@ -499,7 +834,6 @@ def test_background_service_ignores_handover_traces_as_scheduling_sources(
         metadata={"covered_ordinal_start": 1, "covered_ordinal_end": 1},
     )
     service = CognitionStateStore(store)
-    intake = _RecordingScheduledWorker("source_intake")
     extraction = _RecordingScheduledWorker("memory_extraction")
     background = BackgroundCognitionService(
         store=store,
@@ -507,106 +841,18 @@ def test_background_service_ignores_handover_traces_as_scheduling_sources(
             enabled=True,
             startup_delay_seconds=0,
             interval_seconds=1,
-            tick_timeout_seconds=1,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
             extraction=BackgroundExtractionConfig(
-                min_sources=1,
                 inactivity_threshold_hours=0,
             ),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
         ),
         state_service=service,
-        workers=[intake, extraction],
+        workers=[extraction],
     )
 
     reports = background.tick_once()
 
     assert reports == []
-    assert intake.calls == 0
     assert extraction.calls == 0
-
-
-def test_background_service_does_not_start_worker_without_remaining_tick_budget(
-    tmp_path,
-) -> None:
-    store = _store(tmp_path)
-    store.append_session_message(
-        session_id="s1",
-        kind="user_message",
-        llm_role="user",
-        raw_content="message",
-    )
-    service = CognitionStateStore(store)
-    worker = _RecordingScheduledWorker("source_intake")
-    background = BackgroundCognitionService(
-        store=store,
-        config=CognitionBackgroundConfig(
-            enabled=True,
-            startup_delay_seconds=0,
-            interval_seconds=1,
-            tick_timeout_seconds=0,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
-            extraction=BackgroundExtractionConfig(min_sources=99),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
-        ),
-        state_service=service,
-        workers=[worker],
-    )
-
-    reports = background.tick_once()
-
-    assert reports == []
-    assert worker.calls == 0
-
-
-def test_background_service_stops_before_subsequent_worker_after_deadline(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = _store(tmp_path)
-    store.append_session_message(
-        session_id="s1",
-        kind="user_message",
-        llm_role="user",
-        raw_content="message",
-    )
-    service = CognitionStateStore(store)
-    first = _RecordingScheduledWorker("source_intake")
-    second = _RecordingScheduledWorker("memory_extraction")
-    monotonic_values = [100.0, 100.1, 100.2, 101.1]
-
-    def monotonic() -> float:
-        if monotonic_values:
-            return monotonic_values.pop(0)
-        return 101.1
-
-    monkeypatch.setattr(background_service_module.time, "monotonic", monotonic)
-    background = BackgroundCognitionService(
-        store=store,
-        config=CognitionBackgroundConfig(
-            enabled=True,
-            startup_delay_seconds=0,
-            interval_seconds=1,
-            tick_timeout_seconds=1,
-            intake=BackgroundIntakeConfig(batch_size=1, min_sources=1),
-            extraction=BackgroundExtractionConfig(
-                min_sources=1,
-                inactivity_threshold_hours=0,
-            ),
-            consolidation=BackgroundConsolidationConfig(batch_size=12, min_drafts=99),
-            conflict=BackgroundConflictConfig(batch_size=4, min_conflicts=99),
-        ),
-        state_service=service,
-        workers=[first, second],
-    )
-
-    reports = background.tick_once()
-
-    assert [report.worker for report in reports] == ["source_intake"]
-    assert first.calls == 1
-    assert second.calls == 0
 
 
 def test_archive_expired_worker_archives_through_state_service_audit(tmp_path) -> None:
@@ -645,7 +891,7 @@ def test_archive_expired_worker_archives_through_state_service_audit(tmp_path) -
         registry,
         emitter=EventEmitter(log),
         coordinator=_NeverYieldCoordinator(),
-        config=SimpleNamespace(dry_run=False),
+        config=SimpleNamespace(),
         checkpoint=WorkerCheckpoint(worker_name="archive_expired"),
     )
 
@@ -660,6 +906,64 @@ def test_archive_expired_worker_archives_through_state_service_audit(tmp_path) -
     assert len(audits) == 1
     assert audits[0].entity_refs == (Reference("belief", str(expired.id)),)
     assert audits[0].payload == {"operation": "archive_expired"}
+
+
+def test_archive_expired_worker_archives_all_expired_beliefs_without_mid_pass_yield(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    expired_a = _atomic_belief(
+        "belief:expired-a",
+        "Alpha Agent used tool A temporarily.",
+        validity=ValidityWindow(
+            observed_at=Instant("2026-01-01T00:00:00+00:00"),
+            valid_until=Instant("2026-01-02T00:00:00+00:00"),
+        ),
+    )
+    expired_b = _atomic_belief(
+        "belief:expired-b",
+        "Alpha Agent used tool B temporarily.",
+        validity=ValidityWindow(
+            observed_at=Instant("2026-01-01T00:00:00+00:00"),
+            valid_until=Instant("2026-01-02T00:00:00+00:00"),
+        ),
+    )
+    service.write_atomic_belief(
+        expired_a,
+        source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
+    )
+    service.write_atomic_belief(
+        expired_b,
+        source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
+    )
+    registry = ProjectionRegistry()
+    registry.register(service.beliefs)
+    log = SQLiteEventLog(store)
+
+    report = ArchiveExpiredWorker().run(
+        log,
+        registry,
+        emitter=EventEmitter(log),
+        coordinator=_BudgetAlreadyExhaustedCoordinator(),
+        config=SimpleNamespace(),
+        checkpoint=WorkerCheckpoint(
+            worker_name="archive_expired",
+            metadata={"last_belief_id": str(expired_a.id)},
+        ),
+    )
+
+    assert report.inspected == 2
+    assert report.emitted == 2
+    assert report.yielded_to_higher_priority is False
+    assert report.new_checkpoint.last_status == "ok"
+    assert report.new_checkpoint.metadata == {}
+    archived_a = service.beliefs.get_by_id(expired_a.id)
+    archived_b = service.beliefs.get_by_id(expired_b.id)
+    assert archived_a is not None
+    assert archived_b is not None
+    assert archived_a.lifecycle == BeliefLifecycle.ARCHIVED
+    assert archived_b.lifecycle == BeliefLifecycle.ARCHIVED
 
 
 def test_background_llm_acceptance_attaches_program_provenance_and_checkpoints_atomically(
@@ -1329,7 +1633,7 @@ def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation
         )
     )
 
-    report = MemoryConsolidationWorker(service, provider, batch_size=12).run_once()
+    report = MemoryConsolidationWorker(service, provider).run_once()
 
     assert report.emitted == 1
     prompt = str(provider.calls[0]["messages"][0]["content"])
@@ -1350,6 +1654,158 @@ def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation
         None,
         BackgroundProgressStatus.FAILED,
     }
+
+
+def test_memory_consolidation_worker_missing_provider_is_error(tmp_path) -> None:
+    service = CognitionStateStore(_store(tmp_path))
+
+    report = MemoryConsolidationWorker(service).run_once()
+
+    assert report.new_checkpoint.last_status == "error"
+    assert report.notes == ["memory consolidation failed: no LLM provider configured"]
+
+
+def test_memory_conflict_review_worker_missing_provider_is_error(tmp_path) -> None:
+    service = CognitionStateStore(_store(tmp_path))
+
+    report = MemoryConflictReviewWorker(service).run_once()
+
+    assert report.new_checkpoint.last_status == "error"
+    assert report.notes == ["memory conflict review failed: no LLM provider configured"]
+
+
+def test_memory_summary_worker_missing_provider_is_error(tmp_path) -> None:
+    service = CognitionStateStore(_store(tmp_path))
+
+    report = MemorySummaryWorker(service).run_once()
+
+    assert report.new_checkpoint.last_status == "error"
+    assert report.notes == ["memory summary failed: no LLM provider configured"]
+
+
+def test_memory_consolidation_worker_errors_after_claim_when_budget_exhausts_before_llm(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    extracted = _atomic_belief(
+        "belief:extracted-uv",
+        "Alpha Agent uses uv.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    service.write_atomic_belief(
+        extracted,
+        source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+    )
+    provider = _RecordingLLMProvider(_llm_json())
+    source_ref = BackgroundSourceRef("atomic_belief", str(extracted.id))
+
+    report = MemoryConsolidationWorker(service, provider).run_once(
+        coordinator=_BudgetExpiresBeforeLlmCoordinator()
+    )
+
+    assert report.emitted == 0
+    assert report.yielded_to_higher_priority is False
+    assert report.new_checkpoint.last_status == "error"
+    assert "cooperative yield requested after source window claim" in report.notes[0]
+    assert provider.calls == []
+    window = service.ledger.list_source_windows(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+    )[0]
+    assert window.status == BackgroundProgressStatus.FAILED
+    assert service.ledger.get_source_progress(
+        source_ref,
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+    ).status == BackgroundProgressStatus.FAILED
+
+
+def test_memory_conflict_review_worker_errors_after_claim_when_budget_exhausts_before_llm(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    target = _atomic_belief("belief:target-python", "User prefers Python examples.")
+    service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    conflict = BackgroundSourceRef("conflict", "conflict:post-claim-yield")
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.CONFLICT_REVIEW,
+        target_unit="scope:global",
+        source_refs=(conflict,),
+        idempotency_key="conflict:post-claim-yield",
+        metadata={
+            "active_belief_ids": [str(target.id)],
+            "source_text": "User now prefers Rust examples.",
+        },
+    )
+    provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryConflictReviewWorker(service, provider).run_once(
+        coordinator=_BudgetExpiresBeforeLlmCoordinator()
+    )
+
+    assert report.emitted == 0
+    assert report.yielded_to_higher_priority is False
+    assert report.new_checkpoint.last_status == "error"
+    assert "cooperative yield requested after source window claim" in report.notes[0]
+    assert provider.calls == []
+    assert service.ledger.get_source_window(window.window_id).status == (
+        BackgroundProgressStatus.FAILED
+    )
+    assert service.ledger.get_source_progress(
+        conflict,
+        stage=BackgroundStage.CONFLICT_REVIEW,
+        target_unit="scope:global",
+    ).status == BackgroundProgressStatus.FAILED
+
+
+def test_memory_summary_worker_errors_after_claim_when_budget_exhausts_before_llm(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    source = _atomic_belief(
+        "belief:consolidated-self",
+        "User prefers concise answers.",
+        about=[Reference("subject", "subject:self")],
+        scope=BeliefScope.SELF,
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+    )
+    service.write_atomic_belief(source, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="create_summary_belief",
+            payload={
+                "summary_belief_draft": {
+                    "summary_kind": SummaryKind.SELF_MEMORY_SUMMARY.value,
+                    "scope": BeliefScope.SELF.value,
+                    "about": [Reference("subject", "subject:self").to_record()],
+                    "content": "User prefers concise answers.",
+                },
+            },
+        )
+    )
+    source_ref = BackgroundSourceRef("atomic_belief", str(source.id))
+
+    report = MemorySummaryWorker(service, provider, initial_min_beliefs=1).run_once(
+        coordinator=_BudgetExpiresBeforeLlmCoordinator()
+    )
+
+    assert report.emitted == 0
+    assert report.yielded_to_higher_priority is False
+    assert report.new_checkpoint.last_status == "error"
+    assert "cooperative yield requested after source window claim" in report.notes[0]
+    assert provider.calls == []
+    window = service.ledger.list_source_windows(stage=BackgroundStage.SUMMARY)[0]
+    assert window.status == BackgroundProgressStatus.FAILED
+    assert service.ledger.get_source_progress(
+        source_ref,
+        stage=BackgroundStage.SUMMARY,
+        target_unit=window.target_unit,
+    ).status == BackgroundProgressStatus.FAILED
 
 
 def test_memory_consolidation_worker_prompt_includes_output_schema_and_valid_targets(
@@ -2340,7 +2796,39 @@ def test_memory_extraction_worker_rejects_malformed_output_without_processed_mar
     assert progress.checkpoint_id is None
 
 
-def test_memory_extraction_worker_yields_before_llm_when_budget_exhausts(
+def test_memory_extraction_worker_yields_before_claim_when_budget_exhausts(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={"s1"},
+    ).run_once(coordinator=_BudgetAlreadyExhaustedCoordinator())
+
+    assert report.emitted == 0
+    assert report.yielded_to_higher_priority is True
+    assert report.new_checkpoint.last_status == "yielded"
+    assert provider.calls == []
+    assert (
+        service.ledger.list_source_windows(
+            stage=BackgroundStage.EXTRACTION,
+            target_unit="session:s1",
+        )
+        == []
+    )
+
+
+def test_memory_extraction_worker_errors_after_claim_when_budget_exhausts_before_llm(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -2361,14 +2849,16 @@ def test_memory_extraction_worker_yields_before_llm_when_budget_exhausts(
     ).run_once(coordinator=coordinator)
 
     assert report.emitted == 0
-    assert report.yielded_to_higher_priority is True
-    assert report.new_checkpoint.last_status == "yielded"
+    assert report.yielded_to_higher_priority is False
+    assert report.new_checkpoint.last_status == "error"
+    assert "cooperative yield requested after source window claim" in report.notes[0]
     assert provider.calls == []
     window = service.ledger.list_source_windows(
         stage=BackgroundStage.EXTRACTION,
         target_unit="session:s1",
     )[0]
     assert window.status == BackgroundProgressStatus.FAILED
+    assert "cooperative yield requested after source window claim" in str(window.last_error)
     progress = service.ledger.get_source_progress(
         BackgroundSourceRef("session_message", message.id),
         stage=BackgroundStage.EXTRACTION,
@@ -2535,8 +3025,10 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
     assert '"scope": {' in instruction
     assert '"enum": [' in instruction
     assert '{"id": "counterpart:user-a", "kind": "counterpart"}' in instruction
-    assert '{"id": "s1", "kind": "session"}' in instruction
+    assert '{"id": "s1", "kind": "session"}' not in instruction
     assert '{"id": "subject:self", "kind": "subject"}' in instruction
+    assert 'Do not emit scope "session"' in instruction
+    assert 'For scope "session"' not in instruction
     assert "project_descriptor" in instruction
     assert "previous messages" in instruction
     lower_instruction = instruction.lower()
@@ -2742,6 +3234,59 @@ def test_memory_extraction_worker_import_prompt_excludes_runtime_context_and_ses
     assert window.metadata["compressed_message_id"] is None
 
 
+def test_memory_extraction_worker_import_backlog_honors_latest_compressed_boundary(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "I prefer direct feedback.",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    imported_message = store.list_session_messages(imported.session_id)[0]
+    compressed = store.append_compressed_message(
+        session_id=imported.session_id,
+        raw_content="Imported context already compacted.",
+        compression_point_ordinal=imported_message.ordinal,
+        compression_version="handover-compression-v1",
+    )
+    provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={imported.session_id},
+    ).run_session_once(imported.session_id)
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "skipped_no_backlog"
+    assert provider.calls == []
+    assert service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit=f"session:{imported.session_id}",
+    ) == []
+    assert compressed.ordinal > imported_message.ordinal
+
+
 def test_memory_extraction_worker_rejects_session_scope_for_import_session(
     tmp_path,
 ) -> None:
@@ -2795,7 +3340,222 @@ def test_memory_extraction_worker_rejects_session_scope_for_import_session(
     assert "not included in llm input" in " ".join(report.notes).lower()
 
 
-def test_memory_extraction_worker_prioritizes_ordinary_then_oldest_imported_sessions(
+def test_memory_extraction_worker_rejects_session_scope_for_ordinary_backlog(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.SESSION.value,
+                    "about": [{"kind": "session", "id": "s1"}],
+                    "content": "This session discussed uv.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={"s1"},
+    ).run_session_once("s1")
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "error"
+    assert service.beliefs.list_active() == []
+    assert "not included in llm input" in " ".join(report.notes).lower()
+
+
+def test_memory_extraction_worker_rejects_session_scope_for_direct_compact_extraction(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    compression_result = compress_session_context(
+        session_id="s1",
+        assembler=SessionContextAssembler(store),
+        llm_provider=_RecordingLLMProvider("Operational handover."),
+        llm_messages=_runtime_prefix(store, "s1"),
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.SESSION.value,
+                    "about": [{"kind": "session", "id": "s1"}],
+                    "content": "This compacted session discussed uv.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(service, provider).run_compact_job(
+        compression_result.extraction_job
+    )
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "error"
+    assert service.beliefs.list_active() == []
+    assert "not included in llm input" in " ".join(report.notes).lower()
+
+
+def test_memory_extraction_worker_session_targeted_entry_point_ignores_other_sessions(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="a_other",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Other session should not be selected.",
+    )
+    selected = store.append_session_message(
+        session_id="z_selected",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Selected session should be processed.",
+    )
+    provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(service, provider).run_session_once("z_selected")
+
+    assert report.emitted == 1
+    assert len(provider.calls) == 1
+    windows = service.ledger.list_source_windows(stage=BackgroundStage.EXTRACTION)
+    assert len(windows) == 1
+    assert windows[0].target_unit == "session:z_selected"
+    assert windows[0].source_refs == (BackgroundSourceRef("session_message", selected.id),)
+    assert (
+        service.ledger.list_source_windows(
+            stage=BackgroundStage.EXTRACTION,
+            target_unit="session:a_other",
+        )
+        == []
+    )
+
+
+def test_memory_extraction_worker_claims_preexisting_pending_retryable_session_window(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    source_ref = BackgroundSourceRef("session_message", message.id)
+    service.ledger.mark_source_failed(
+        source_ref,
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        error="retryable extraction failure",
+    )
+    candidate = _session_backlog_candidate(
+        service,
+        session_id="s1",
+        extraction_version=DEFAULT_MEMORY_EXTRACTION_VERSION,
+        tools=(),
+    )
+    assert candidate is not None
+    pending_window = service.ledger.create_source_window(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        source_refs=candidate.source_refs,
+        idempotency_key=_window_idempotency_key(candidate),
+        metadata=candidate.metadata,
+    )
+    provider = _RecordingLLMProvider(_llm_json())
+
+    report = MemoryExtractionWorker(service, provider).run_session_once("s1")
+
+    assert report.emitted == 1
+    assert report.new_checkpoint.last_status == "ok"
+    assert len(provider.calls) == 1
+    windows = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    assert [window.window_id for window in windows] == [pending_window.window_id]
+    processed_window = service.ledger.get_source_window(pending_window.window_id)
+    assert processed_window.status == BackgroundProgressStatus.PROCESSED
+    assert processed_window.claimed_by == "memory_extraction"
+    assert (
+        service.ledger.get_source_progress(
+            source_ref,
+            stage=BackgroundStage.EXTRACTION,
+            target_unit="session:s1",
+        ).status
+        == BackgroundProgressStatus.PROCESSED
+    )
+
+
+def test_memory_extraction_worker_missing_provider_is_error_for_session_backlog(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+
+    report = MemoryExtractionWorker(service).run_session_once("s1")
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "error"
+    assert report.notes == ["memory extraction failed: no LLM provider configured"]
+
+
+def test_memory_extraction_worker_missing_provider_is_error_for_direct_compact(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    compression_result = compress_session_context(
+        session_id="s1",
+        assembler=SessionContextAssembler(store),
+        llm_provider=_RecordingLLMProvider("Operational handover."),
+        llm_messages=_runtime_prefix(store, "s1"),
+    )
+
+    report = MemoryExtractionWorker(service).run_compact_job(
+        compression_result.extraction_job
+    )
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "error"
+    assert report.notes == ["memory extraction failed: no LLM provider configured"]
+
+
+def test_memory_extraction_worker_compat_run_uses_targeted_builder_in_session_id_order(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2855,42 +3615,39 @@ def test_memory_extraction_worker_prioritizes_ordinary_then_oldest_imported_sess
     assert old_import is not None
     assert new_import is not None
     inactive_ids = {"zzzz_ordinary", old_import.session_id, new_import.session_id}
-    ordinary_provider = _RecordingLLMProvider(_llm_json())
+    first_provider = _RecordingLLMProvider(_llm_json())
 
-    ordinary_report = MemoryExtractionWorker(
+    first_report = MemoryExtractionWorker(
         service,
-        ordinary_provider,
+        first_provider,
         inactive_session_ids=inactive_ids,
     ).run_once()
 
-    assert ordinary_report.emitted == 1
-    ordinary_window = service.ledger.list_source_windows(
+    assert first_report.emitted == 1
+    first_windows = service.ledger.list_source_windows(
         stage=BackgroundStage.EXTRACTION,
-        target_unit="session:zzzz_ordinary",
-    )[0]
-    assert ordinary_window.metadata["source_path"] == "inactive_backlog"
-    assert "Identity: Alpha Agent" in str(ordinary_provider.calls[0]["messages"])
-    import_provider = _RecordingLLMProvider(_llm_json())
+        target_unit=f"session:{new_import.session_id}",
+    )
+    assert len(first_windows) == 1
+    assert first_windows[0].metadata["source_path"] == "import_backlog"
+    assert "New imported evidence." in str(first_provider.calls[0]["messages"])
+    assert "Identity: Alpha Agent" not in str(first_provider.calls[0]["messages"])
+    second_provider = _RecordingLLMProvider(_llm_json())
 
-    import_report = MemoryExtractionWorker(
+    second_report = MemoryExtractionWorker(
         service,
-        import_provider,
+        second_provider,
         inactive_session_ids=inactive_ids,
     ).run_once()
 
-    assert import_report.emitted == 1
+    assert second_report.emitted == 1
     old_windows = service.ledger.list_source_windows(
         stage=BackgroundStage.EXTRACTION,
         target_unit=f"session:{old_import.session_id}",
     )
-    new_windows = service.ledger.list_source_windows(
-        stage=BackgroundStage.EXTRACTION,
-        target_unit=f"session:{new_import.session_id}",
-    )
     assert len(old_windows) == 1
-    assert new_windows == []
-    assert "Old imported evidence." in str(import_provider.calls[0]["messages"])
-    assert "New imported evidence." not in str(import_provider.calls[0]["messages"])
+    assert "Old imported evidence." in str(second_provider.calls[0]["messages"])
+    assert "New imported evidence." not in str(second_provider.calls[0]["messages"])
 
 
 def test_memory_extraction_worker_writes_llm_debug_trace(tmp_path) -> None:
@@ -2936,7 +3693,7 @@ def test_memory_extraction_worker_writes_llm_debug_trace(tmp_path) -> None:
     assert response_metadata["response"]["content"] == _llm_json()
 
 
-def test_memory_extraction_worker_skips_inactive_backlog_for_active_session(
+def test_memory_extraction_worker_processes_inactive_backlog_for_active_session(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -2952,23 +3709,21 @@ def test_memory_extraction_worker_skips_inactive_backlog_for_active_session(
     report = MemoryExtractionWorker(
         service,
         provider,
-        active_session_ids={"s1"},
         inactive_session_ids={"s1"},
     ).run_once()
 
-    assert report.emitted == 0
-    assert report.new_checkpoint.last_status == "skipped_no_backlog"
-    assert provider.calls == []
-    assert (
+    assert report.emitted == 1
+    assert report.new_checkpoint.last_status == "ok"
+    assert len(provider.calls) == 1
+    assert len(
         service.ledger.list_source_windows(
             stage=BackgroundStage.EXTRACTION,
             target_unit="session:s1",
         )
-        == []
-    )
+    ) == 1
 
 
-def test_memory_extraction_worker_skips_inactive_backlog_with_pending_handover(
+def test_memory_extraction_worker_processes_inactive_backlog_with_pending_handover(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -2993,16 +3748,15 @@ def test_memory_extraction_worker_skips_inactive_backlog_with_pending_handover(
         inactive_session_ids={"s1"},
     ).run_once()
 
-    assert report.emitted == 0
-    assert report.new_checkpoint.last_status == "skipped_no_backlog"
-    assert provider.calls == []
-    assert (
+    assert report.emitted == 1
+    assert report.new_checkpoint.last_status == "ok"
+    assert len(provider.calls) == 1
+    assert len(
         service.ledger.list_source_windows(
             stage=BackgroundStage.EXTRACTION,
             target_unit="session:s1",
         )
-        == []
-    )
+    ) == 1
 
 
 def test_memory_extraction_worker_skips_compact_range_already_processed_by_backlog(
@@ -3204,6 +3958,17 @@ class _NeverYieldCoordinator:
         return float("inf")
 
 
+class _BudgetAlreadyExhaustedCoordinator:
+    def yield_to_higher_priority(self) -> bool:
+        return False
+
+    def budget_exhausted(self) -> bool:
+        return True
+
+    def remaining_seconds(self) -> float:
+        return 0.0
+
+
 class _BudgetExpiresBeforeLlmCoordinator:
     def __init__(self) -> None:
         self.budget_checks = 0
@@ -3220,14 +3985,6 @@ class _BudgetExpiresBeforeLlmCoordinator:
 
 
 class _RecordingScheduledWorker:
-    trigger = ScheduleTrigger(
-        min_interval=timedelta(seconds=0),
-        max_interval=timedelta(seconds=0),
-        watches=frozenset(),
-        min_new_events=0,
-    )
-    handles_event_kinds: frozenset[CognitiveEventKind] = frozenset()
-
     def __init__(self, name: str) -> None:
         self._name = name
         self.calls = 0
@@ -3255,7 +4012,6 @@ class _RecordingScheduledWorker:
             yielded_to_higher_priority=False,
             new_checkpoint=WorkerCheckpoint(
                 worker_name=self.name,
-                last_processed_event_id=checkpoint.last_processed_event_id,
                 last_status="ok",
                 metadata=checkpoint.metadata,
             ),

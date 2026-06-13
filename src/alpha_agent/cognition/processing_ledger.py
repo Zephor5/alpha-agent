@@ -20,7 +20,6 @@ T = TypeVar("T")
 class BackgroundStage(StrEnum):
     """Background cognition processing stages."""
 
-    INTAKE = "intake"
     EXTRACTION = "extraction"
     CONSOLIDATION = "consolidation"
     CONFLICT_REVIEW = "conflict_review"
@@ -209,6 +208,15 @@ class BackgroundStageRun:
     input_refs: tuple[BackgroundSourceRef, ...] = field(default_factory=tuple)
     output_refs: tuple[BackgroundSourceRef, ...] = field(default_factory=tuple)
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class AbandonedBackgroundWorkRecoveryReport:
+    """Counts of abandoned ledger rows recovered on background startup."""
+
+    source_progress: int
+    source_windows: int
+    stage_runs: int
 
 
 class ProcessingLedger:
@@ -657,6 +665,68 @@ class ProcessingLedger:
         conn: sqlite3.Connection | None = None,
     ) -> BackgroundStageRun:
         return self._read(conn, lambda db: self._get_stage_run_row(db, run_id))
+
+    def recover_abandoned_background_work(
+        self,
+        *,
+        error: str = "recovered abandoned claimed background work",
+    ) -> AbandonedBackgroundWorkRecoveryReport:
+        """Fail in-flight ledger rows left behind by a previous process."""
+
+        def op(db: sqlite3.Connection) -> AbandonedBackgroundWorkRecoveryReport:
+            now = utc_now_iso()
+            progress = db.execute(
+                """
+                UPDATE background_source_progress
+                SET status = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE status = ?
+                """,
+                (
+                    BackgroundProgressStatus.FAILED.value,
+                    error,
+                    now,
+                    BackgroundProgressStatus.CLAIMED.value,
+                ),
+            ).rowcount
+            windows = db.execute(
+                """
+                UPDATE background_source_window
+                SET status = ?,
+                    closed_at = ?,
+                    last_error = ?
+                WHERE status = ?
+                """,
+                (
+                    BackgroundProgressStatus.FAILED.value,
+                    now,
+                    error,
+                    BackgroundProgressStatus.CLAIMED.value,
+                ),
+            ).rowcount
+            stage_runs = db.execute(
+                """
+                UPDATE background_stage_run
+                SET status = ?,
+                    finished_at = ?,
+                    error = ?
+                WHERE status = ?
+                """,
+                (
+                    BackgroundStageRunStatus.FAILED.value,
+                    now,
+                    error,
+                    BackgroundStageRunStatus.STARTED.value,
+                ),
+            ).rowcount
+            return AbandonedBackgroundWorkRecoveryReport(
+                source_progress=max(0, progress),
+                source_windows=max(0, windows),
+                stage_runs=max(0, stage_runs),
+            )
+
+        return self._write(None, op)
 
     def _mark_source_terminal(
         self,

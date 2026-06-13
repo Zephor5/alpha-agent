@@ -8,7 +8,13 @@ import pytest
 from typer.testing import CliRunner
 
 from alpha_agent.cli import app
-from alpha_agent.config import FileToolConfig, load_config, read_config_value, write_default_config
+from alpha_agent.config import (
+    FileToolConfig,
+    load_config,
+    read_config_value,
+    set_config_value,
+    write_default_config,
+)
 from alpha_agent.tools.files.config import max_glob_results, max_search_results
 
 
@@ -75,26 +81,12 @@ max_output_chars = 555
 enabled = false
 startup_delay_seconds = 2
 interval_seconds = 33
-tick_timeout_seconds = 9
-
-[cognition.background.intake]
-batch_size = 5
-min_sources = 2
 
 [cognition.background.extraction]
-min_sources = 3
 inactivity_threshold_hours = 18
-
-[cognition.background.consolidation]
-batch_size = 7
-min_drafts = 4
-
-[cognition.background.conflict]
-batch_size = 8
-min_conflicts = 5
+max_sessions_per_pass = 3
 
 [cognition.background.summary]
-batch_size = 9
 initial_min_beliefs = 10
 changed_source_min = 11
 invalidated_source_min = 12
@@ -169,16 +161,8 @@ api_key = "tvly-file-key"
     assert config.cognition_background.enabled is False
     assert config.cognition_background.startup_delay_seconds == 2
     assert config.cognition_background.interval_seconds == 33
-    assert config.cognition_background.tick_timeout_seconds == 9
-    assert config.cognition_background.intake.batch_size == 5
-    assert config.cognition_background.intake.min_sources == 2
-    assert config.cognition_background.extraction.min_sources == 3
     assert config.cognition_background.extraction.inactivity_threshold_hours == 18
-    assert config.cognition_background.consolidation.batch_size == 7
-    assert config.cognition_background.consolidation.min_drafts == 4
-    assert config.cognition_background.conflict.batch_size == 8
-    assert config.cognition_background.conflict.min_conflicts == 5
-    assert config.cognition_background.summary.batch_size == 9
+    assert config.cognition_background.extraction.max_sessions_per_pass == 3
     assert config.cognition_background.summary.initial_min_beliefs == 10
     assert config.cognition_background.summary.changed_source_min == 11
     assert config.cognition_background.summary.invalidated_source_min == 12
@@ -188,13 +172,13 @@ api_key = "tvly-file-key"
     assert config.cognition_drive_active_goal_limit == 8
 
 
-def test_background_tick_timeout_default_is_sixty_seconds(tmp_path: Path) -> None:
+def test_background_max_sessions_per_pass_default_is_ten(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text("", encoding="utf-8")
 
     config = load_config(env_file=None, config_file=config_path)
 
-    assert config.cognition_background.tick_timeout_seconds == 60
+    assert config.cognition_background.extraction.max_sessions_per_pass == 10
 
 
 def test_relative_paths_resolve_under_runtime_home_dir(
@@ -304,19 +288,11 @@ allowed_workdirs = ["."]
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_ENABLED", "false")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_STARTUP_DELAY_SECONDS", "1")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_INTERVAL_SECONDS", "2")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_TICK_TIMEOUT_SECONDS", "3")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_INTAKE_BATCH_SIZE", "4")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_INTAKE_MIN_SOURCES", "5")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_EXTRACTION_MIN_SOURCES", "7")
     monkeypatch.setenv(
         "ALPHA_COGNITION_BACKGROUND_EXTRACTION_INACTIVITY_THRESHOLD_HOURS",
         "18",
     )
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_BATCH_SIZE", "8")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MIN_DRAFTS", "9")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_CONFLICT_BATCH_SIZE", "10")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_CONFLICT_MIN_CONFLICTS", "11")
-    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_SUMMARY_BATCH_SIZE", "12")
+    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_EXTRACTION_MAX_SESSIONS_PER_PASS", "7")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_SUMMARY_INITIAL_MIN_BELIEFS", "13")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_SUMMARY_CHANGED_SOURCE_MIN", "14")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_SUMMARY_INVALIDATED_SOURCE_MIN", "15")
@@ -357,16 +333,8 @@ allowed_workdirs = ["."]
     assert config.cognition_background.enabled is False
     assert config.cognition_background.startup_delay_seconds == 1
     assert config.cognition_background.interval_seconds == 2
-    assert config.cognition_background.tick_timeout_seconds == 3
-    assert config.cognition_background.intake.batch_size == 4
-    assert config.cognition_background.intake.min_sources == 5
-    assert config.cognition_background.extraction.min_sources == 7
     assert config.cognition_background.extraction.inactivity_threshold_hours == 18
-    assert config.cognition_background.consolidation.batch_size == 8
-    assert config.cognition_background.consolidation.min_drafts == 9
-    assert config.cognition_background.conflict.batch_size == 10
-    assert config.cognition_background.conflict.min_conflicts == 11
-    assert config.cognition_background.summary.batch_size == 12
+    assert config.cognition_background.extraction.max_sessions_per_pass == 7
     assert config.cognition_background.summary.initial_min_beliefs == 13
     assert config.cognition_background.summary.changed_source_min == 14
     assert config.cognition_background.summary.invalidated_source_min == 15
@@ -716,10 +684,7 @@ write_roots = []
     assert config.file_tool.write_roots == ()
 
 
-def test_config_set_preserves_cognition_consolidation_section(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_config_set_drops_removed_cognition_consolidation_section(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         """
@@ -732,20 +697,17 @@ interval_seconds = 7
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
-    runner = CliRunner()
 
-    result = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
+    parsed = set_config_value("llm.provider", "codex", config_path=config_path)
 
-    assert result.exit_code == 0
+    assert parsed == "codex"
     saved = config_path.read_text(encoding="utf-8")
-    assert "[cognition.consolidation]" in saved
-    assert "interval_seconds = 7" in saved
+    assert "[cognition.consolidation]" not in saved
+    assert "interval_seconds = 7" not in saved
 
 
-def test_config_set_preserves_cognition_background_split(
+def test_config_set_strips_removed_background_fields_from_retained_sections(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
@@ -756,33 +718,52 @@ provider = "mock"
 [cognition.background]
 enabled = false
 interval_seconds = 7
+tick_timeout_seconds = 11
+
+[cognition.background.intake]
+batch_size = 3
+
+[cognition.background.consolidation]
+batch_size = 4
+min_sources = 5
+
+[cognition.background.conflict]
+batch_size = 6
+min_conflicts = 7
 
 [cognition.background.extraction]
 batch_size = 3
 min_sources = 2
 inactivity_threshold_hours = 20
 
-[cognition.consolidation]
-enabled = true
-interval_seconds = 11
+[cognition.background.summary]
+batch_size = 9
+initial_min_beliefs = 10
+changed_source_min = 11
+invalidated_source_min = 12
 """,
         encoding="utf-8",
     )
-    monkeypatch.setenv("ALPHA_CONFIG_PATH", str(config_path))
-    runner = CliRunner()
 
-    result = runner.invoke(app, ["config", "set", "llm.provider", "codex"])
+    parsed = set_config_value("llm.provider", "codex", config_path=config_path)
 
-    assert result.exit_code == 0
+    assert parsed == "codex"
     saved = config_path.read_text(encoding="utf-8")
     assert "[cognition.background]" in saved
     assert "[cognition.background.extraction]" in saved
-    assert "[cognition.consolidation]" in saved
+    assert "[cognition.background.summary]" in saved
     assert "interval_seconds = 7" in saved
+    assert "tick_timeout_seconds" not in saved
+    assert "[cognition.background.intake]" not in saved
+    assert "[cognition.background.consolidation]" not in saved
+    assert "[cognition.background.conflict]" not in saved
     assert "batch_size = 3" not in saved
-    assert "min_sources = 2" in saved
+    assert "min_sources = 2" not in saved
+    assert "batch_size = 9" not in saved
     assert "inactivity_threshold_hours = 20" in saved
-    assert "interval_seconds = 11" in saved
+    assert "initial_min_beliefs = 10" in saved
+    assert "changed_source_min = 11" in saved
+    assert "invalidated_source_min = 12" in saved
 
 
 def test_config_set_preserves_cognition_drive_section(
@@ -794,9 +775,6 @@ def test_config_set_preserves_cognition_drive_section(
         """
 [llm]
 provider = "mock"
-
-[cognition.consolidation]
-enabled = true
 
 [cognition.drive]
 enabled = false
@@ -811,7 +789,6 @@ goal_cooldown_seconds = 120
 
     assert result.exit_code == 0
     saved = config_path.read_text(encoding="utf-8")
-    assert "[cognition.consolidation]" in saved
     assert "[cognition.drive]" in saved
     assert "enabled = true" in saved
     assert "goal_cooldown_seconds = 120" in saved

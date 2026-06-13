@@ -37,8 +37,6 @@ from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.state_service import CognitionStateStore
 from alpha_agent.config import (
     AlphaConfig,
-    BackgroundExtractionConfig,
-    BackgroundIntakeConfig,
     BackgroundSummaryConfig,
     CognitionBackgroundConfig,
     FileToolConfig,
@@ -642,10 +640,7 @@ def test_background_profile_summary_feeds_new_sessions_without_mutating_existing
         store=store,
         config=CognitionBackgroundConfig(
             enabled=True,
-            intake=BackgroundIntakeConfig(min_sources=999),
-            extraction=BackgroundExtractionConfig(min_sources=999),
             summary=BackgroundSummaryConfig(
-                batch_size=2,
                 initial_min_beliefs=2,
                 changed_source_min=2,
                 invalidated_source_min=1,

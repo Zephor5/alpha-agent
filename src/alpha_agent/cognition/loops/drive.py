@@ -11,9 +11,7 @@ from alpha_agent.cognition.coordinator import LoopAcquireRequest, LoopCoordinato
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.goals import GoalRegistry
-from alpha_agent.cognition.loops.scheduler import ScheduleTrigger
 from alpha_agent.cognition.models import (
-    CognitiveEventKind,
     Goal,
     GoalId,
     Instant,
@@ -44,19 +42,6 @@ class DriveReport:
 
 class DriveLoop:
     """Turn one eligible active goal into a cognition self-signal."""
-
-    trigger = ScheduleTrigger(
-        min_interval=timedelta(minutes=5),
-        max_interval=None,
-        watches=frozenset(
-            {
-                CognitiveEventKind.GOAL_SET,
-                CognitiveEventKind.GOAL_PROGRESSED,
-                CognitiveEventKind.ACTED,
-            }
-        ),
-        min_new_events=1,
-    )
 
     def __init__(
         self,

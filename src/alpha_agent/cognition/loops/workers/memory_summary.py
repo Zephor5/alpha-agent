@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from alpha_agent.cognition.authority import CognitionSourceKind
@@ -19,7 +19,6 @@ from alpha_agent.cognition.domain_guidance import active_domain_guidance, summar
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.loops.scheduler import (
-    ScheduleTrigger,
     WorkerCheckpoint,
     WorkerReport,
     WorkerStatus,
@@ -33,7 +32,6 @@ from alpha_agent.cognition.models import (
     AtomicBelief,
     BeliefLifecycle,
     BeliefScope,
-    CognitiveEventKind,
     DerivationStage,
     Instant,
     Reference,
@@ -115,20 +113,12 @@ class MemorySummaryWorker:
     """Ask an LLM to synthesize summary beliefs from consolidated atomic beliefs."""
 
     name: ClassVar[str] = "memory_summary"
-    trigger: ClassVar[ScheduleTrigger] = ScheduleTrigger(
-        min_interval=timedelta(seconds=0),
-        max_interval=timedelta(seconds=0),
-        watches=frozenset(),
-        min_new_events=0,
-    )
-    handles_event_kinds: ClassVar[frozenset[CognitiveEventKind]] = frozenset()
 
     def __init__(
         self,
         state_service: CognitionStateStore | None = None,
         llm_provider: LLMProvider | None = None,
         *,
-        batch_size: int = 2,
         initial_min_beliefs: int = 12,
         changed_source_min: int = 6,
         invalidated_source_min: int = 1,
@@ -137,7 +127,6 @@ class MemorySummaryWorker:
     ):
         self.state_service = state_service
         self.llm_provider = llm_provider
-        self.batch_size = max(1, int(batch_size))
         self.initial_min_beliefs = max(1, int(initial_min_beliefs))
         self.changed_source_min = max(1, int(changed_source_min))
         self.invalidated_source_min = max(1, int(invalidated_source_min))
@@ -153,13 +142,19 @@ class MemorySummaryWorker:
         if self.state_service is None:
             raise ValueError("MemorySummaryWorker.run_once requires state_service")
         if self.llm_provider is None:
-            raise ValueError("MemorySummaryWorker.run_once requires llm_provider")
+            return _worker_report(
+                self.name,
+                checkpoint or WorkerCheckpoint(worker_name=self.name),
+                inspected=0,
+                emitted=0,
+                status="error",
+                notes=["memory summary failed: no LLM provider configured"],
+            )
         return self._run_with(
             state_service=self.state_service,
             llm_provider=self.llm_provider,
             checkpoint=checkpoint or WorkerCheckpoint(worker_name=self.name),
             coordinator=coordinator or _NeverYieldCoordinator(),
-            batch_size=self.batch_size,
             initial_min_beliefs=self.initial_min_beliefs,
             changed_source_min=self.changed_source_min,
             invalidated_source_min=self.invalidated_source_min,
@@ -185,15 +180,14 @@ class MemorySummaryWorker:
                 checkpoint,
                 inspected=0,
                 emitted=0,
-                status="skipped_no_backlog",
-                notes=["memory summary skipped: no LLM provider configured"],
+                status="error",
+                notes=["memory summary failed: no LLM provider configured"],
             )
         return self._run_with(
             state_service=state_service,
             llm_provider=provider,
             checkpoint=checkpoint,
             coordinator=coordinator,
-            batch_size=max(1, int(getattr(config, "summary_batch_size", self.batch_size))),
             initial_min_beliefs=max(
                 1,
                 int(getattr(config, "summary_initial_min_beliefs", self.initial_min_beliefs)),
@@ -225,13 +219,11 @@ class MemorySummaryWorker:
         llm_provider: LLMProvider,
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
-        batch_size: int,
         initial_min_beliefs: int,
         changed_source_min: int,
         invalidated_source_min: int,
         llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
-        del batch_size
         target = _next_summary_target(
             state_service,
             initial_min_beliefs=initial_min_beliefs,
@@ -299,15 +291,17 @@ class MemorySummaryWorker:
             input_refs=window.source_refs,
         )
         if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
-            message = "memory summary yielded before LLM call"
+            message = (
+                "memory summary failed: cooperative yield requested after source "
+                "window claim before LLM call"
+            )
             _mark_failed_if_needed(state_service, window=window, run_id=run.run_id, error=message)
             return _worker_report(
                 self.name,
                 checkpoint,
                 inspected=len(source_refs),
                 emitted=0,
-                status="yielded",
-                yielded=True,
+                status="error",
                 notes=[message],
                 metadata={"last_window_id": window.window_id},
             )
@@ -859,7 +853,6 @@ def _worker_report(
         new_checkpoint=WorkerCheckpoint(
             worker_name=worker,
             last_run_at=Instant(utc_now_iso()),
-            last_processed_event_id=checkpoint.last_processed_event_id,
             last_status=status,
             metadata=metadata if metadata is not None else checkpoint.metadata,
         ),

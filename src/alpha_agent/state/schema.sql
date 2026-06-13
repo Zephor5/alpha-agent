@@ -440,7 +440,6 @@ CREATE INDEX IF NOT EXISTS idx_goal_for_counterpart
 CREATE TABLE IF NOT EXISTS cognition_worker_checkpoint (
     worker_name TEXT PRIMARY KEY,
     last_run_at TEXT,
-    last_processed_event_id TEXT,
     last_status TEXT NOT NULL DEFAULT 'ok',
     metadata TEXT NOT NULL DEFAULT '{}'
 );

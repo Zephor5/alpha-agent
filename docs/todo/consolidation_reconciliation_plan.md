@@ -413,6 +413,7 @@ uv run pytest tests/cognition/test_consolidation_loop.py -q
 - [ ] `uv run ruff check .`
 - [ ] `uv run mypy src tests`
 - [ ] `uv run pytest -q`
-- [ ] `cognition.background.consolidation` config keys are documented in
-      `config.example.toml`.
+- [ ] Active background drain config keys are documented in
+      `config.example.toml`; no `cognition.background.consolidation` keys
+      are expected.
 - [ ] Existing extraction and summary worker tests still pass.

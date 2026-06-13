@@ -6,7 +6,6 @@ import hashlib
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any, ClassVar
 
 from alpha_agent.cognition.authority import CognitionSourceKind
@@ -18,7 +17,6 @@ from alpha_agent.cognition.background_llm_contract import (
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.loops.scheduler import (
-    ScheduleTrigger,
     WorkerCheckpoint,
     WorkerReport,
     WorkerStatus,
@@ -28,12 +26,7 @@ from alpha_agent.cognition.loops.workers._common import (
     background_llm_trace_metadata,
     json_for_prompt,
 )
-from alpha_agent.cognition.models import (
-    CognitiveEventKind,
-    DerivationStage,
-    Instant,
-    Reference,
-)
+from alpha_agent.cognition.models import DerivationStage, Instant, Reference
 from alpha_agent.cognition.processing_ledger import (
     BackgroundProgressStatus,
     BackgroundSourceRef,
@@ -78,7 +71,6 @@ _RETRYABLE_SOURCE_STATUSES = {
     BackgroundProgressStatus.FAILED,
 }
 _ACTIVE_WINDOW_STATUSES = {
-    BackgroundProgressStatus.PENDING,
     BackgroundProgressStatus.CLAIMED,
 }
 _EXTRACTION_INSTRUCTION = """Extract atomic memory candidates from the previous messages.
@@ -94,10 +86,11 @@ Allowed about references for this session:
 {source_time_line}
 
 Scope and reference rules:
+- Do not emit scope "session"; extraction stores durable memories outside the
+  transient source session.
 - For scope "global", set about to [].
 - For scope "counterpart", use exactly one allowed reference with kind "counterpart".
 - For scope "self", use exactly one allowed reference with kind "subject" or "self".
-- For scope "session", use exactly one allowed reference with kind "session".
 - For scope "project", set about to [] and include project_descriptor as a resolvable
   string or object; do not invent project ids.
 
@@ -175,13 +168,6 @@ class MemoryExtractionWorker:
     """Select raw source windows and ask an LLM for id-less atomic belief drafts."""
 
     name: ClassVar[str] = "memory_extraction"
-    trigger: ClassVar[ScheduleTrigger] = ScheduleTrigger(
-        min_interval=timedelta(seconds=0),
-        max_interval=timedelta(seconds=0),
-        watches=frozenset(),
-        min_new_events=0,
-    )
-    handles_event_kinds: ClassVar[frozenset[CognitiveEventKind]] = frozenset()
 
     def __init__(
         self,
@@ -189,7 +175,6 @@ class MemoryExtractionWorker:
         llm_provider: LLMProvider | None = None,
         *,
         tools: Sequence[LLMToolDefinitionInput] | None = None,
-        active_session_ids: Iterable[str] = (),
         inactive_session_ids: Iterable[str] = (),
         extraction_version: str = DEFAULT_MEMORY_EXTRACTION_VERSION,
         worker_id: str | None = None,
@@ -198,7 +183,6 @@ class MemoryExtractionWorker:
         self.state_service = state_service
         self.llm_provider = llm_provider
         self.tools = tuple(tools or ())
-        self.active_session_ids = frozenset(active_session_ids)
         self.inactive_session_ids = frozenset(inactive_session_ids)
         self.extraction_version = extraction_version
         self.worker_id = worker_id or self.name
@@ -213,15 +197,41 @@ class MemoryExtractionWorker:
         if self.state_service is None:
             raise ValueError("MemoryExtractionWorker.run_once requires state_service")
         if self.llm_provider is None:
-            raise ValueError("MemoryExtractionWorker.run_once requires llm_provider")
+            return _missing_llm_provider_report(
+                self.name,
+                checkpoint or WorkerCheckpoint(worker_name=self.name),
+            )
         return self._run_with(
             state_service=self.state_service,
             llm_provider=self.llm_provider,
             tools=self.tools,
             checkpoint=checkpoint or WorkerCheckpoint(worker_name=self.name),
             coordinator=coordinator or _NeverYieldCoordinator(),
-            active_session_ids=self.active_session_ids,
             inactive_session_ids=self.inactive_session_ids,
+            llm_trace_logger=self.llm_trace_logger,
+        )
+
+    def run_session_once(
+        self,
+        session_id: str,
+        *,
+        checkpoint: WorkerCheckpoint | None = None,
+        coordinator: YieldingCoordinator | None = None,
+    ) -> WorkerReport:
+        """Process one extraction window for a specified session only."""
+
+        if self.state_service is None:
+            raise ValueError("MemoryExtractionWorker.run_session_once requires state_service")
+        checkpoint = checkpoint or WorkerCheckpoint(worker_name=self.name)
+        if self.llm_provider is None:
+            return _missing_llm_provider_report(self.name, checkpoint)
+        return self._run_session_with(
+            state_service=self.state_service,
+            llm_provider=self.llm_provider,
+            tools=self.tools,
+            checkpoint=checkpoint,
+            coordinator=coordinator or _NeverYieldCoordinator(),
+            session_id=session_id,
             llm_trace_logger=self.llm_trace_logger,
         )
 
@@ -236,9 +246,9 @@ class MemoryExtractionWorker:
 
         if self.state_service is None:
             raise ValueError("MemoryExtractionWorker.run_compact_job requires state_service")
-        if self.llm_provider is None:
-            raise ValueError("MemoryExtractionWorker.run_compact_job requires llm_provider")
         checkpoint = checkpoint or WorkerCheckpoint(worker_name=self.name)
+        if self.llm_provider is None:
+            return _missing_llm_provider_report(self.name, checkpoint)
         try:
             candidate = _compact_job_candidate(
                 self.state_service,
@@ -289,18 +299,8 @@ class MemoryExtractionWorker:
         state_service = self.state_service or CognitionStateStore(projection.store)
         provider = self.llm_provider or getattr(config, "llm_provider", None)
         if provider is None:
-            return _worker_report(
-                self.name,
-                checkpoint,
-                inspected=0,
-                emitted=0,
-                status="skipped_no_backlog",
-                notes=["memory extraction skipped: no LLM provider configured"],
-            )
+            return _missing_llm_provider_report(self.name, checkpoint)
         tools = tuple(getattr(config, "tools", self.tools) or ())
-        active_session_ids = frozenset(
-            getattr(config, "active_session_ids", self.active_session_ids) or ()
-        )
         inactive_session_ids = frozenset(
             getattr(config, "inactive_session_ids", self.inactive_session_ids) or ()
         )
@@ -314,7 +314,6 @@ class MemoryExtractionWorker:
             tools=tools,
             checkpoint=checkpoint,
             coordinator=coordinator,
-            active_session_ids=active_session_ids,
             inactive_session_ids=inactive_session_ids,
             llm_trace_logger=llm_trace_logger,
         )
@@ -327,16 +326,45 @@ class MemoryExtractionWorker:
         tools: Sequence[LLMToolDefinitionInput],
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
-        active_session_ids: frozenset[str],
         inactive_session_ids: frozenset[str],
         llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
-        candidate = _next_source_window_candidate(
+        for session_id in sorted(inactive_session_ids):
+            report = self._run_session_with(
+                state_service=state_service,
+                llm_provider=llm_provider,
+                tools=tools,
+                checkpoint=checkpoint,
+                coordinator=coordinator,
+                session_id=session_id,
+                llm_trace_logger=llm_trace_logger,
+            )
+            if report.new_checkpoint.last_status != "skipped_no_backlog":
+                return report
+        return _worker_report(
+            self.name,
+            checkpoint,
+            inspected=0,
+            emitted=0,
+            status="skipped_no_backlog",
+        )
+
+    def _run_session_with(
+        self,
+        *,
+        state_service: CognitionStateStore,
+        llm_provider: LLMProvider,
+        tools: Sequence[LLMToolDefinitionInput],
+        checkpoint: WorkerCheckpoint,
+        coordinator: YieldingCoordinator,
+        session_id: str,
+        llm_trace_logger: LLMTraceLogger | None,
+    ) -> WorkerReport:
+        candidate = _session_backlog_candidate(
             state_service,
-            tools=tools,
-            active_session_ids=active_session_ids,
-            inactive_session_ids=inactive_session_ids,
+            session_id=session_id,
             extraction_version=self.extraction_version,
+            tools=tools,
         )
         if candidate is None:
             return _worker_report(
@@ -345,6 +373,7 @@ class MemoryExtractionWorker:
                 inspected=0,
                 emitted=0,
                 status="skipped_no_backlog",
+                metadata={"last_session_id": session_id},
             )
         return _run_candidate(
             worker_name=self.name,
@@ -412,7 +441,10 @@ def _run_candidate(
         input_refs=candidate.source_refs,
     )
     if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
-        message = "memory extraction yielded before LLM call"
+        message = (
+            "memory extraction failed: cooperative yield requested after source "
+            "window claim before LLM call"
+        )
         _mark_failed_if_needed(
             state_service,
             window=window,
@@ -424,8 +456,7 @@ def _run_candidate(
             checkpoint,
             inspected=len(candidate.source_refs),
             emitted=0,
-            status="yielded",
-            yielded=True,
+            status="error",
             notes=[message],
             metadata={"last_window_id": window.window_id},
         )
@@ -489,23 +520,6 @@ def _run_candidate(
         emitted=len(written),
         status="ok",
         metadata={"last_window_id": window.window_id},
-    )
-
-
-def _next_source_window_candidate(
-    state_service: CognitionStateStore,
-    *,
-    tools: Sequence[LLMToolDefinitionInput],
-    active_session_ids: frozenset[str],
-    inactive_session_ids: frozenset[str],
-    extraction_version: str,
-) -> _SourceWindowCandidate | None:
-    return _inactive_backlog_candidate(
-        state_service,
-        active_session_ids=active_session_ids,
-        inactive_session_ids=inactive_session_ids,
-        extraction_version=extraction_version,
-        tools=tools,
     )
 
 
@@ -579,52 +593,7 @@ def _compact_job_candidate(
     )
 
 
-def _inactive_backlog_candidate(
-    state_service: CognitionStateStore,
-    *,
-    active_session_ids: frozenset[str],
-    inactive_session_ids: frozenset[str],
-    extraction_version: str,
-    tools: Sequence[LLMToolDefinitionInput],
-) -> _SourceWindowCandidate | None:
-    if not inactive_session_ids:
-        return None
-    store = state_service.store
-    import_session_ids: list[str] = []
-    for session_id in sorted(inactive_session_ids):
-        if session_id in active_session_ids:
-            continue
-        if store.is_import_session(session_id):
-            import_session_ids.append(session_id)
-            continue
-        candidate = _ordinary_inactive_backlog_candidate(
-            state_service,
-            session_id=session_id,
-            extraction_version=extraction_version,
-            tools=tools,
-        )
-        if candidate is not None:
-            return candidate
-
-    import_candidates = [
-        candidate
-        for session_id in sorted(import_session_ids)
-        if (
-            candidate := _import_inactive_backlog_candidate(
-                state_service,
-                session_id=session_id,
-                extraction_version=extraction_version,
-                tools=tools,
-            )
-        )
-        is not None
-    ]
-    if not import_candidates:
-        return None
-    return min(import_candidates, key=_import_candidate_sort_key)
-
-
-def _ordinary_inactive_backlog_candidate(
+def _session_backlog_candidate(
     state_service: CognitionStateStore,
     *,
     session_id: str,
@@ -633,10 +602,21 @@ def _ordinary_inactive_backlog_candidate(
 ) -> _SourceWindowCandidate | None:
     store = state_service.store
     target_unit = f"session:{session_id}"
-    if _has_pending_handover(store, session_id):
-        return None
     if _has_active_extraction_window(state_service, target_unit=target_unit):
         return None
+    is_import_session = store.is_import_session(session_id)
+    imported_session_message_ids: set[str] | None = None
+    if is_import_session:
+        imported_conversation = store.get_imported_conversation_by_session(session_id)
+        if imported_conversation is None:
+            return None
+        imported_messages = store.list_imported_messages(
+            source_provider=imported_conversation.source_provider,
+            external_conversation_id=imported_conversation.external_conversation_id,
+        )
+        imported_session_message_ids = {
+            message.session_message_id for message in imported_messages
+        }
     compressed = store.find_latest_compressed_message(session_id)
     boundary_ordinal = compressed.ordinal if compressed is not None else 0
     messages = [
@@ -646,6 +626,10 @@ def _ordinary_inactive_backlog_candidate(
             after_ordinal=boundary_ordinal,
         )
         if message.kind != "compressed_message"
+        and (
+            imported_session_message_ids is None
+            or message.id in imported_session_message_ids
+        )
     ]
     message_refs = tuple(
         BackgroundSourceRef("session_message", message.id) for message in messages
@@ -665,20 +649,36 @@ def _ordinary_inactive_backlog_candidate(
     selected_messages = [
         message for message in messages if message.id in selected_ids
     ]
-    prompt_source_messages = [
-        message
-        for message in messages
-        if message.id in selected_ids or _is_system_reminder(message)
-    ]
+    if not selected_messages:
+        return None
     ordinals = [message.ordinal for message in selected_messages]
-    prompt_prefix_messages = [
-        default_runtime_system_message(),
-        *([session_message_to_chat(compressed)] if compressed is not None else []),
-        *[source_message_to_chat(message) for message in prompt_source_messages],
-    ]
-    source_time_metadata, source_time_line = _source_time_context(store, source_refs)
+    source_path = _IMPORT_BACKLOG_SOURCE_PATH if is_import_session else _BACKLOG_SOURCE_PATH
+    prompt_source_messages = (
+        selected_messages
+        if is_import_session
+        else [
+            message
+            for message in messages
+            if message.id in selected_ids or _is_system_reminder(message)
+        ]
+    )
+    prompt_prefix_messages = (
+        [source_message_to_chat(message) for message in selected_messages]
+        if is_import_session
+        else [
+            default_runtime_system_message(),
+            *([session_message_to_chat(compressed)] if compressed is not None else []),
+            *[source_message_to_chat(message) for message in prompt_source_messages],
+        ]
+    )
+    source_time_refs = (
+        (BackgroundSourceRef("session_message", selected_messages[-1].id),)
+        if is_import_session
+        else source_refs
+    )
+    source_time_metadata, source_time_line = _source_time_context(store, source_time_refs)
     return _SourceWindowCandidate(
-        source_path=_BACKLOG_SOURCE_PATH,
+        source_path=source_path,
         session_id=session_id,
         target_unit=target_unit,
         source_refs=tuple(source_refs),
@@ -687,7 +687,7 @@ def _ordinary_inactive_backlog_candidate(
         prompt_prefix_messages=tuple(prompt_prefix_messages),
         source_time_line=source_time_line,
         metadata={
-            "source_path": _BACKLOG_SOURCE_PATH,
+            "source_path": source_path,
             "session_id": session_id,
             "ordinal_start": min(ordinals) if ordinals else None,
             "ordinal_end": max(ordinals) if ordinals else None,
@@ -703,90 +703,6 @@ def _ordinary_inactive_backlog_candidate(
             **source_time_metadata,
         },
     )
-
-
-def _import_inactive_backlog_candidate(
-    state_service: CognitionStateStore,
-    *,
-    session_id: str,
-    extraction_version: str,
-    tools: Sequence[LLMToolDefinitionInput],
-) -> _SourceWindowCandidate | None:
-    store = state_service.store
-    target_unit = f"session:{session_id}"
-    if _has_active_extraction_window(state_service, target_unit=target_unit):
-        return None
-    imported_conversation = store.get_imported_conversation_by_session(session_id)
-    if imported_conversation is None:
-        return None
-    imported_messages = store.list_imported_messages(
-        source_provider=imported_conversation.source_provider,
-        external_conversation_id=imported_conversation.external_conversation_id,
-    )
-    imported_session_message_ids = {
-        message.session_message_id for message in imported_messages
-    }
-    messages = [
-        message
-        for message in store.list_session_messages(session_id)
-        if message.id in imported_session_message_ids
-    ]
-    message_refs = tuple(
-        BackgroundSourceRef("session_message", message.id) for message in messages
-    )
-    source_refs = _retryable_refs(
-        state_service,
-        message_refs,
-        target_unit=target_unit,
-    )
-    if not source_refs:
-        return None
-    selected_message_ids = [
-        ref.source_id for ref in source_refs if ref.source_type == "session_message"
-    ]
-    selected_ids = set(selected_message_ids)
-    selected_messages = [
-        message for message in messages if message.id in selected_ids
-    ]
-    if not selected_messages:
-        return None
-    ordinals = [message.ordinal for message in selected_messages]
-    latest_ref = BackgroundSourceRef("session_message", selected_messages[-1].id)
-    source_time_metadata, source_time_line = _source_time_context(store, (latest_ref,))
-    prompt_prefix_messages = [
-        source_message_to_chat(message) for message in selected_messages
-    ]
-    return _SourceWindowCandidate(
-        source_path=_IMPORT_BACKLOG_SOURCE_PATH,
-        session_id=session_id,
-        target_unit=target_unit,
-        source_refs=tuple(source_refs),
-        ordinal_start=min(ordinals) if ordinals else None,
-        ordinal_end=max(ordinals) if ordinals else None,
-        prompt_prefix_messages=tuple(prompt_prefix_messages),
-        source_time_line=source_time_line,
-        metadata={
-            "source_path": _IMPORT_BACKLOG_SOURCE_PATH,
-            "session_id": session_id,
-            "ordinal_start": min(ordinals) if ordinals else None,
-            "ordinal_end": max(ordinals) if ordinals else None,
-            "source_message_ids": selected_message_ids,
-            "context_reminder_message_ids": [],
-            "compressed_message_id": None,
-            "boundary_ordinal": 0,
-            "earliest_pending_source_time": selected_messages[0].created_at,
-            "prompt_prefix_hash": handover_prompt_prefix_hash(prompt_prefix_messages),
-            "tools_schema_hash": handover_tools_schema_hash(tools),
-            "extraction_version": extraction_version,
-            **source_time_metadata,
-        },
-    )
-
-
-def _import_candidate_sort_key(candidate: _SourceWindowCandidate) -> tuple[str, str]:
-    value = candidate.metadata.get("earliest_pending_source_time")
-    source_time = value if isinstance(value, str) else ""
-    return (source_time, candidate.session_id)
 
 
 def _compact_job_source_messages(
@@ -847,22 +763,6 @@ def _source_status(
         ).status
     except KeyError:
         return None
-
-
-def _has_pending_handover(store: StateStore, session_id: str) -> bool:
-    traces = store.list_runtime_traces(session_id)
-    pending: set[int] = set()
-    for trace in traces:
-        if not trace.event_type.startswith("handover_compression."):
-            continue
-        point = _optional_int(trace.metadata.get("compression_point_ordinal"))
-        if point is None:
-            continue
-        if trace.event_type == "handover_compression.started":
-            pending.add(point)
-        elif trace.event_type in {"handover_compression.completed", "handover_compression.failed"}:
-            pending.discard(point)
-    return bool(pending)
 
 
 def _has_active_extraction_window(
@@ -949,7 +849,6 @@ def _validation_context(
         allowed_about_refs=_allowed_about_refs(
             store,
             candidate.session_id,
-            include_session=candidate.source_path != _IMPORT_BACKLOG_SOURCE_PATH,
         ),
         derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
     )
@@ -958,15 +857,11 @@ def _validation_context(
 def _allowed_about_refs(
     store: StateStore,
     session_id: str,
-    *,
-    include_session: bool = True,
 ) -> frozenset[tuple[str, str]]:
     refs = {
         ("subject", "subject:self"),
         ("self", "subject:self"),
     }
-    if include_session:
-        refs.add(("session", session_id))
     counterpart = store.get_session_counterpart(session_id)
     if counterpart is not None:
         refs.add(("counterpart", counterpart.counterpart_id))
@@ -1058,14 +953,18 @@ def _tool_choice_for_extraction(
     return "none" if tools else None
 
 
-def _optional_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value)
-    return None
+def _missing_llm_provider_report(
+    worker: str,
+    checkpoint: WorkerCheckpoint,
+) -> WorkerReport:
+    return _worker_report(
+        worker,
+        checkpoint,
+        inspected=0,
+        emitted=0,
+        status="error",
+        notes=["memory extraction failed: no LLM provider configured"],
+    )
 
 
 def _worker_report(
@@ -1088,7 +987,6 @@ def _worker_report(
         new_checkpoint=WorkerCheckpoint(
             worker_name=worker,
             last_run_at=Instant(utc_now_iso()),
-            last_processed_event_id=checkpoint.last_processed_event_id,
             last_status=status,
             metadata=metadata if metadata is not None else checkpoint.metadata,
         ),

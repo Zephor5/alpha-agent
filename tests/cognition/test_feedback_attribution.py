@@ -608,6 +608,57 @@ def test_feedback_attribution_source_claim_is_all_or_nothing(tmp_path: Path) -> 
     ]
 
 
+def test_feedback_attribution_claimed_progress_is_recovered_stage_agnostically(
+    tmp_path: Path,
+) -> None:
+    service = CognitionStateStore(_store(tmp_path))
+    target_unit = "session:s1"
+    reason = "recovered abandoned claimed background work"
+    claimed = claim_feedback_attribution_sources(
+        service.ledger,
+        session_id="s1",
+        recall_tool_message_ids=("msg_recall_1",),
+        claimed_by="worker-a",
+    )
+    service.ledger.mark_source_pending(
+        BackgroundSourceRef("session_message", "msg_recall_pending"),
+        stage=BackgroundStage.FEEDBACK_ATTRIBUTION,
+        target_unit=target_unit,
+    )
+
+    report = service.ledger.recover_abandoned_background_work()
+
+    recovered = service.ledger.get_source_progress(
+        BackgroundSourceRef("session_message", "msg_recall_1"),
+        stage=BackgroundStage.FEEDBACK_ATTRIBUTION,
+        target_unit=target_unit,
+    )
+    pending = service.ledger.get_source_progress(
+        BackgroundSourceRef("session_message", "msg_recall_pending"),
+        stage=BackgroundStage.FEEDBACK_ATTRIBUTION,
+        target_unit=target_unit,
+    )
+    retried = claim_feedback_attribution_sources(
+        service.ledger,
+        session_id="s1",
+        recall_tool_message_ids=("msg_recall_1",),
+        claimed_by="worker-b",
+    )
+
+    assert len(claimed) == 1
+    assert report.source_progress == 1
+    assert report.source_windows == 0
+    assert report.stage_runs == 0
+    assert recovered.status == BackgroundProgressStatus.FAILED
+    assert recovered.last_error == reason
+    assert pending.status == BackgroundProgressStatus.PENDING
+    assert pending.last_error is None
+    assert len(retried) == 1
+    assert retried[0].status == BackgroundProgressStatus.CLAIMED
+    assert retried[0].attempts == 2
+    assert retried[0].last_error is None
+
+
 def test_realtime_feedback_attribution_success_emits_events_and_consequences(
     tmp_path: Path,
 ) -> None:

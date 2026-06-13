@@ -6,7 +6,6 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any, ClassVar
 
 from alpha_agent.cognition.authority import CognitionSourceKind
@@ -18,7 +17,6 @@ from alpha_agent.cognition.background_llm_contract import (
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.loops.scheduler import (
-    ScheduleTrigger,
     WorkerCheckpoint,
     WorkerReport,
     WorkerStatus,
@@ -32,7 +30,6 @@ from alpha_agent.cognition.models import (
     AtomicBelief,
     BeliefLifecycle,
     BeliefScope,
-    CognitiveEventKind,
     DerivationStage,
     Instant,
 )
@@ -140,26 +137,17 @@ class MemoryConsolidationWorker:
     """Ask an LLM to consolidate extracted atomic drafts against active beliefs."""
 
     name: ClassVar[str] = "memory_consolidation"
-    trigger: ClassVar[ScheduleTrigger] = ScheduleTrigger(
-        min_interval=timedelta(seconds=0),
-        max_interval=timedelta(seconds=0),
-        watches=frozenset(),
-        min_new_events=0,
-    )
-    handles_event_kinds: ClassVar[frozenset[CognitiveEventKind]] = frozenset()
 
     def __init__(
         self,
         state_service: CognitionStateStore | None = None,
         llm_provider: LLMProvider | None = None,
         *,
-        batch_size: int = 12,
         worker_id: str | None = None,
         llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.state_service = state_service
         self.llm_provider = llm_provider
-        self.batch_size = max(1, int(batch_size))
         self.worker_id = worker_id or self.name
         self.llm_trace_logger = llm_trace_logger
 
@@ -172,13 +160,19 @@ class MemoryConsolidationWorker:
         if self.state_service is None:
             raise ValueError("MemoryConsolidationWorker.run_once requires state_service")
         if self.llm_provider is None:
-            raise ValueError("MemoryConsolidationWorker.run_once requires llm_provider")
+            return _worker_report(
+                self.name,
+                checkpoint or WorkerCheckpoint(worker_name=self.name),
+                inspected=0,
+                emitted=0,
+                status="error",
+                notes=["memory consolidation failed: no LLM provider configured"],
+            )
         return self._run_with(
             state_service=self.state_service,
             llm_provider=self.llm_provider,
             checkpoint=checkpoint or WorkerCheckpoint(worker_name=self.name),
             coordinator=coordinator or _NeverYieldCoordinator(),
-            batch_size=self.batch_size,
             llm_trace_logger=self.llm_trace_logger,
         )
 
@@ -201,15 +195,14 @@ class MemoryConsolidationWorker:
                 checkpoint,
                 inspected=0,
                 emitted=0,
-                status="skipped_no_backlog",
-                notes=["memory consolidation skipped: no LLM provider configured"],
+                status="error",
+                notes=["memory consolidation failed: no LLM provider configured"],
             )
         return self._run_with(
             state_service=state_service,
             llm_provider=provider,
             checkpoint=checkpoint,
             coordinator=coordinator,
-            batch_size=max(1, int(getattr(config, "consolidation_batch_size", self.batch_size))),
             llm_trace_logger=(
                 getattr(config, "llm_trace_logger", self.llm_trace_logger)
                 or self.llm_trace_logger
@@ -223,10 +216,9 @@ class MemoryConsolidationWorker:
         llm_provider: LLMProvider,
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
-        batch_size: int,
         llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
-        candidate = _next_consolidation_candidate(state_service, batch_size=batch_size)
+        candidate = _next_consolidation_candidate(state_service)
         if candidate is None:
             return _worker_report(
                 self.name,
@@ -279,7 +271,10 @@ class MemoryConsolidationWorker:
             input_refs=window.source_refs,
         )
         if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
-            message = "memory consolidation yielded before LLM call"
+            message = (
+                "memory consolidation failed: cooperative yield requested after source "
+                "window claim before LLM call"
+            )
             _mark_failed_if_needed(
                 state_service,
                 window=window,
@@ -292,8 +287,7 @@ class MemoryConsolidationWorker:
                 checkpoint,
                 inspected=len(candidate.source_refs),
                 emitted=0,
-                status="yielded",
-                yielded=True,
+                status="error",
                 notes=[message],
                 metadata={"last_window_id": window.window_id},
             )
@@ -357,13 +351,6 @@ class MemoryConflictReviewWorker:
     """Review queued conflicts and persist only validated safe or pending outcomes."""
 
     name: ClassVar[str] = "memory_conflict_review"
-    trigger: ClassVar[ScheduleTrigger] = ScheduleTrigger(
-        min_interval=timedelta(seconds=0),
-        max_interval=timedelta(seconds=0),
-        watches=frozenset(),
-        min_new_events=0,
-    )
-    handles_event_kinds: ClassVar[frozenset[CognitiveEventKind]] = frozenset()
 
     def __init__(
         self,
@@ -387,7 +374,14 @@ class MemoryConflictReviewWorker:
         if self.state_service is None:
             raise ValueError("MemoryConflictReviewWorker.run_once requires state_service")
         if self.llm_provider is None:
-            raise ValueError("MemoryConflictReviewWorker.run_once requires llm_provider")
+            return _worker_report(
+                self.name,
+                checkpoint or WorkerCheckpoint(worker_name=self.name),
+                inspected=0,
+                emitted=0,
+                status="error",
+                notes=["memory conflict review failed: no LLM provider configured"],
+            )
         return self._run_with(
             state_service=self.state_service,
             llm_provider=self.llm_provider,
@@ -415,8 +409,8 @@ class MemoryConflictReviewWorker:
                 checkpoint,
                 inspected=0,
                 emitted=0,
-                status="skipped_no_backlog",
-                notes=["memory conflict review skipped: no LLM provider configured"],
+                status="error",
+                notes=["memory conflict review failed: no LLM provider configured"],
             )
         return self._run_with(
             state_service=state_service,
@@ -476,7 +470,10 @@ class MemoryConflictReviewWorker:
                 _active_belief_ids_from_metadata(window.metadata),
             )
             if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
-                message = "memory conflict review yielded before LLM call"
+                message = (
+                    "memory conflict review failed: cooperative yield requested after "
+                    "source window claim before LLM call"
+                )
                 _mark_failed_if_needed(
                     state_service,
                     window=window,
@@ -489,8 +486,7 @@ class MemoryConflictReviewWorker:
                     checkpoint,
                     inspected=len(window.source_refs),
                     emitted=0,
-                    status="yielded",
-                    yielded=True,
+                    status="error",
                     notes=[message],
                     metadata={"last_window_id": window.window_id},
                 )
@@ -552,8 +548,6 @@ class MemoryConflictReviewWorker:
 
 def _next_consolidation_candidate(
     state_service: CognitionStateStore,
-    *,
-    batch_size: int,
 ) -> _ConsolidationCandidate | None:
     active = sorted(state_service.beliefs.list_active(), key=lambda item: str(item.id))
     drafts = [
@@ -908,7 +902,6 @@ def _worker_report(
         new_checkpoint=WorkerCheckpoint(
             worker_name=worker,
             last_run_at=Instant(utc_now_iso()),
-            last_processed_event_id=checkpoint.last_processed_event_id,
             last_status=status,
             metadata=metadata if metadata is not None else checkpoint.metadata,
         ),

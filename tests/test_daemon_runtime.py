@@ -72,6 +72,18 @@ class _FailingAdapter:
         return None
 
 
+class _RecordingBackgroundWake:
+    def __init__(self) -> None:
+        self.wake_calls = 0
+
+    def wake(self) -> bool:
+        self.wake_calls += 1
+        return True
+
+    def tick_once(self) -> list[object]:
+        raise AssertionError("conversation import must not synchronously drain background work")
+
+
 def _config(tmp_path: Path) -> AlphaConfig:
     return AlphaConfig(
         db_path=tmp_path / "alpha.db",
@@ -202,6 +214,8 @@ def test_daemon_conversation_import_dry_run_returns_summary_without_writes(
     store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store)
+    wake = _RecordingBackgroundWake()
+    daemon.background_service = wake  # type: ignore[assignment]
 
     response = daemon.handle_payload(
         {
@@ -226,8 +240,32 @@ def test_daemon_conversation_import_dry_run_returns_summary_without_writes(
         "messages_inserted": 3,
         "messages_deduped": 0,
     }
+    assert wake.wake_calls == 0
     assert store.list_import_batches() == []
     assert store.get_imported_conversation("chatgpt", "conv_1") is None
+
+
+def test_daemon_conversation_import_wakes_background_after_inserted_messages(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    store = StateStore(config.db_path)
+    store.initialize()
+    daemon = AlphaDaemon(config, store=store)
+    wake = _RecordingBackgroundWake()
+    daemon.background_service = wake  # type: ignore[assignment]
+
+    response = daemon.handle_payload(
+        {
+            "type": "conversation_import",
+            "input_name": "export.json",
+            "payload_json": json.dumps(_import_payload()),
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["summary"]["messages_inserted"] == 3
+    assert wake.wake_calls == 1
 
 
 def test_daemon_conversation_import_real_run_and_status(tmp_path: Path) -> None:
@@ -287,6 +325,8 @@ def test_daemon_conversation_import_returns_validation_details(tmp_path: Path) -
     store = StateStore(config.db_path)
     store.initialize()
     daemon = AlphaDaemon(config, store=store)
+    wake = _RecordingBackgroundWake()
+    daemon.background_service = wake  # type: ignore[assignment]
     payload = _import_payload()
     conversations = payload["conversations"]
     assert isinstance(conversations, list)
@@ -316,6 +356,7 @@ def test_daemon_conversation_import_returns_validation_details(tmp_path: Path) -
             "code": "naive_timestamp",
         }
     ]
+    assert wake.wake_calls == 0
 
 
 def test_daemon_conversation_import_rejects_malformed_boundary_fields(

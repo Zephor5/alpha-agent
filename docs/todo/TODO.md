@@ -374,7 +374,6 @@ Keep channel commands small and operational.
   the cognition review model exists.
 - [ ] `/forget <id>`: apply correction/forget semantics after belief projection
   supports them.
-- [ ] `/consolidate`: run manual cognition consolidation if authorized.
 - [ ] `/debug prompt`: admin-only prompt inspection.
 
 Avoid adding broad model switching, plugin management, update commands, kanban

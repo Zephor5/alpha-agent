@@ -78,6 +78,7 @@ _IMPORT_EXTRACTION_STATUS_KEYS = (
     "extraction_failed",
     "extraction_skipped",
 )
+_BACKGROUND_SERVICE_SHUTDOWN_TIMEOUT_SECONDS = 61.0
 
 
 class StopPolicy(StrEnum):
@@ -142,7 +143,6 @@ class AlphaDaemon:
             coordinator=self.loop_coordinator,
             llm_provider=background_provider,
             tools=background_tools,
-            active_session_ids=getattr(self.agent_manager, "session_ids", lambda: ()),
             llm_trace_logger=llm_trace_logger,
         )
         self._server: JsonLineDaemonServer | None = None
@@ -228,15 +228,15 @@ class AlphaDaemon:
             self.background_service.stop(
                 immediate=self._stop_policy is StopPolicy.IMMEDIATE,
                 wait=True,
-                timeout=self.config.cognition_background.tick_timeout_seconds + 1,
+                timeout=_BACKGROUND_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
             )
             self.direct_compact_extraction.shutdown(
                 wait=self._stop_policy is not StopPolicy.IMMEDIATE,
-                timeout=self.config.cognition_background.tick_timeout_seconds + 1,
+                timeout=_BACKGROUND_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
             )
             self.feedback_attribution.shutdown(
                 wait=self._stop_policy is not StopPolicy.IMMEDIATE,
-                timeout=self.config.cognition_background.tick_timeout_seconds + 1,
+                timeout=_BACKGROUND_SERVICE_SHUTDOWN_TIMEOUT_SECONDS,
             )
             gateway_runtime = gateway_runtime_config(self.config)
             self._disconnect_adapters(connected_adapters, gateway_runtime.log_paths["errors.log"])
@@ -369,6 +369,8 @@ class AlphaDaemon:
                 str(exc),
                 details=[error.to_dict() for error in exc.errors],
             )
+        if not request.dry_run and summary.messages_inserted > 0:
+            self.background_service.wake()
         return ok_response(summary=summary.to_dict())
 
     def _handle_conversation_import_status(self, request: DaemonRequest) -> dict[str, Any]:

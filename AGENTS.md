@@ -46,7 +46,7 @@ src/
       state_service.py State service for atomic beliefs, summaries, background operations, and audit writes.
       models/         Frozen cognition data contracts for events, beliefs, goals, subjects, situations, enums, and loop metadata.
       event_log/      In-memory and SQLite cognitive event log implementations.
-      loops/          In-process scheduler, checkpoint storage, ConsolidationLoop, background service, and DriveLoop.
+      loops/          In-process scheduler, checkpoint storage, daemon background drain service, and DriveLoop.
         workers/      LLM-mediated memory extraction, consolidation, summary workers, plus expired-belief archival.
       goals/          GoalRegistry event write path for DriveLoop goals.
       projections/    SQLite-backed projections for counterpart, belief, goal, subject, and event counts.

@@ -554,6 +554,25 @@ class StateStore:
             ).fetchall()
         return [str(row["session_id"]) for row in rows]
 
+    def list_session_records(
+        self,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[SessionRecord]:
+        """List durable session records by creation time with a stable id tie-break."""
+
+        def op(db: sqlite3.Connection) -> list[SessionRecord]:
+            rows = db.execute(
+                """
+                SELECT *
+                FROM sessions
+                ORDER BY created_at ASC, session_id ASC
+                """
+            ).fetchall()
+            return [self._session_record_from_row(row) for row in rows]
+
+        return self._with_conn(conn, op)
+
     def latest_session_ordinal(self, session_id: str) -> int:
         """Return the latest source ordinal for a session, or zero if it has none."""
 

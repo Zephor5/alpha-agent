@@ -100,7 +100,6 @@ uv run alpha config get llm.provider
 # Inspect what the agent knows / does
 uv run alpha skills list
 uv run alpha debug prompt "summarize this session" --session <id> --trace
-uv run alpha cognition consolidate --now --dry-run
 
 # Import normalized external conversation history for background cognition
 uv run alpha cognition import conversations path/to/conversations.json --dry-run
@@ -184,7 +183,7 @@ mode. Tool specs do not use a `group` field.
   sessions. `ask` and `chat` are thin clients that talk to it over a local
   socket. Each turn runs a bounded LLM + tool loop and persists every message.
 - **Memory that builds itself.** Turns are appended to a local event log. A
-  background cognition service periodically intakes new conversation, extracts
+  background cognition service periodically scans conversation backlog, extracts
   durable memories (facts, preferences, constraints, procedures, values,
   relationships), consolidates them, and reviews conflicts.
 - **Explicit recall.** The model pulls relevant memory on demand via a

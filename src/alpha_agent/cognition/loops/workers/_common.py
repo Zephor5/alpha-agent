@@ -29,7 +29,6 @@ def report(
         new_checkpoint=WorkerCheckpoint(
             worker_name=worker,
             last_run_at=checkpoint.last_run_at,
-            last_processed_event_id=checkpoint.last_processed_event_id,
             last_status="yielded" if yielded else "ok",
             metadata=metadata if metadata is not None else checkpoint.metadata,
         ),
