@@ -50,6 +50,7 @@ def test_memory_propose_tool_schema_exposes_new_memory_kinds() -> None:
     memory_schema = definition.parameters["properties"]["updates"]["items"]["properties"][
         "memory"
     ]
+    update_schema = definition.parameters["properties"]["updates"]["items"]
     assert memory_schema["properties"]["type"]["enum"] == [
         "fact",
         "preference",
@@ -58,6 +59,11 @@ def test_memory_propose_tool_schema_exposes_new_memory_kinds() -> None:
         "value",
         "relationship",
     ]
+    assert memory_schema["required"] == ["type", "topic", "content", "evidence", "scope"]
+    for field in ["topic", "content", "evidence", "scope"]:
+        assert memory_schema["properties"][field]["description"]
+    for field in ["target_hint", "reason"]:
+        assert update_schema["properties"][field]["description"]
 
 
 def test_memory_propose_append_writes_atomic_belief_directly_in_runtime_turn(tmp_path) -> None:
@@ -68,10 +74,12 @@ def test_memory_propose_append_writes_atomic_belief_directly_in_runtime_turn(tmp
                 "append_distinct",
                 memory={
                     "type": "preference",
+                    "topic": "answer language",
                     "content": "User prefers future answers in Chinese.",
                     "evidence": "User said: 以后都用中文回答我.",
                     "scope": "counterpart",
                 },
+                target_hint="do not use this as topic",
                 reason="User explicitly stated a stable answer-language preference.",
             )
         ]
@@ -117,6 +125,7 @@ def test_memory_propose_append_writes_atomic_belief_directly_in_runtime_turn(tmp
     belief = BeliefProjection(store).list_active()[0]
     assert str(belief.id) == tool_output["results"][0]["new_belief_id"]
     assert belief.content == "User prefers future answers in Chinese."
+    assert belief.topic == "answer language"
     assert belief.memory_kind == MemoryKind.PREFERENCE
     assert belief.derivation_stage == DerivationStage.TOOL_WRITTEN
     assert belief.authority == Authority.USER_ASSERTED
@@ -129,6 +138,9 @@ def test_memory_propose_append_writes_atomic_belief_directly_in_runtime_turn(tmp
     assert audit_records[0].entity_refs == (Reference("belief", str(belief.id)),)
     assert audit_records[0].payload["source"] == MEMORY_PROPOSE_TOOL_NAME
     assert audit_records[0].payload["operation"] == "append_distinct"
+    assert audit_records[0].payload["topic"] == "answer language"
+    assert proposed[0].payload["topic"] == "answer language"
+    assert proposed[0].payload["proposal"]["memory"]["topic"] == "answer language"
 
     source_recorded = [
         event for event in events if event.kind == CognitiveEventKind.TURN_SOURCES_RECORDED
@@ -149,6 +161,7 @@ def test_memory_propose_constraint_is_first_class_memory_kind(tmp_path) -> None:
                 "append_distinct",
                 memory={
                     "type": "constraint",
+                    "topic": "repository path rule",
                     "content": "Do not write local machine-specific absolute paths into the repo.",
                     "evidence": "User stated this project rule explicitly.",
                     "scope": "global",
@@ -161,7 +174,34 @@ def test_memory_propose_constraint_is_first_class_memory_kind(tmp_path) -> None:
     belief = BeliefProjection(store).list_active()[0]
     assert belief.memory_kind == MemoryKind.CONSTRAINT
     assert belief.scope == BeliefScope.GLOBAL
-    assert not belief.object.startswith("constraint:")
+    assert belief.topic == "repository path rule"
+
+
+def test_memory_propose_rejects_missing_memory_topic(tmp_path) -> None:
+    store = _store(tmp_path)
+
+    _run_updates(
+        store,
+        session_id="s1",
+        message="Remember that I prefer concise answers.",
+        updates=[
+            _update(
+                "append_distinct",
+                memory={
+                    "type": "preference",
+                    "content": "User prefers concise answers.",
+                    "evidence": "User asked to remember their concise-answer preference.",
+                    "scope": "counterpart",
+                },
+                reason="User explicitly stated a stable answer style preference.",
+            )
+        ],
+    )
+
+    tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
+    assert tool_output["status"] == "rejected"
+    assert tool_output["results"][0]["reason"] == "invalid_schema:missing_memory_topic"
+    assert BeliefProjection(store).list_active() == []
 
 
 def test_memory_propose_duplicate_append_reaffirms_without_new_belief(tmp_path) -> None:
@@ -169,6 +209,7 @@ def test_memory_propose_duplicate_append_reaffirms_without_new_belief(tmp_path) 
     original = _append_memory(
         store,
         session_id="s1",
+        topic="answer language",
         content="User prefers future answers in Chinese.",
         evidence="User said: 以后都用中文回答我.",
     )
@@ -183,6 +224,7 @@ def test_memory_propose_duplicate_append_reaffirms_without_new_belief(tmp_path) 
                 "append_distinct",
                 memory={
                     "type": "preference",
+                    "topic": "answer language",
                     "content": "User prefers future answers in Chinese.",
                     "evidence": "User repeated the same preference.",
                     "scope": "counterpart",
@@ -208,6 +250,7 @@ def test_memory_propose_replace_supersedes_directly_without_belief_event(tmp_pat
     original = _append_memory(
         store,
         session_id="s1",
+        topic="example language",
         content="User prefers Python examples.",
         evidence="User said they prefer Python examples.",
     )
@@ -222,6 +265,7 @@ def test_memory_propose_replace_supersedes_directly_without_belief_event(tmp_pat
                 target_belief_ids=[str(original.id)],
                 memory={
                     "type": "preference",
+                    "topic": "example language",
                     "content": "User prefers Rust examples.",
                     "evidence": (
                         "User said: actually replace my Python example preference with Rust."
@@ -254,6 +298,7 @@ def test_memory_propose_correct_pending_writes_pending_atomic_belief(tmp_path) -
     target = _append_memory(
         store,
         session_id="s1",
+        topic="example language",
         content="User prefers Python examples.",
         evidence="User said they prefer Python examples.",
     )
@@ -268,6 +313,7 @@ def test_memory_propose_correct_pending_writes_pending_atomic_belief(tmp_path) -
                 target_belief_ids=[str(target.id)],
                 memory={
                     "type": "preference",
+                    "topic": "example language",
                     "content": "User prefers Rust examples.",
                     "evidence": "User said the previous Python-example memory is wrong.",
                     "scope": "counterpart",
@@ -318,6 +364,7 @@ def test_memory_propose_rejects_summary_belief_targets_cleanly(tmp_path) -> None
                 target_belief_ids=[str(profile.id)],
                 memory={
                     "type": "preference",
+                    "topic": "example language",
                     "content": "User prefers Rust examples.",
                     "evidence": "User asked to replace the profile.",
                     "scope": "counterpart",
@@ -367,6 +414,7 @@ def test_memory_propose_applies_only_active_matching_domain_summary_guidance(
                 "append_distinct",
                 memory={
                     "type": "preference",
+                    "topic": "example language",
                     "content": "User prefers Rust examples.",
                     "evidence": "User explicitly asked to remember Rust examples.",
                     "scope": "counterpart",
@@ -405,6 +453,7 @@ def test_memory_propose_noops_without_reactive_write_context(tmp_path) -> None:
                             "append_distinct",
                             memory={
                                 "type": "preference",
+                                "topic": "answer language",
                                 "content": "User prefers Chinese.",
                                 "evidence": "User said so.",
                                 "scope": "counterpart",
@@ -445,6 +494,7 @@ def _append_memory(
     store: StateStore,
     *,
     session_id: str,
+    topic: str,
     content: str,
     evidence: str,
 ) -> Any:
@@ -457,6 +507,7 @@ def _append_memory(
                 "append_distinct",
                 memory={
                     "type": "preference",
+                    "topic": topic,
                     "content": content,
                     "evidence": evidence,
                     "scope": "counterpart",
@@ -478,7 +529,7 @@ def _domain_summary(
         id=BeliefId(belief_id),
         subject=Reference("subject", "subject:self"),
         about=[],
-        object="memory proposal domain guidance",
+        topic="memory proposal domain guidance",
         content=NLStatement("Memory proposal guidance requires confirmation."),
         summary_kind=SummaryKind.DOMAIN_SUMMARY,
         derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,

@@ -40,7 +40,7 @@ def belief(
     content: str,
     *,
     about: list[Reference] | None = None,
-    object_: str = "python",
+    topic: str = "python",
     memory_kind: MemoryKind = MemoryKind.PREFERENCE,
     lifecycle: BeliefLifecycle = BeliefLifecycle.ACTIVE,
     held_since: str = "2026-01-01T00:00:00+00:00",
@@ -51,19 +51,17 @@ def belief(
         id=BeliefId(belief_id),
         subject=subject_ref(SUBJECT_SELF),
         about=about_refs,
-        object=object_,
+        topic=topic,
         content=NLStatement(content),
         memory_kind=memory_kind,
         derivation_stage=DerivationStage.TOOL_WRITTEN,
         scope=scope or _scope_for_about(about_refs),
         authority=Authority.USER_ASSERTED,
-        structure=None,
         sources=[],
         validity=ValidityWindow(observed_at=Instant(held_since)),
         relations=[],
         formed_in=situation_ref(SituationId("situation:test")),
         holder_role=Role("agent"),
-        action_orientation=[],
         update_policy={"updates": "operation_driven"},
         lifecycle=lifecycle,
         held_since=Instant(held_since),
@@ -75,7 +73,7 @@ def summary_belief(
     content: str,
     *,
     about: list[Reference],
-    object_: str = "profile",
+    topic: str = "profile",
     summary_kind: SummaryKind = SummaryKind.COUNTERPART_PROFILE,
     scope: BeliefScope = BeliefScope.COUNTERPART,
     held_since: str = "2026-01-01T00:00:00+00:00",
@@ -84,7 +82,7 @@ def summary_belief(
         id=BeliefId(belief_id),
         subject=subject_ref(SUBJECT_SELF),
         about=list(about),
-        object=object_,
+        topic=topic,
         content=NLStatement(content),
         summary_kind=summary_kind,
         derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
@@ -183,7 +181,7 @@ def test_upsert_atomic_belief_indexes_fts_without_duplicates(tmp_path) -> None:
             "belief:examples",
             "User prefers Python examples.",
             about=[counterpart_a(), python_entity()],
-            object_="Python",
+            topic="Python",
         )
     )
 
@@ -199,7 +197,7 @@ def test_upsert_atomic_belief_indexes_fts_without_duplicates(tmp_path) -> None:
             "belief:examples",
             "User prefers Rust snippets.",
             about=[counterpart_a(), entity_ref("rust")],
-            object_="Rust",
+            topic="Rust",
         )
     )
 
@@ -214,7 +212,7 @@ def test_supersede_and_retract_mutate_lifecycle_directly(tmp_path) -> None:
     store = _store(tmp_path)
     projection = BeliefProjection(store)
     old_belief = belief("belief:old", "User prefers Python.")
-    new_belief = belief("belief:new", "User prefers Rust.", object_="rust")
+    new_belief = belief("belief:new", "User prefers Rust.", topic="rust")
     projection.upsert_atomic(old_belief)
 
     projection.supersede_many([old_belief.id], new_belief, at="2026-01-02T00:00:00+00:00")
@@ -332,7 +330,7 @@ def test_recall_explicit_non_counterpart_scope_with_counterpart_context(
             belief_id,
             content,
             about=about,
-            object_=scope.value,
+            topic=scope.value,
             scope=scope,
         )
     )
@@ -341,7 +339,7 @@ def test_recall_explicit_non_counterpart_scope_with_counterpart_context(
             "belief:a-python",
             "User A prefers Python examples.",
             about=[counterpart_a()],
-            object_="python",
+            topic="python",
         )
     )
     projection.upsert_atomic(belief("belief:global-python", "Python uses indentation."))
@@ -427,7 +425,7 @@ def test_fts_query_builders_escape_special_characters_and_skip_short_trigrams(
         conn.execute(
             """
             INSERT INTO belief_search_terms_fts
-                (belief_table, belief_id, search_terms, object, about)
+                (belief_table, belief_id, search_terms, topic, about)
             VALUES (?, ?, ?, ?, ?)
             """,
             (
@@ -441,7 +439,7 @@ def test_fts_query_builders_escape_special_characters_and_skip_short_trigrams(
         conn.execute(
             """
             INSERT INTO belief_search_trigram_fts
-                (belief_table, belief_id, content, object, normalized_content)
+                (belief_table, belief_id, content, topic, normalized_content)
             VALUES (?, ?, ?, ?, ?)
             """,
             (

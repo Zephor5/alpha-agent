@@ -50,8 +50,8 @@ _SCOPE_SCORE_GLOBAL_IN_BOTH = 1.0
 _SCOPE_SCORE_GLOBAL_ONLY = 3.0
 _TYPE_SCORE = 2.0
 _ENTITY_EXACT_SCORE = 4.0
-_OBJECT_EXACT_SCORE = 3.0
-_OBJECT_PARTIAL_SCORE = 1.0
+_TOPIC_EXACT_SCORE = 3.0
+_TOPIC_PARTIAL_SCORE = 1.0
 _TERM_FTS_MAX_SCORE = 4.0
 _TRIGRAM_FTS_MAX_SCORE = 2.0
 _SUBSTRING_SCORE = 1.0
@@ -253,10 +253,10 @@ def score_belief_candidates(
             scorer_reasons.append(f"memory_kind:{belief.memory_kind.value}")
         if "entity_exact" in reason_set:
             score += _ENTITY_EXACT_SCORE
-        if "object_exact" in reason_set:
-            score += _OBJECT_EXACT_SCORE
-        if "object_partial" in reason_set:
-            score += _OBJECT_PARTIAL_SCORE
+        if "topic_exact" in reason_set:
+            score += _TOPIC_EXACT_SCORE
+        if "topic_partial" in reason_set:
+            score += _TOPIC_PARTIAL_SCORE
         if "substring" in reason_set:
             score += _SUBSTRING_SCORE
 
@@ -466,7 +466,7 @@ def _scored_candidate_sort_key(candidate: ScoredBeliefCandidate) -> tuple[Any, .
 
 
 def _exact_priority(reasons: set[str]) -> int:
-    if "entity_exact" in reasons or "object_exact" in reasons:
+    if "entity_exact" in reasons or "topic_exact" in reasons:
         return _EXACT_PRIORITY_EXACT
     return _EXACT_PRIORITY_NONE
 

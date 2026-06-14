@@ -11,7 +11,7 @@ def test_recall_scopes_to_current_counterpart_and_global_beliefs(tmp_path) -> No
     projection = BeliefProjection(store)
     for item in [
         belief("belief:a", "User A prefers Python.", about=[counterpart_a()]),
-        belief("belief:b", "User B prefers Go.", about=[counterpart_b()], object_="go"),
+        belief("belief:b", "User B prefers Go.", about=[counterpart_b()], topic="go"),
         belief("belief:global", "Python is a programming language.", about=[]),
     ]:
         projection.upsert_atomic(item)

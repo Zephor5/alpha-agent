@@ -224,7 +224,7 @@ def _belief(*, sources: list[Reference]) -> AtomicBelief:
         id=BeliefId("belief:source-time"),
         subject=subject_ref(SUBJECT_SELF),
         about=[],
-        object="source time",
+        topic="source time",
         content=NLStatement("Source time is derived from session messages."),
         memory_kind=MemoryKind.FACT,
         derivation_stage=DerivationStage.TOOL_WRITTEN,

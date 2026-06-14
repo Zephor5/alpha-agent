@@ -128,7 +128,7 @@ Files likely touched:
 Implementation:
 
 - Include active beliefs with the same exact scope/about target.
-- Include active beliefs with the same normalized object when present.
+- Include active beliefs with the same normalized topic when present.
 - Include active beliefs with the same project descriptor when present.
 - Include active beliefs directly referenced by source/provenance fields when
   available in current records.
@@ -138,7 +138,7 @@ Implementation:
 Acceptance criteria:
 
 - [ ] Same scope/about active beliefs are always included.
-- [ ] Same object active beliefs are included.
+- [ ] Same topic active beliefs are included.
 - [ ] Same project descriptor active beliefs are included.
 - [ ] Directly linked active beliefs are included.
 - [ ] Structural candidates appear before weaker retrieval candidates.
@@ -159,8 +159,8 @@ Files likely touched:
 
 Implementation:
 
-- Tokenize draft content, object, and project descriptor.
-- Tokenize active belief content, object, and project descriptor.
+- Tokenize draft content, topic, and project descriptor.
+- Tokenize active belief content, topic, and project descriptor.
 - Score active beliefs by token overlap.
 - Include high-scoring lexical matches in the related active belief set.
 - Store lexical score and matched tokens in retrieval metadata.

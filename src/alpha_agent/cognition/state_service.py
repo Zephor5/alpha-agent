@@ -803,7 +803,7 @@ class CognitionStateStore:
             id=BeliefId(new_id("belief")),
             subject=unknown_subject_ref(),
             about=about,
-            object=draft.object or draft.content,
+            topic=draft.topic,
             content=NLStatement(draft.content),
             memory_kind=MemoryKind(draft.memory_kind),
             derivation_stage=DerivationStage(context.derivation_stage),
@@ -814,7 +814,6 @@ class CognitionStateStore:
                 if requires_confirmation
                 else BeliefLifecycle.ACTIVE
             ),
-            structure=draft.structure,
             sources=_program_attached_sources(context, run_id=run_id),
             validity=draft.validity or ValidityWindow(observed_at=Instant(now)),
             update_policy=draft.update_policy,
@@ -851,7 +850,7 @@ class CognitionStateStore:
             id=BeliefId(new_id("belief")),
             subject=unknown_subject_ref(),
             about=about,
-            object=draft.object or draft.content,
+            topic=draft.topic,
             content=NLStatement(draft.content),
             summary_kind=SummaryKind(draft.summary_kind),
             derivation_stage=DerivationStage(context.derivation_stage),

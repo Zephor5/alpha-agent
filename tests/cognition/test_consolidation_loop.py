@@ -603,6 +603,7 @@ def test_background_service_extraction_rotates_downstream_after_session_cap(
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
                 }
             },
@@ -1000,7 +1001,7 @@ def test_background_llm_acceptance_attaches_program_provenance_and_checkpoints_a
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "Alpha Agent package management",
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv for package management.",
                 }
             ),
@@ -1071,14 +1072,14 @@ def test_background_llm_acceptance_writes_multiple_extracted_beliefs_from_one_re
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "Alpha Agent package management",
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
                 },
                 {
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "Alpha Agent linting",
+                    "topic": "Alpha Agent linting",
                     "content": "Alpha Agent runs ruff.",
                 },
             ),
@@ -1157,13 +1158,14 @@ def test_extraction_stage_rejects_singular_atomic_draft_payload() -> None:
             _llm_json(
                 payload={
                     "atomic_belief_draft": {
-                        "memory_kind": MemoryKind.FACT.value,
-                        "scope": BeliefScope.GLOBAL.value,
-                        "about": [],
-                        "content": "Alpha Agent uses uv.",
-                    }
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "topic": "Alpha Agent package management",
+                    "content": "Alpha Agent uses uv.",
                 }
-            ),
+            }
+        ),
             _validation_context(),
         )
 
@@ -1342,7 +1344,7 @@ def test_background_llm_contract_rejects_generated_summary_and_audit_ids_anywher
 ) -> None:
     output = json.loads(_llm_json())
     draft = output["payload"]["atomic_belief_drafts"][0]
-    draft["structure"] = {"nested": [{generated_key: "llm-generated"}]}
+    draft["update_policy"] = {"nested": [{generated_key: "llm-generated"}]}
 
     with pytest.raises(BackgroundLLMValidationError, match="generated|id"):
         validate_background_llm_json(json.dumps(output), _validation_context())
@@ -1440,6 +1442,7 @@ def test_failed_background_llm_validation_logs_raw_output_preview(
                     "summary_kind": SummaryKind.DOMAIN_SUMMARY.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
                 },
             },
@@ -1452,6 +1455,7 @@ def test_failed_background_llm_validation_logs_raw_output_preview(
                     "summary_kind": SummaryKind.COUNTERPART_PROFILE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
                 },
             },
@@ -1483,6 +1487,7 @@ def test_failed_background_llm_validation_logs_raw_output_preview(
                     "summary_kind": SummaryKind.DOMAIN_SUMMARY.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
                 },
             },
@@ -1565,7 +1570,7 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "Alpha Agent package management",
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv for package management.",
                 }
             },
@@ -1599,6 +1604,205 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
     assert progress.status == BackgroundProgressStatus.PROCESSED
 
 
+@pytest.mark.parametrize(
+    "user_content",
+    [
+        "How do I use FastAPI dependency injection?",
+        "Explain FastAPI dependency injection.",
+    ],
+)
+def test_memory_consolidation_keeps_uncertain_imported_draft_pending(
+    tmp_path,
+    user_content: str,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": user_content,
+                                "created_at": "2026-01-01T00:00:00Z",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    counterpart = store.get_session_counterpart(imported.session_id)
+    assert counterpart is not None
+    imported_message = store.list_session_messages(imported.session_id)[0]
+    extracted = _atomic_belief(
+        "belief:extracted-fastapi-request",
+        "User asked for an explanation of FastAPI dependency injection.",
+        memory_kind=MemoryKind.FACT,
+        scope=BeliefScope.COUNTERPART,
+        about=[Reference("counterpart", counterpart.counterpart_id)],
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+        sources=[Reference("session_message", imported_message.id)],
+        topic="FastAPI explanation request",
+    )
+    service.write_atomic_belief(
+        extracted,
+        source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="create",
+            payload={
+                "atomic_belief_draft": {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.COUNTERPART.value,
+                    "about": [
+                        {"kind": "counterpart", "id": counterpart.counterpart_id}
+                    ],
+                    "topic": "FastAPI explanation request",
+                    "content": "User asked for an explanation of FastAPI dependency injection.",
+                }
+            },
+        )
+    )
+
+    report = MemoryConsolidationWorker(service, provider).run_once()
+
+    assert report.emitted == 1
+    archived = service.beliefs.get_by_id(extracted.id)
+    assert isinstance(archived, AtomicBelief)
+    assert archived.lifecycle == BeliefLifecycle.ARCHIVED
+    assert service.beliefs.list_active() == []
+    pending = service.beliefs.recall(
+        BeliefRecallParams(
+            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
+            counterpart=Reference("counterpart", counterpart.counterpart_id),
+            limit=8,
+        )
+    )
+    assert len(pending) == 1
+    assert pending[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+
+
+@pytest.mark.parametrize("operation", ["create", "supersede"])
+def test_memory_consolidation_keeps_mixed_window_imported_request_pending(
+    tmp_path,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "I prefer concise answers.",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            },
+                            {
+                                "external_message_id": "msg_2",
+                                "role": "user",
+                                "content": "Explain FastAPI dependency injection.",
+                                "created_at": "2026-01-01T00:01:00Z",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    counterpart = store.get_session_counterpart(imported.session_id)
+    assert counterpart is not None
+    imported_messages = store.list_session_messages(imported.session_id)
+    extracted = _atomic_belief(
+        "belief:extracted-fastapi-request",
+        "User wants help with FastAPI dependency injection.",
+        memory_kind=MemoryKind.FACT,
+        scope=BeliefScope.COUNTERPART,
+        about=[Reference("counterpart", counterpart.counterpart_id)],
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+        sources=[
+            Reference("session_message", imported_messages[0].id),
+            Reference("session_message", imported_messages[1].id),
+        ],
+        topic="FastAPI explanation request",
+    )
+    service.write_atomic_belief(
+        extracted,
+        source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+    )
+    target: AtomicBelief | None = None
+    if operation == "supersede":
+        target = _atomic_belief(
+            "belief:target-fastapi",
+            "User prefers FastAPI examples.",
+            memory_kind=MemoryKind.PREFERENCE,
+            scope=BeliefScope.COUNTERPART,
+            about=[Reference("counterpart", counterpart.counterpart_id)],
+            topic="FastAPI response preference",
+        )
+        service.write_atomic_belief(
+            target,
+            source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
+        )
+    draft_payload = {
+        "memory_kind": MemoryKind.FACT.value,
+        "scope": BeliefScope.COUNTERPART.value,
+        "about": [{"kind": "counterpart", "id": counterpart.counterpart_id}],
+        "topic": "FastAPI explanation request",
+        "content": "User wants help with FastAPI dependency injection.",
+    }
+    provider_payload: dict[str, object] = {"atomic_belief_draft": draft_payload}
+    if target is not None:
+        provider_payload["belief_update"] = {
+            "target_belief_id": str(target.id),
+            "rationale": "The imported request replaces the target preference.",
+        }
+    provider = _RecordingLLMProvider(
+        _llm_json(operation=operation, payload=provider_payload)
+    )
+
+    report = MemoryConsolidationWorker(service, provider).run_once()
+
+    assert report.emitted == 1
+    archived = service.beliefs.get_by_id(extracted.id)
+    assert isinstance(archived, AtomicBelief)
+    assert archived.lifecycle == BeliefLifecycle.ARCHIVED
+    if target is not None:
+        retained = service.beliefs.get_by_id(target.id)
+        assert isinstance(retained, AtomicBelief)
+        assert retained.lifecycle == BeliefLifecycle.ACTIVE
+    pending = service.beliefs.recall(
+        BeliefRecallParams(
+            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
+            counterpart=Reference("counterpart", counterpart.counterpart_id),
+            limit=8,
+        )
+    )
+    assert len(pending) == 1
+    assert pending[0].content == "User wants help with FastAPI dependency injection."
+    assert pending[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+
+
 def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation(
     tmp_path,
 ) -> None:
@@ -1626,7 +1830,7 @@ def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "Alpha Agent package management",
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv for package management.",
                 }
             },
@@ -1636,7 +1840,7 @@ def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation
     report = MemoryConsolidationWorker(service, provider).run_once()
 
     assert report.emitted == 1
-    prompt = str(provider.calls[0]["messages"][0]["content"])
+    prompt = str(provider.calls[0]["messages"][-1]["content"])
     assert str(first.id) in prompt
     assert str(second.id) not in prompt
     archived_first = service.beliefs.get_by_id(first.id)
@@ -1783,6 +1987,7 @@ def test_memory_summary_worker_errors_after_claim_when_budget_exhausts_before_ll
                     "summary_kind": SummaryKind.SELF_MEMORY_SUMMARY.value,
                     "scope": BeliefScope.SELF.value,
                     "about": [Reference("subject", "subject:self").to_record()],
+                    "topic": "concise answers",
                     "content": "User prefers concise answers.",
                 },
             },
@@ -1840,7 +2045,7 @@ def test_memory_consolidation_worker_prompt_includes_output_schema_and_valid_tar
     report = MemoryConsolidationWorker(service, provider).run_once()
 
     assert report.emitted == 1
-    instruction = provider.calls[0]["messages"][0]["content"]
+    instruction = provider.calls[0]["messages"][-1]["content"]
     assert isinstance(instruction, str)
     assert '"oneOf": [' in instruction
     assert '"const": "create"' in instruction
@@ -1908,7 +2113,9 @@ def test_memory_consolidation_prompt_uses_source_time_before_held_since_for_rece
     report = MemoryConsolidationWorker(service, provider).run_once()
 
     assert report.emitted == 1
-    instruction = provider.calls[0]["messages"][0]["content"]
+    messages = provider.calls[0]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    instruction = messages[-1]["content"]
     assert isinstance(instruction, str)
     assert "prefer source message time over held_since" in instruction
     assert "held_since is Alpha holding time, not evidence time" in instruction
@@ -2006,7 +2213,7 @@ def test_memory_consolidation_worker_accepts_direct_supersede(
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "Alpha Agent package management",
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
                 },
             },
@@ -2225,7 +2432,7 @@ def test_conflict_review_requires_confirmation_writes_pending_candidate_without_
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "example language preference",
+                    "topic": "example language preference",
                     "content": "User now prefers Rust examples instead of Python examples.",
                 }
             },
@@ -2287,7 +2494,7 @@ def test_conflict_review_worker_consumes_feedback_shaped_window_and_supersedes(
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "example language preference",
+                    "topic": "example language preference",
                     "content": "User prefers Rust examples.",
                 },
             },
@@ -2320,7 +2527,7 @@ def test_conflict_review_worker_consumes_feedback_shaped_window_and_supersedes(
         stage=BackgroundStage.CONFLICT_REVIEW,
         target_unit="scope:global",
     ).status == BackgroundProgressStatus.PROCESSED
-    instruction = provider.calls[0]["messages"][0]["content"]
+    instruction = provider.calls[0]["messages"][-1]["content"]
     assert isinstance(instruction, str)
     assert '"feedback_event_id": "cogevt_feedback_1"' in instruction
     assert '"evidence_quote": "I prefer Rust examples now"' in instruction
@@ -2402,7 +2609,7 @@ def test_conflict_review_worker_prompt_includes_output_schema_and_valid_targets(
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "example language preference",
+                    "topic": "example language preference",
                     "content": "User now prefers Rust examples instead of Python examples.",
                 }
             },
@@ -2413,7 +2620,9 @@ def test_conflict_review_worker_prompt_includes_output_schema_and_valid_targets(
     report = MemoryConflictReviewWorker(service, provider).run_once()
 
     assert report.emitted == 1
-    instruction = provider.calls[0]["messages"][0]["content"]
+    messages = provider.calls[0]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    instruction = messages[-1]["content"]
     assert isinstance(instruction, str)
     assert '"oneOf": [' in instruction
     assert '"const": "pending-confirmation"' in instruction
@@ -2589,7 +2798,7 @@ def test_memory_extraction_worker_processes_direct_compact_job_with_program_prov
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "Alpha Agent package management",
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv for package management.",
                 }
             )
@@ -2687,7 +2896,7 @@ def test_memory_extraction_worker_processes_direct_compact_job_without_trace_que
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
-                    "object": "Alpha Agent package management",
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv for package management.",
                 }
             )
@@ -2886,7 +3095,7 @@ def test_memory_extraction_worker_normalizes_project_descriptor_from_llm_draft(
                     "scope": BeliefScope.PROJECT.value,
                     "about": [],
                     "project_descriptor": {"name": "Alpha Agent"},
-                    "object": "Alpha Agent package management",
+                    "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
                 }
             )
@@ -3031,6 +3240,15 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
     assert 'For scope "session"' not in instruction
     assert "project_descriptor" in instruction
     assert "previous messages" in instruction
+    assert 'scope "self" is only for the current Alpha Agent' in instruction
+    assert 'scope "counterpart" is for this counterpart' in instruction
+    assert 'scope "global" is only for durable non-user' in instruction
+    assert "topic is required and must be a short topic phrase" in instruction
+    assert "Do not use a sentence-like topic" in instruction
+    assert "Do not combine multiple claims in content" in instruction
+    assert 'Do not write scope "self" for content like "The user prefers direct feedback."' in (
+        instruction
+    )
     lower_instruction = instruction.lower()
     assert "one atomic memory" not in lower_instruction
     assert "multiple candidates" not in lower_instruction
@@ -3208,6 +3426,7 @@ def test_memory_extraction_worker_import_prompt_excludes_runtime_context_and_ses
     prompt_messages = provider.calls[0]["messages"]
     assert [message["role"] for message in prompt_messages] == [
         "system",
+        "system",
         "user",
         "assistant",
         "user",
@@ -3220,7 +3439,15 @@ def test_memory_extraction_worker_import_prompt_excludes_runtime_context_and_ses
     assert isinstance(instruction, str)
     assert 'For scope "session"' not in instruction
     assert 'Do not emit scope "session"' in instruction
+    assert 'Do not default to scope "self"' in instruction
+    assert 'Do not default to scope "global"' in instruction
     assert "assistant output is evidence about the user only when" in instruction.lower()
+    assert "Imported assistant output is context" in instruction
+    assert "Single-turn inferred interests should normally be skipped" in instruction
+    assert "One-off technical Q&A" in instruction
+    assert "topic is required and must be a short topic phrase" in instruction
+    assert "Do not turn an imported assistant answer into global knowledge" in instruction
+    assert "Do not turn imported assistant identity into Alpha Agent self memory" in instruction
     assert f'{{"id": "{imported.session_id}", "kind": "session"}}' not in instruction
     window = service.ledger.list_source_windows(
         stage=BackgroundStage.EXTRACTION,
@@ -3232,6 +3459,361 @@ def test_memory_extraction_worker_import_prompt_excludes_runtime_context_and_ses
     assert window.metadata["source_time_basis"] == "session_message"
     assert window.metadata["context_reminder_message_ids"] == []
     assert window.metadata["compressed_message_id"] is None
+
+
+def test_import_extraction_keeps_direct_user_stable_preference_pending(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "I prefer direct feedback.",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    counterpart = store.get_session_counterpart(imported.session_id)
+    assert counterpart is not None
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.PREFERENCE.value,
+                    "scope": BeliefScope.COUNTERPART.value,
+                    "about": [
+                        {"kind": "counterpart", "id": counterpart.counterpart_id}
+                    ],
+                    "topic": "direct feedback preference",
+                    "content": "User prefers direct feedback.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={imported.session_id},
+    ).run_once()
+
+    assert report.emitted == 1
+    assert service.beliefs.list_active() == []
+    pending = service.beliefs.recall(
+        BeliefRecallParams(
+            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
+            counterpart=Reference("counterpart", counterpart.counterpart_id),
+            limit=8,
+        )
+    )
+    assert len(pending) == 1
+    assert pending[0].content == "User prefers direct feedback."
+
+
+def test_import_extraction_keeps_mixed_window_direct_preference_pending(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "I prefer concise answers.",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            },
+                            {
+                                "external_message_id": "msg_2",
+                                "role": "user",
+                                "content": "Explain FastAPI dependency injection.",
+                                "created_at": "2026-01-01T00:01:00Z",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    counterpart = store.get_session_counterpart(imported.session_id)
+    assert counterpart is not None
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.PREFERENCE.value,
+                    "scope": BeliefScope.COUNTERPART.value,
+                    "about": [
+                        {"kind": "counterpart", "id": counterpart.counterpart_id}
+                    ],
+                    "topic": "answer style preference",
+                    "content": "User prefers concise answers.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={imported.session_id},
+    ).run_once()
+
+    assert report.emitted == 1
+    assert service.beliefs.list_active() == []
+    pending = service.beliefs.recall(
+        BeliefRecallParams(
+            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
+            counterpart=Reference("counterpart", counterpart.counterpart_id),
+            limit=8,
+        )
+    )
+    assert len(pending) == 1
+    assert pending[0].content == "User prefers concise answers."
+
+
+def test_import_extraction_keeps_mixed_window_inferred_request_pending(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "I prefer concise answers.",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            },
+                            {
+                                "external_message_id": "msg_2",
+                                "role": "user",
+                                "content": "Explain FastAPI dependency injection.",
+                                "created_at": "2026-01-01T00:01:00Z",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    counterpart = store.get_session_counterpart(imported.session_id)
+    assert counterpart is not None
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.COUNTERPART.value,
+                    "about": [
+                        {"kind": "counterpart", "id": counterpart.counterpart_id}
+                    ],
+                    "topic": "FastAPI explanation request",
+                    "content": "User wants help with FastAPI dependency injection.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={imported.session_id},
+    ).run_once()
+
+    assert report.emitted == 1
+    assert service.beliefs.list_active() == []
+    pending = service.beliefs.recall(
+        BeliefRecallParams(
+            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
+            counterpart=Reference("counterpart", counterpart.counterpart_id),
+            limit=8,
+        )
+    )
+    assert len(pending) == 1
+    assert pending[0].content == "User wants help with FastAPI dependency injection."
+
+
+@pytest.mark.parametrize(
+    "user_content",
+    [
+        "How do I use FastAPI dependency injection?",
+        "Explain FastAPI dependency injection.",
+    ],
+)
+def test_import_extraction_keeps_single_turn_technical_request_history_pending(
+    tmp_path,
+    user_content: str,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": user_content,
+                                "created_at": "2026-01-01T00:00:00Z",
+                            },
+                            {
+                                "external_message_id": "msg_2",
+                                "role": "assistant",
+                                "content": "FastAPI dependencies can share request state.",
+                                "created_at": "2026-01-01T00:01:00Z",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    counterpart = store.get_session_counterpart(imported.session_id)
+    assert counterpart is not None
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.COUNTERPART.value,
+                    "about": [
+                        {"kind": "counterpart", "id": counterpart.counterpart_id}
+                    ],
+                    "topic": "FastAPI explanation request",
+                    "content": "User asked for an explanation of FastAPI dependency injection.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={imported.session_id},
+    ).run_once()
+
+    assert report.emitted == 1
+    assert service.beliefs.list_active() == []
+    pending = service.beliefs.recall(
+        BeliefRecallParams(
+            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
+            counterpart=Reference("counterpart", counterpart.counterpart_id),
+            limit=8,
+        )
+    )
+    assert len(pending) == 1
+    assert (
+        pending[0].content
+        == "User asked for an explanation of FastAPI dependency injection."
+    )
+
+
+def test_import_extraction_keeps_imported_assistant_answer_global_memory_pending(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "What is FastAPI?",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            },
+                            {
+                                "external_message_id": "msg_2",
+                                "role": "assistant",
+                                "content": "FastAPI is a Python web framework.",
+                                "created_at": "2026-01-01T00:01:00Z",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_1")
+    assert imported is not None
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "topic": "FastAPI framework",
+                    "content": "FastAPI is a Python web framework.",
+                }
+            )
+        )
+    )
+
+    report = MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={imported.session_id},
+    ).run_once()
+
+    assert report.emitted == 1
+    assert service.beliefs.list_active() == []
+    pending = service.beliefs.recall(
+        BeliefRecallParams(
+            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
+            limit=8,
+        )
+    )
+    assert len(pending) == 1
+    assert pending[0].scope == BeliefScope.GLOBAL
 
 
 def test_memory_extraction_worker_import_backlog_honors_latest_compressed_boundary(
@@ -3926,12 +4508,13 @@ def _atomic_belief(
     lifecycle: BeliefLifecycle = BeliefLifecycle.ACTIVE,
     sources: list[Reference] | None = None,
     held_since: str = "2026-01-01T00:00:00+00:00",
+    topic: str | None = None,
 ) -> AtomicBelief:
     return AtomicBelief(
         id=BeliefId(belief_id),
         subject=Reference("subject", "subject:self"),
         about=list(about or []),
-        object=content,
+        topic=topic or _topic_for_content(content),
         content=NLStatement(content),
         memory_kind=memory_kind,
         derivation_stage=derivation_stage,
@@ -4108,7 +4691,26 @@ def _source_progress_status(
 
 
 def _extraction_payload(*drafts: dict[str, object]) -> dict[str, object]:
-    return {"atomic_belief_drafts": list(drafts)}
+    return {"atomic_belief_drafts": [_draft_with_topic(draft) for draft in drafts]}
+
+
+def _draft_with_topic(draft: dict[str, object]) -> dict[str, object]:
+    if "topic" in draft or "content" not in draft:
+        return dict(draft)
+    return {
+        **draft,
+        "topic": _topic_for_content(str(draft["content"])),
+    }
+
+
+def _topic_for_content(content: str) -> str:
+    candidate = content.strip().rstrip(".")
+    if not candidate or candidate == content.strip():
+        candidate = "test memory"
+    candidate = candidate[:64].rstrip()
+    if candidate == content.strip():
+        return "test memory"
+    return candidate
 
 
 def _llm_json(

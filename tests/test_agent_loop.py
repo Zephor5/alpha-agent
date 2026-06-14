@@ -530,7 +530,7 @@ def test_agent_injects_self_memory_summary_before_counterpart_profile_as_separat
             "belief:self-memory:v1",
             "Agent solves root causes before applying local patches.",
             about=[Reference("subject", "subject:self")],
-            object_="self memory",
+            topic="self memory",
             summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
             scope=BeliefScope.SELF,
         )
@@ -545,7 +545,7 @@ def test_agent_injects_self_memory_summary_before_counterpart_profile_as_separat
             "belief:self-memory:v2",
             "Agent updated self memory mid-session.",
             about=[Reference("subject", "subject:self")],
-            object_="self memory",
+            topic="self memory",
             summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
             scope=BeliefScope.SELF,
             held_since="2026-01-01T00:00:01+00:00",
@@ -605,19 +605,19 @@ def test_background_profile_summary_feeds_new_sessions_without_mutating_existing
     )
     counterpart = counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))
     projection.upsert_atomic(
-            _background_memory_belief(
-                "belief:profile-source-python",
-                "User prefers Python examples.",
-                about=[counterpart],
-                object_="profile source python",
-            )
+        _background_memory_belief(
+            "belief:profile-source-python",
+            "User prefers Python examples.",
+            about=[counterpart],
+            topic="profile source python",
+        )
     )
     projection.upsert_atomic(
-            _background_memory_belief(
-                "belief:profile-source-concise",
-                "User likes concise answers.",
-                about=[counterpart],
-                object_="profile source concise",
+        _background_memory_belief(
+            "belief:profile-source-concise",
+            "User likes concise answers.",
+            about=[counterpart],
+            topic="profile source concise",
         )
     )
     answer_provider = _QueuedRecordingProvider(
@@ -632,7 +632,7 @@ def test_background_profile_summary_feeds_new_sessions_without_mutating_existing
             summary_kind=SummaryKind.COUNTERPART_PROFILE,
             scope="counterpart",
             about=[{"kind": "counterpart", "id": str(DEFAULT_COUNTERPART_ID)}],
-            object_="counterpart profile",
+            topic="counterpart profile",
             content="User prefers Python examples and concise answers.",
         )
     )
@@ -693,7 +693,7 @@ def test_stable_context_is_not_backfilled_after_first_runtime_input(tmp_path) ->
             "belief:digest:v1",
             "Stable profile appeared later.",
             about=[counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))],
-            object_="counterpart profile",
+            topic="counterpart profile",
             summary_kind=SummaryKind.COUNTERPART_PROFILE,
             scope=BeliefScope.COUNTERPART,
         )
@@ -730,7 +730,7 @@ def test_answer_prompt_excludes_background_integration_artifacts_by_default(
             "belief:background-extracted",
             "BACKGROUND_EXTRACTION_OUTPUT_SENTINEL",
             about=[counterpart],
-            object_="background extraction output",
+            topic="background extraction output",
             derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
         )
     )
@@ -739,7 +739,7 @@ def test_answer_prompt_excludes_background_integration_artifacts_by_default(
             "belief:background-consolidated",
             "BACKGROUND_CONSOLIDATION_OUTPUT_SENTINEL",
             about=[counterpart],
-            object_="background consolidation output",
+            topic="background consolidation output",
         )
     )
     projection.upsert_summary(
@@ -747,7 +747,7 @@ def test_answer_prompt_excludes_background_integration_artifacts_by_default(
             "belief:domain-guidance",
             "DOMAIN_GUIDANCE_SUMMARY_SENTINEL",
             about=[counterpart],
-            object_="domain guidance",
+            topic="domain guidance",
             summary_kind=SummaryKind.DOMAIN_SUMMARY,
         )
     )
@@ -756,7 +756,7 @@ def test_answer_prompt_excludes_background_integration_artifacts_by_default(
             "belief:self-memory",
             "SELF_MEMORY_SUMMARY_SENTINEL",
             about=[counterpart],
-            object_="self memory",
+            topic="self memory",
             summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
         )
     )
@@ -1269,7 +1269,7 @@ def test_memory_recall_result_enters_follow_up_llm_and_persists(tmp_path) -> Non
         log,
         "belief:python",
         "User prefers Python examples.",
-        object_="python",
+        topic="python",
     )
     provider = _MemoryRecallCallingProvider()
     agent = AlphaAgent(store=store, llm_provider=provider, event_log=log)
@@ -1339,7 +1339,7 @@ def test_feedback_attribution_submits_after_recall_bearing_turn(tmp_path) -> Non
         log,
         "belief:python",
         "User prefers Python examples.",
-        object_="python",
+        topic="python",
     )
     submitted: list[FeedbackAttributionJob] = []
     provider = _MemoryRecallCallingProvider()
@@ -1427,7 +1427,7 @@ def test_feedback_attribution_submitter_failure_is_non_fatal_and_traced(
         log,
         "belief:python",
         "User prefers Python examples.",
-        object_="python",
+        topic="python",
     )
 
     def fail_submit(_job: FeedbackAttributionJob) -> bool:
@@ -1735,7 +1735,7 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
         llm_provider=provider,
         tool_registry=registry,
         llm_context_config=_compression_context(),
-        max_context_tokens=520,
+        max_context_tokens=620,
     )
 
     result = agent.respond("use tool", session_id="s1")
@@ -1837,7 +1837,7 @@ def _seed_active_digest(
             belief_id,
             content,
             about=[counterpart],
-            object_="counterpart profile",
+            topic="counterpart profile",
             summary_kind=SummaryKind.COUNTERPART_PROFILE,
             held_since=held_since,
         )
@@ -1868,7 +1868,7 @@ def _seed_active_belief(
     belief_id: str,
     content: str,
     *,
-    object_: str,
+    topic: str,
     held_since: str = "2026-01-01T00:00:00+00:00",
 ) -> BeliefProjection:
     del log
@@ -1879,7 +1879,7 @@ def _seed_active_belief(
             belief_id,
             content,
             about=[counterpart],
-            object_=object_,
+            topic=topic,
             held_since=held_since,
         )
     )
@@ -1891,14 +1891,14 @@ def _background_memory_belief(
     content: str,
     *,
     about: list[object],
-    object_: str,
+    topic: str,
     derivation_stage: DerivationStage = DerivationStage.BACKGROUND_CONSOLIDATED,
 ) -> AtomicBelief:
     record = belief(
         belief_id,
         content,
         about=about,  # type: ignore[arg-type]
-        object_=object_,
+        topic=topic,
     ).to_record()
     record["derivation_stage"] = derivation_stage.value
     record["authority"] = "background_synthesized"
@@ -1910,10 +1910,28 @@ def _summary_json(
     summary_kind: SummaryKind,
     scope: str,
     about: list[dict[str, str]],
-    object_: str,
+    topic: str,
     content: str,
     structure: dict[str, object] | None = None,
+    target_domain: str | None = None,
 ) -> str:
+    summary_draft: dict[str, object] = {
+        "summary_kind": summary_kind.value,
+        "scope": scope,
+        "about": about,
+        "topic": topic,
+        "content": content,
+    }
+    if summary_kind == SummaryKind.DOMAIN_SUMMARY:
+        domain_structure = dict(structure or {})
+        if target_domain is not None:
+            domain_structure.setdefault("target_domain", target_domain)
+        if "target_domain" not in domain_structure:
+            raise ValueError("domain summary fixtures must include structure.target_domain")
+        summary_draft["structure"] = domain_structure
+    elif structure is not None or target_domain is not None:
+        raise ValueError("non-domain summary fixtures must omit structure")
+
     return json.dumps(
         {
             "operation": "create_summary_belief",
@@ -1921,16 +1939,7 @@ def _summary_json(
             "rationale": "Fixture summary synthesis.",
             "requires_confirmation": False,
             "source_span_note": "from selected summary sources",
-            "payload": {
-                "summary_belief_draft": {
-                    "summary_kind": summary_kind.value,
-                    "scope": scope,
-                    "about": about,
-                    "object": object_,
-                    "content": content,
-                    "structure": structure or {},
-                }
-            },
+            "payload": {"summary_belief_draft": summary_draft},
         },
         sort_keys=True,
     )

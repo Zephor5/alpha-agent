@@ -31,6 +31,7 @@ from alpha_agent.cognition.models import (
     ValidityWindow,
     situation_ref,
 )
+from alpha_agent.cognition.models.belief import validate_belief_topic
 from alpha_agent.cognition.projections.belief import BeliefProjection, BeliefSearchParams
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
 from alpha_agent.runtime.events import deterministic_json
@@ -103,6 +104,7 @@ class MemoryProposalContext:
 @dataclass(frozen=True)
 class _MemoryRecord:
     type: str
+    topic: str
     content: str
     evidence: str
     scope: str
@@ -110,6 +112,7 @@ class _MemoryRecord:
     def to_payload(self) -> dict[str, str]:
         return {
             "type": self.type,
+            "topic": self.topic,
             "content": self.content,
             "evidence": self.evidence,
             "scope": self.scope,
@@ -260,13 +263,23 @@ class MemoryProposeTool:
                                 "items": {"type": "string"},
                                 "maxItems": 5,
                             },
-                            "target_hint": {"type": "string", "maxLength": 300},
+                            "target_hint": {
+                                "type": "string",
+                                "maxLength": 300,
+                                "description": (
+                                    "Optional hint for selecting existing target beliefs; "
+                                    "never use it as the new belief topic."
+                                ),
+                            },
                             "memory": {
                                 "type": "object",
                                 "additionalProperties": False,
                                 "properties": {
                                     "type": {
                                         "type": "string",
+                                        "description": (
+                                            "The long-term memory kind for this assertion."
+                                        ),
                                         "enum": [
                                             "fact",
                                             "preference",
@@ -276,16 +289,46 @@ class MemoryProposeTool:
                                             "relationship",
                                         ],
                                     },
-                                    "content": {"type": "string", "maxLength": 500},
-                                    "evidence": {"type": "string", "maxLength": 500},
+                                    "topic": {
+                                        "type": "string",
+                                        "maxLength": 64,
+                                        "description": (
+                                            "Required short retrieval topic phrase; it must "
+                                            "not duplicate the full content assertion."
+                                        ),
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "maxLength": 500,
+                                        "description": (
+                                            "One natural-language assertion to remember."
+                                        ),
+                                    },
+                                    "evidence": {
+                                        "type": "string",
+                                        "maxLength": 500,
+                                        "description": (
+                                            "Evidence from the current turn that justifies "
+                                            "this memory update."
+                                        ),
+                                    },
                                     "scope": {
                                         "type": "string",
+                                        "description": (
+                                            "Where the memory applies: counterpart or global."
+                                        ),
                                         "enum": ["counterpart", "global"],
                                     },
                                 },
-                                "required": ["type", "content", "evidence", "scope"],
+                                "required": ["type", "topic", "content", "evidence", "scope"],
                             },
-                            "reason": {"type": "string", "maxLength": 500},
+                            "reason": {
+                                "type": "string",
+                                "maxLength": 500,
+                                "description": (
+                                    "Why this long-term memory operation is appropriate now."
+                                ),
+                            },
                         },
                         "required": [
                             "operation",
@@ -458,7 +501,6 @@ def _apply_accepted_update(
         proposed_event_id="",
         operation=plan.operation,
         reason=parsed.reason,
-        target_hint=parsed.target_hint,
         context=context,
         extra_sources=extra_sources,
     )
@@ -509,7 +551,6 @@ def _apply_pending_update(
         proposed_event_id="",
         operation=plan.operation,
         reason=parsed.reason,
-        target_hint=parsed.target_hint,
         context=context,
         extra_sources=extra_sources,
         lifecycle=BeliefLifecycle.PENDING_CONFIRMATION,
@@ -529,7 +570,6 @@ def build_belief_from_memory_update(
     proposed_event_id: str,
     operation: str,
     reason: str,
-    target_hint: str,
     context: MemoryProposalContext,
     extra_sources: list[Reference] | None = None,
     lifecycle: BeliefLifecycle = BeliefLifecycle.ACTIVE,
@@ -544,18 +584,16 @@ def build_belief_from_memory_update(
         id=BeliefId(new_id("belief")),
         subject=Reference("subject", str(context.subject.id)),
         about=about,
-        object=_belief_object(memory=memory, target_hint=target_hint, about=about),
+        topic=memory.topic,
         content=NLStatement(memory.content),
         memory_kind=MemoryKind(memory.type),
         derivation_stage=DerivationStage.TOOL_WRITTEN,
         scope=BeliefScope(memory.scope),
         authority=Authority.USER_ASSERTED,
-        structure=None,
         sources=sources,
         relations=[],
         formed_in=context.situation,
         holder_role=Role(str(context.subject.role or "agent")),
-        action_orientation=[],
         update_policy={
             "conflict": "model_target_required",
             "updates": "operation_driven",
@@ -641,7 +679,8 @@ def _parse_update(raw: object, index: int) -> _ParsedUpdate:
     reviewed_candidate_ids = _id_list(raw.get("reviewed_candidate_ids"))
     target_hint = _string_field(raw.get("target_hint"), max_length=300)
     reason = _string_field(raw.get("reason"), max_length=500)
-    memory, memory_errors = _parse_memory(raw.get("memory"))
+    raw_memory = raw.get("memory")
+    memory, memory_errors = _parse_memory(raw_memory)
     errors = list(memory_errors)
     if operation not in _ALLOWED_OPERATIONS:
         errors.append("invalid_operation")
@@ -655,7 +694,7 @@ def _parse_update(raw: object, index: int) -> _ParsedUpdate:
         raw.get("reviewed_candidate_ids"), list
     ):
         errors.append("invalid_reviewed_candidate_ids")
-    if operation != "retract" and memory is None:
+    if operation != "retract" and memory is None and raw_memory is None:
         errors.append("missing_memory")
     return _ParsedUpdate(
         index=index,
@@ -675,12 +714,21 @@ def _parse_memory(raw: object) -> tuple[_MemoryRecord | None, list[str]]:
     if not isinstance(raw, Mapping):
         return None, ["invalid_memory"]
     memory_type = _string_field(raw.get("type"), max_length=64)
+    raw_topic = raw.get("topic")
     content = _string_field(raw.get("content"), max_length=500)
     evidence = _string_field(raw.get("evidence"), max_length=500)
     scope = _string_field(raw.get("scope"), max_length=64)
     errors: list[str] = []
+    topic = ""
     if memory_type not in _ALLOWED_MEMORY_TYPES:
         errors.append("invalid_memory_type")
+    if not isinstance(raw_topic, str) or not raw_topic.strip():
+        errors.append("missing_memory_topic")
+    else:
+        try:
+            topic = validate_belief_topic(raw_topic, content)
+        except (TypeError, ValueError):
+            errors.append("invalid_memory_topic")
     if not content:
         errors.append("missing_memory_content")
     if not evidence:
@@ -689,7 +737,16 @@ def _parse_memory(raw: object) -> tuple[_MemoryRecord | None, list[str]]:
         errors.append("invalid_scope")
     if errors:
         return None, errors
-    return _MemoryRecord(type=memory_type, content=content, evidence=evidence, scope=scope), []
+    return (
+        _MemoryRecord(
+            type=memory_type,
+            topic=topic,
+            content=content,
+            evidence=evidence,
+            scope=scope,
+        ),
+        [],
+    )
 
 
 def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _OperationPlan:
@@ -1169,7 +1226,14 @@ def _candidate_query(parsed: _ParsedUpdate) -> str:
     if parsed.memory is None:
         return " ".join(item for item in [parsed.target_hint, parsed.reason] if item)
     return " ".join(
-        item for item in [parsed.memory.content, parsed.target_hint, parsed.memory.evidence] if item
+        item
+        for item in [
+            parsed.memory.topic,
+            parsed.memory.content,
+            parsed.target_hint,
+            parsed.memory.evidence,
+        ]
+        if item
     )
 
 
@@ -1256,6 +1320,7 @@ def _change_payload(
         "session_id": context.session_id,
         "tool_call_id": tool_call_id or "",
         "operation": plan.operation,
+        "topic": parsed.memory.topic if parsed.memory is not None else "",
         "target_belief_ids": plan.target_belief_ids,
         "reviewed_candidate_ids": plan.reviewed_candidate_ids,
         "reason": parsed.reason or plan.reason,
@@ -1276,6 +1341,7 @@ def _state_audit(
             "proposal_id": proposal_id,
             "operation": plan.operation,
             "decision": plan.decision,
+            "topic": parsed.memory.topic if parsed.memory is not None else "",
             "target_belief_ids": plan.target_belief_ids,
             "reviewed_candidate_ids": plan.reviewed_candidate_ids,
             "reason": parsed.reason or plan.reason,
@@ -1306,16 +1372,6 @@ def _derived_about(scope: str, context: MemoryProposalContext) -> list[Reference
     if scope == "counterpart" and context.counterpart is not None:
         return [context.counterpart]
     return []
-
-
-def _belief_object(
-    *,
-    memory: _MemoryRecord,
-    target_hint: str,
-    about: list[Reference],
-) -> str:
-    del about
-    return (target_hint or memory.evidence or memory.content).strip()[:240]
 
 
 def _memory_type_for_belief(belief: AtomicBelief) -> str:

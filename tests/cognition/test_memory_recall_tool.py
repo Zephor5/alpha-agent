@@ -64,19 +64,19 @@ def test_memory_recall_queries_counterpart_and_global_atomic_beliefs(tmp_path: P
                 "belief:a-python",
                 "User A prefers Python examples.",
                 about=[counterpart_a()],
-                object_="python",
+                topic="python",
             ),
             belief(
                 "belief:b-python",
                 "User B prefers Python jokes.",
                 about=[counterpart_b()],
-                object_="python",
+                topic="python",
             ),
             belief(
                 "belief:global-python",
                 "Python uses indentation.",
                 about=[],
-                object_="python",
+                topic="python",
                 memory_kind=MemoryKind.FACT,
             ),
         ],
@@ -129,13 +129,13 @@ def test_memory_recall_supports_scope(
                 "belief:a-python",
                 "User A prefers Python examples.",
                 about=[counterpart_a()],
-                object_="python",
+                topic="python",
             ),
             belief(
                 "belief:global-python",
                 "Python uses indentation.",
                 about=[],
-                object_="python",
+                topic="python",
                 memory_kind=MemoryKind.FACT,
             ),
         ],
@@ -157,20 +157,20 @@ def test_memory_recall_filters_memory_kinds_and_bounds_results(tmp_path: Path) -
                 "belief:preference",
                 "User A prefers Python examples.",
                 about=[counterpart_a()],
-                object_="python",
+                topic="python",
             ),
             belief(
                 "belief:fact",
                 "Python uses indentation.",
                 about=[],
-                object_="python",
+                topic="python",
                 memory_kind=MemoryKind.FACT,
             ),
             belief(
                 "belief:value",
                 "Correctness matters more than speed.",
                 about=[],
-                object_="python correctness",
+                topic="python correctness",
                 memory_kind=MemoryKind.VALUE,
             ),
         ],
@@ -206,7 +206,7 @@ def test_memory_recall_filters_memory_kinds_and_bounds_results(tmp_path: Path) -
     assert len(_results(bounded.output)) == 1
 
 
-def test_memory_recall_outputs_constraint_from_memory_kind_not_object_prefix(
+def test_memory_recall_outputs_constraint_from_memory_kind_not_topic_prefix(
     tmp_path: Path,
 ) -> None:
     projection = _projection_with_beliefs(
@@ -216,14 +216,14 @@ def test_memory_recall_outputs_constraint_from_memory_kind_not_object_prefix(
                 "belief:constraint",
                 "Do not write local machine-specific absolute paths into the repo.",
                 about=[],
-                object_="repository path rule",
+                topic="repository path rule",
                 memory_kind=MemoryKind.CONSTRAINT,
             ),
             belief(
                 "belief:procedure",
                 "When editing repository paths, use project-root-relative paths.",
                 about=[],
-                object_="repository path workflow",
+                topic="repository path workflow",
                 memory_kind=MemoryKind.PROCEDURE,
             ),
         ],
@@ -266,7 +266,7 @@ def test_memory_recall_excludes_summary_beliefs_by_default(tmp_path: Path) -> No
             "belief:preference",
             "User A prefers Python examples.",
             about=[counterpart_a()],
-            object_="python",
+            topic="python",
         )
     )
 
@@ -294,13 +294,13 @@ def test_memory_recall_returns_active_belief_handles_only(tmp_path: Path) -> Non
                 "belief:active-python",
                 "User A prefers Python examples.",
                 about=[counterpart_a()],
-                object_="python",
+                topic="python",
             ),
             belief(
                 "belief:retracted-python",
                 "User A used to prefer Python jokes.",
                 about=[counterpart_a()],
-                object_="python",
+                topic="python",
                 lifecycle=BeliefLifecycle.RETRACTED,
             ),
         ],
@@ -324,7 +324,7 @@ def test_memory_recall_counterpart_scope_without_context_returns_empty(
                 "belief:preference",
                 "User A prefers Python examples.",
                 about=[counterpart_a()],
-                object_="python",
+                topic="python",
             ),
         ],
     )
@@ -345,7 +345,7 @@ def test_memory_recall_output_does_not_expose_internal_scoring(tmp_path: Path) -
                 "belief:preference",
                 "User A prefers Python examples.",
                 about=[counterpart_a()],
-                object_="python",
+                topic="python",
             ),
         ],
     )
@@ -369,7 +369,7 @@ def test_memory_recall_scored_candidates_are_explainable_and_ordered(
                 "belief:counterpart-exact",
                 "User A prefers Python examples.",
                 about=[counterpart_a(), Reference(kind="entity", id="python")],
-                object_="python",
+                topic="python",
                 memory_kind=MemoryKind.PREFERENCE,
                 held_since="2026-01-01T00:00:00+00:00",
             ),
@@ -377,7 +377,7 @@ def test_memory_recall_scored_candidates_are_explainable_and_ordered(
                 "belief:global-exact",
                 "Python examples should be concise.",
                 about=[],
-                object_="python",
+                topic="python",
                 memory_kind=MemoryKind.PREFERENCE,
                 held_since="2026-01-01T00:00:01+00:00",
             ),
@@ -406,7 +406,7 @@ def test_memory_recall_scored_candidates_are_explainable_and_ordered(
     ]
     assert set(scored[0].reasons) >= {
         "entity_exact",
-        "object_exact",
+        "topic_exact",
         "term_fts",
         "substring",
         "scope:counterpart",
@@ -421,7 +421,7 @@ def test_memory_recall_exact_match_tier_beats_loose_fts_score() -> None:
         "belief:old-exact-entity",
         "User A prefers Python examples.",
         about=[counterpart_a(), Reference(kind="entity", id="python")],
-        object_="examples",
+        topic="examples",
         memory_kind=MemoryKind.PREFERENCE,
         held_since="2026-01-01T00:00:00+00:00",
     )
@@ -429,7 +429,7 @@ def test_memory_recall_exact_match_tier_beats_loose_fts_score() -> None:
         "belief:new-loose-fts",
         "Python examples should include pytest fixtures.",
         about=[counterpart_a()],
-        object_="examples",
+        topic="examples",
         memory_kind=MemoryKind.PREFERENCE,
         held_since="2026-01-02T00:00:00+00:00",
     )

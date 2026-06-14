@@ -62,6 +62,11 @@ _RETRYABLE_WINDOW_STATUSES = {
     BackgroundProgressStatus.PENDING,
     BackgroundProgressStatus.FAILED,
 }
+_SUMMARY_SYSTEM_MESSAGE = (
+    "You are Alpha Agent's background memory summary worker. "
+    "Synthesize one summary only from the selected source beliefs, selected target, "
+    "schema, and guidance; return only the requested JSON object."
+)
 _SUMMARY_INSTRUCTION = """Synthesize one summary belief from selected consolidated memories.
 
 Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
@@ -71,6 +76,8 @@ multiple summaries. The output must validate against this JSON Schema:
 Do not include belief ids, summary ids, source ids, provenance, idempotency keys,
 confidence, scores, or numeric strength fields. Preserve the selected summary target exactly.
 For domain summaries, structure.target_domain is required and must match the selected target.
+topic is required and must be a short topic phrase, not a sentence and not the
+full assertion in content.
 Use source_time_line as evidence time when present. held_since is Alpha holding time,
 not evidence time. Do not present old source evidence as newly updated evidence.
 
@@ -309,7 +316,10 @@ class MemorySummaryWorker:
             context = _validation_context(window=window, target=target)
             response = traced_llm_complete(
                 llm_provider,
-                [_summary_instruction_message(state_service, target, context=context)],
+                [
+                    _summary_system_message(),
+                    _summary_instruction_message(state_service, target, context=context),
+                ],
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -466,7 +476,7 @@ def _eligible_consolidated_beliefs(
 def _target_keys_for_belief(
     belief: AtomicBelief,
 ) -> list[tuple[str, str, tuple[tuple[str, str], ...], str]]:
-    about_key = _about_key(belief.about)
+    about_key = _scope_owner_about_key(belief.scope, belief.about)
     keys: list[tuple[str, str, tuple[tuple[str, str], ...], str]] = []
     if belief.scope == BeliefScope.COUNTERPART:
         keys.append(
@@ -500,19 +510,17 @@ def _target_keys_for_belief(
 
 def _target_domains_for_belief(belief: AtomicBelief) -> tuple[str, ...]:
     values: list[str] = []
-    for container in (belief.structure, belief.update_policy):
-        if not isinstance(container, dict):
-            continue
-        raw = container.get("target_domain")
-        if isinstance(raw, str) and raw.strip():
-            values.append(raw.strip())
-        raw_many = container.get("target_domains")
-        if isinstance(raw_many, list | tuple):
-            values.extend(
-                item.strip()
-                for item in raw_many
-                if isinstance(item, str) and item.strip()
-            )
+    update_policy = belief.update_policy if isinstance(belief.update_policy, dict) else {}
+    raw = update_policy.get("target_domain")
+    if isinstance(raw, str) and raw.strip():
+        values.append(raw.strip())
+    raw_many = update_policy.get("target_domains")
+    if isinstance(raw_many, list | tuple):
+        values.extend(
+            item.strip()
+            for item in raw_many
+            if isinstance(item, str) and item.strip()
+        )
     return tuple(sorted(set(values)))
 
 
@@ -651,6 +659,10 @@ def _summary_instruction_message(
             ),
         ),
     }
+
+
+def _summary_system_message() -> ChatMessage:
+    return {"role": "system", "content": _SUMMARY_SYSTEM_MESSAGE}
 
 
 def _summary_output_schema_json(context: BackgroundLLMValidationContext) -> str:
@@ -796,9 +808,8 @@ def _belief_prompt_record(store: StateStore, belief: AtomicBelief) -> dict[str, 
         "memory_kind": belief.memory_kind.value,
         "scope": belief.scope.value,
         "about": [ref.to_record() for ref in belief.about],
-        "object": belief.object,
+        "topic": belief.topic,
         "content": str(belief.content),
-        "structure": belief.structure or {},
         "authority": belief.authority.value,
         "derivation_stage": belief.derivation_stage.value,
         "held_since": str(belief.held_since),
@@ -811,6 +822,23 @@ def _belief_prompt_record(store: StateStore, belief: AtomicBelief) -> dict[str, 
 
 def _about_key(about: Sequence[Reference]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((ref.kind, ref.id) for ref in about))
+
+
+def _scope_owner_about_key(
+    scope: BeliefScope,
+    about: Sequence[Reference],
+) -> tuple[tuple[str, str], ...]:
+    owner_kinds = {
+        BeliefScope.COUNTERPART: frozenset({"counterpart"}),
+        BeliefScope.SELF: frozenset({"subject", "self"}),
+        BeliefScope.PROJECT: frozenset({"project"}),
+        BeliefScope.SESSION: frozenset({"session"}),
+    }.get(scope)
+    if owner_kinds is None:
+        return ()
+    return tuple(
+        sorted((ref.kind, ref.id) for ref in about if ref.kind in owner_kinds)
+    )
 
 
 def _is_expired_belief(belief: AtomicBelief) -> bool:

@@ -74,7 +74,7 @@ def test_recalled_wrong_preference_is_corrected_through_feedback_loop(
         _preference_belief(
             wrong_belief_id,
             "User prefers Python examples.",
-            object_="example language preference",
+            topic="example language preference",
         ),
         source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
     )
@@ -266,7 +266,7 @@ def test_recalled_wrong_preference_is_corrected_through_feedback_loop(
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.COUNTERPART.value,
                     "about": [_counterpart_record()],
-                    "object": "example language preference",
+                    "topic": "example language preference",
                     "content": "User prefers TypeScript examples.",
                 },
             },
@@ -449,14 +449,14 @@ def _preference_belief(
     belief_id: str,
     content: str,
     *,
-    object_: str,
+    topic: str,
 ) -> AtomicBelief:
     counterpart = counterpart_ref(CounterpartId(str(DEFAULT_COUNTERPART_ID)))
     return AtomicBelief(
         id=BeliefId(belief_id),
         subject=subject_ref(SUBJECT_SELF),
         about=[counterpart],
-        object=object_,
+        topic=topic,
         content=NLStatement(content),
         memory_kind=MemoryKind.PREFERENCE,
         derivation_stage=DerivationStage.TOOL_WRITTEN,

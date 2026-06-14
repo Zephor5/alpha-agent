@@ -22,6 +22,7 @@ from alpha_agent.cognition.models import (
     SummaryKind,
     ValidityWindow,
 )
+from alpha_agent.cognition.models.belief import validate_belief_topic
 from alpha_agent.cognition.processing_ledger import BackgroundSourceRef, BackgroundStage
 
 _SUPPORTED_OPERATIONS = frozenset(
@@ -110,6 +111,35 @@ _SCOPE_REFERENCE_KINDS: dict[BeliefScope, frozenset[str]] = {
     BeliefScope.PROJECT: frozenset({"project"}),
     BeliefScope.SESSION: frozenset({"session"}),
 }
+_TOPIC_SCHEMA = {"type": "string", "minLength": 1, "maxLength": 64}
+_ATOMIC_DRAFT_KEYS = frozenset(
+    {
+        "memory_kind",
+        "scope",
+        "about",
+        "topic",
+        "content",
+        "validity",
+        "update_policy",
+        "project_descriptor",
+    }
+)
+_SUMMARY_DRAFT_KEYS = frozenset(
+    {
+        "summary_kind",
+        "scope",
+        "about",
+        "topic",
+        "content",
+        "structure",
+        "validity",
+        "update_policy",
+        "project_descriptor",
+    }
+)
+_SUMMARY_SCHEDULING_UPDATE_POLICY_KEYS = frozenset(
+    {"target_domain", "target_domains"}
+)
 def extraction_output_json_schema() -> dict[str, Any]:
     """Return the LLM-facing JSON schema for extraction-stage outputs."""
 
@@ -180,8 +210,12 @@ def summary_output_json_schema(
 ) -> dict[str, Any]:
     """Return the LLM-facing JSON schema for one selected summary target."""
 
-    required = ["summary_kind", "scope", "about", "content"]
-    structure_schema = _summary_structure_schema(target_domain)
+    required = ["summary_kind", "scope", "about", "topic", "content"]
+    structure_schema = (
+        _summary_structure_schema(target_domain)
+        if target_domain is not None
+        else None
+    )
     if target_domain is not None:
         required.append("structure")
     summary_draft = _summary_belief_draft_schema(
@@ -294,14 +328,13 @@ def _atomic_belief_draft_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["memory_kind", "scope", "about", "content"],
+        "required": ["memory_kind", "scope", "about", "topic", "content"],
         "properties": {
             "memory_kind": {"enum": [item.value for item in MemoryKind]},
             "scope": {"enum": [item.value for item in BeliefScope]},
             "about": _reference_array_schema(),
-            "object": {"type": "string", "minLength": 1},
+            "topic": _TOPIC_SCHEMA,
             "content": {"type": "string", "minLength": 1},
-            "structure": {"type": "object"},
             "validity": {"type": "object"},
             "update_policy": {"type": "object"},
             "project_descriptor": {
@@ -319,29 +352,31 @@ def _summary_belief_draft_schema(
     summary_kind: SummaryKind,
     scope: BeliefScope,
     about_refs: Iterable[tuple[str, str]],
-    structure_schema: dict[str, Any],
+    structure_schema: dict[str, Any] | None,
     required: list[str],
 ) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "summary_kind": {"const": summary_kind.value},
+        "scope": {"const": scope.value},
+        "about": _reference_array_schema(const_refs=about_refs),
+        "topic": _TOPIC_SCHEMA,
+        "content": {"type": "string", "minLength": 1},
+        "validity": {"type": "object"},
+        "update_policy": {"type": "object"},
+        "project_descriptor": {
+            "oneOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "object"},
+            ],
+        },
+    }
+    if structure_schema is not None:
+        properties["structure"] = structure_schema
     return {
         "type": "object",
         "additionalProperties": False,
         "required": required,
-        "properties": {
-            "summary_kind": {"const": summary_kind.value},
-            "scope": {"const": scope.value},
-            "about": _reference_array_schema(const_refs=about_refs),
-            "object": {"type": "string", "minLength": 1},
-            "content": {"type": "string", "minLength": 1},
-            "structure": structure_schema,
-            "validity": {"type": "object"},
-            "update_policy": {"type": "object"},
-            "project_descriptor": {
-                "oneOf": [
-                    {"type": "string", "minLength": 1},
-                    {"type": "object"},
-                ],
-            },
-        },
+        "properties": properties,
     }
 
 
@@ -459,6 +494,7 @@ class BackgroundLLMValidationContext:
     required_summary_scope: BeliefScope | None = None
     required_summary_about_refs: frozenset[tuple[str, str]] | None = None
     required_summary_target_domain: str | None = None
+    allow_summary_scheduling_hints: bool = False
     derivation_stage: DerivationStage = DerivationStage.BACKGROUND_EXTRACTED
 
 
@@ -477,9 +513,8 @@ class ValidatedAtomicBeliefDraft:
     memory_kind: MemoryKind
     scope: BeliefScope
     about: tuple[Reference, ...]
+    topic: str
     content: str
-    object: str
-    structure: dict[str, Any] | None = None
     validity: ValidityWindow | None = None
     update_policy: dict[str, Any] = field(default_factory=dict)
     project_descriptor: str | Mapping[str, Any] | None = None
@@ -492,8 +527,8 @@ class ValidatedSummaryBeliefDraft:
     summary_kind: SummaryKind
     scope: BeliefScope
     about: tuple[Reference, ...]
+    topic: str
     content: str
-    object: str
     structure: dict[str, Any] | None = None
     validity: ValidityWindow | None = None
     update_policy: dict[str, Any] = field(default_factory=dict)
@@ -811,6 +846,7 @@ def _validate_atomic_draft(
     if not isinstance(raw, Mapping):
         raise BackgroundLLMValidationError("atomic_belief_draft must be an object")
     _reject_generated_draft_ids(raw, label="atomic_belief_draft")
+    _validate_allowed_keys(raw, _ATOMIC_DRAFT_KEYS, "atomic_belief_draft")
     try:
         memory_kind = MemoryKind(_required_str(raw, "memory_kind"))
     except ValueError as exc:
@@ -819,15 +855,15 @@ def _validate_atomic_draft(
         ) from exc
     scope, about, project_descriptor = _validate_scope_about(raw, context)
     content = _required_str(raw, "content")
+    topic = _required_topic(raw, content)
     return ValidatedAtomicBeliefDraft(
         memory_kind=memory_kind,
         scope=scope,
         about=about,
+        topic=topic,
         content=content,
-        object=_optional_str(raw.get("object")) or content,
-        structure=_optional_dict(raw.get("structure")),
         validity=_validity(raw.get("validity")),
-        update_policy=_optional_dict(raw.get("update_policy")) or {},
+        update_policy=_update_policy(raw.get("update_policy"), context),
         project_descriptor=project_descriptor,
     )
 
@@ -848,6 +884,7 @@ def _validate_summary_draft(
     if not isinstance(raw, Mapping):
         raise BackgroundLLMValidationError("summary_belief_draft must be an object")
     _reject_generated_draft_ids(raw, label="summary_belief_draft")
+    _validate_allowed_keys(raw, _SUMMARY_DRAFT_KEYS, "summary_belief_draft")
     try:
         summary_kind = SummaryKind(_required_str(raw, "summary_kind"))
     except ValueError as exc:
@@ -875,7 +912,15 @@ def _validate_summary_draft(
                 "summary about refs do not match selected summary target"
             )
     content = _required_str(raw, "content")
-    structure = _optional_dict(raw.get("structure"))
+    topic = _required_topic(raw, content)
+    if context.required_summary_target_domain is None:
+        if "structure" in raw:
+            raise BackgroundLLMValidationError(
+                "summary structure is only allowed for selected domain summary targets"
+            )
+        structure = None
+    else:
+        structure = _optional_dict(raw.get("structure"))
     if context.required_summary_target_domain is not None:
         target_domain = (structure or {}).get("target_domain")
         if target_domain != context.required_summary_target_domain:
@@ -886,11 +931,11 @@ def _validate_summary_draft(
         summary_kind=summary_kind,
         scope=scope,
         about=about,
+        topic=topic,
         content=content,
-        object=_optional_str(raw.get("object")) or content,
         structure=structure,
         validity=_validity(raw.get("validity")),
-        update_policy=_optional_dict(raw.get("update_policy")) or {},
+        update_policy=_update_policy(raw.get("update_policy"), context),
         project_descriptor=project_descriptor,
     )
 
@@ -1097,11 +1142,46 @@ def _validate_exact_keys(
     )
 
 
+def _validate_allowed_keys(
+    raw: Mapping[str, Any],
+    allowed: frozenset[str],
+    label: str,
+) -> None:
+    unexpected = sorted({str(key) for key in raw} - allowed)
+    if unexpected:
+        raise BackgroundLLMValidationError(
+            f"{label} contains unknown keys: {', '.join(unexpected)}"
+        )
+
+
 def _required_str(raw: Mapping[str, Any], key: str) -> str:
     value = raw.get(key)
     if not isinstance(value, str) or not value.strip():
         raise BackgroundLLMValidationError(f"{key} is required")
     return value.strip()
+
+
+def _required_topic(raw: Mapping[str, Any], content: str) -> str:
+    try:
+        return validate_belief_topic(_required_str(raw, "topic"), content)
+    except (TypeError, ValueError) as exc:
+        raise BackgroundLLMValidationError(str(exc)) from exc
+
+
+def _update_policy(
+    value: object,
+    context: BackgroundLLMValidationContext,
+) -> dict[str, Any]:
+    update_policy = _optional_dict(value) or {}
+    if context.allow_summary_scheduling_hints:
+        return update_policy
+    forbidden = sorted(_SUMMARY_SCHEDULING_UPDATE_POLICY_KEYS.intersection(update_policy))
+    if forbidden:
+        raise BackgroundLLMValidationError(
+            "update_policy summary scheduling targets are program-owned and cannot be "
+            f"generated by ordinary background LLM outputs: {', '.join(forbidden)}"
+        )
+    return update_policy
 
 
 def _optional_str(value: object) -> str | None:

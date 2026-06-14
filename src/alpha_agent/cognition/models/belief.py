@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any, Self
 
 from alpha_agent.cognition.models._ids import (
-    ActionHint,
     BeliefId,
     BeliefRef,
     DerivationTrace,
@@ -34,6 +33,7 @@ from alpha_agent.cognition.models.enums import (
     SummaryKind,
 )
 
+_MAX_TOPIC_CHARS = 64
 _SCOPE_REFERENCE_KINDS: dict[BeliefScope, frozenset[str]] = {
     BeliefScope.COUNTERPART: frozenset({"counterpart"}),
     BeliefScope.SELF: frozenset({"subject", "self"}),
@@ -85,14 +85,13 @@ class AtomicBelief:
     id: BeliefId
     subject: SubjectRef
     about: list[Reference]
-    object: str
+    topic: str
     content: NLStatement
     memory_kind: MemoryKind
     derivation_stage: DerivationStage
     scope: BeliefScope
     authority: Authority
     lifecycle: BeliefLifecycle = BeliefLifecycle.ACTIVE
-    structure: dict[str, Any] | None = None
     sources: list[EvidenceRef] = field(default_factory=list)
     validity: ValidityWindow = field(default_factory=ValidityWindow)
     relations: list[BeliefRelationRecord] = field(default_factory=list)
@@ -101,7 +100,6 @@ class AtomicBelief:
         default_factory=lambda: situation_ref(SituationId("situation:unknown"))
     )
     holder_role: Role = Role("agent")
-    action_orientation: list[ActionHint] = field(default_factory=list)
     held_since: Instant = Instant("")
     derivation: DerivationTrace | None = None
     feedback_history: list[FeedbackEntry] = field(default_factory=list)
@@ -118,6 +116,11 @@ class AtomicBelief:
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Self:
+        _reject_legacy_record_fields(
+            record,
+            {"object", "structure", "action_orientation"},
+            "atomic belief",
+        )
         if record.get("summary_kind") is not None:
             raise ValueError("atomic belief cannot include summary_kind")
         if "memory_kind" not in record or record.get("memory_kind") is None:
@@ -132,7 +135,7 @@ class SummaryBelief:
     id: BeliefId
     subject: SubjectRef
     about: list[Reference]
-    object: str
+    topic: str
     content: NLStatement
     summary_kind: SummaryKind
     derivation_stage: DerivationStage
@@ -149,7 +152,6 @@ class SummaryBelief:
         default_factory=lambda: situation_ref(SituationId("situation:unknown"))
     )
     holder_role: Role = Role("agent")
-    action_orientation: list[ActionHint] = field(default_factory=list)
     held_since: Instant = Instant("")
     derivation: DerivationTrace | None = None
     feedback_history: list[FeedbackEntry] = field(default_factory=list)
@@ -166,6 +168,11 @@ class SummaryBelief:
 
     @classmethod
     def from_record(cls, record: dict[str, Any]) -> Self:
+        _reject_legacy_record_fields(
+            record,
+            {"object", "action_orientation"},
+            "summary belief",
+        )
         if record.get("memory_kind") is not None:
             raise ValueError("summary belief cannot include memory_kind")
         if "summary_kind" not in record or record.get("summary_kind") is None:
@@ -183,6 +190,11 @@ def _validate_common(belief: AtomicBelief | SummaryBelief) -> None:
     object.__setattr__(belief, "authority", Authority(belief.authority))
     object.__setattr__(belief, "lifecycle", BeliefLifecycle(belief.lifecycle))
     _validate_reference(belief.subject, "belief subject")
+    object.__setattr__(
+        belief,
+        "topic",
+        validate_belief_topic(belief.topic, belief.content),
+    )
     if not isinstance(belief.validity, ValidityWindow):
         raise TypeError("belief validity must be a ValidityWindow")
     _validate_scope_about(belief.scope, belief.about)
@@ -192,6 +204,31 @@ def _validate_common(belief: AtomicBelief | SummaryBelief) -> None:
         if not isinstance(relation, BeliefRelationRecord):
             raise TypeError("belief relation entries must be BeliefRelationRecord")
         _validate_reference(relation.target, "belief relation target")
+
+
+def validate_belief_topic(topic: object, content: object) -> str:
+    """Normalize and validate the shared belief topic contract."""
+
+    if not isinstance(topic, str):
+        raise TypeError("belief topic must be a string")
+    normalized = topic.strip()
+    if not normalized:
+        raise ValueError("belief topic is required")
+    if len(normalized) > _MAX_TOPIC_CHARS:
+        raise ValueError(f"belief topic must be at most {_MAX_TOPIC_CHARS} characters")
+    if normalized == str(content).strip():
+        raise ValueError("belief topic must not equal content")
+    return normalized
+
+
+def _reject_legacy_record_fields(
+    record: dict[str, Any],
+    legacy_fields: set[str],
+    label: str,
+) -> None:
+    present = sorted(legacy_fields.intersection(record))
+    if present:
+        raise ValueError(f"{label} record contains legacy fields: {', '.join(present)}")
 
 
 def _validate_scope_about(scope: BeliefScope, about: list[Reference]) -> None:

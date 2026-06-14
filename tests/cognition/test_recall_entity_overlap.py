@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from alpha_agent.cognition.models import MemoryKind, entity_ref
+from alpha_agent.cognition.models import MemoryKind, Reference, entity_ref
 from alpha_agent.cognition.projections.belief import (
     BeliefProjection,
     BeliefRecallParams,
@@ -24,13 +24,23 @@ def _projection(tmp_path) -> BeliefProjection:
 def test_recall_with_focus_entities_requires_entity_overlap(tmp_path) -> None:
     projection = _projection(tmp_path)
     for item in [
-        belief("belief:python", "User A prefers Python.", about=[counterpart_a()]),
-        belief("belief:rust", "User A prefers Rust.", about=[counterpart_a()], object_="rust"),
+        belief(
+            "belief:python",
+            "User A prefers Python.",
+            about=[counterpart_a(), python_entity()],
+        ),
+        belief(
+            "belief:content-topic-only-python",
+            "User A mentions Python without an explicit entity reference.",
+            about=[counterpart_a()],
+            topic="python",
+        ),
+        belief("belief:rust", "User A prefers Rust.", about=[counterpart_a()], topic="rust"),
         belief(
             "belief:global-python",
             "Python uses indentation.",
-            about=[],
-            object_="python",
+            about=[python_entity()],
+            topic="python",
             memory_kind=MemoryKind.FACT,
         ),
     ]:
@@ -50,7 +60,7 @@ def test_recall_candidates_requires_actual_match_signal_not_scope_only(tmp_path)
     projection = _projection(tmp_path)
     for item in [
         belief("belief:python", "User A prefers Python.", about=[counterpart_a()]),
-        belief("belief:rust", "User A prefers Rust.", about=[counterpart_a()], object_="rust"),
+        belief("belief:rust", "User A prefers Rust.", about=[counterpart_a()], topic="rust"),
     ]:
         projection.upsert_atomic(item)
 
@@ -74,19 +84,19 @@ def test_recall_candidates_retrieves_natural_language_query_through_terms_fts(
             "belief:examples",
             "User prefers Python examples.",
             about=[counterpart_a()],
-            object_="Python examples",
+            topic="Python examples",
         ),
         belief(
             "belief:other-user",
             "User prefers Python examples.",
             about=[counterpart_b()],
-            object_="Python examples",
+            topic="Python examples",
         ),
         belief(
             "belief:factual",
             "Python examples use indentation.",
             about=[counterpart_a()],
-            object_="Python examples",
+            topic="Python examples",
             memory_kind=MemoryKind.FACT,
         ),
     ]:
@@ -106,20 +116,20 @@ def test_recall_candidates_retrieves_natural_language_query_through_terms_fts(
     assert candidates[0].term_rank is not None
 
 
-def test_recall_candidates_entity_exact_uses_query_and_keyword_probes(tmp_path) -> None:
+def test_recall_candidates_entity_exact_only_uses_explicit_entities(tmp_path) -> None:
     projection = _projection(tmp_path)
     for item in [
         belief(
             "belief:python",
             "User A prefers Python.",
             about=[counterpart_a(), entity_ref("python")],
-            object_="language preference",
+            topic="language preference",
         ),
         belief(
             "belief:openai",
             "User A uses OpenAI API.",
             about=[counterpart_a(), entity_ref("OpenAI API")],
-            object_="api preference",
+            topic="api preference",
             memory_kind=MemoryKind.FACT,
         ),
     ]:
@@ -140,6 +150,14 @@ def test_recall_candidates_entity_exact_uses_query_and_keyword_probes(tmp_path) 
             include_global=False,
         )
     )
+    entity_candidates = projection.recall_candidates(
+        BeliefSearchParams(
+            query="unmatched",
+            entities=("OpenAI API",),
+            counterpart=counterpart_a(),
+            include_global=False,
+        )
+    )
 
     query_match = next(
         candidate for candidate in query_candidates if candidate.belief.id == "belief:python"
@@ -147,11 +165,15 @@ def test_recall_candidates_entity_exact_uses_query_and_keyword_probes(tmp_path) 
     keyword_match = next(
         candidate for candidate in keyword_candidates if candidate.belief.id == "belief:openai"
     )
-    assert "entity_exact" in query_match.reasons
-    assert "entity_exact" in keyword_match.reasons
+    entity_match = next(
+        candidate for candidate in entity_candidates if candidate.belief.id == "belief:openai"
+    )
+    assert "entity_exact" not in query_match.reasons
+    assert "entity_exact" not in keyword_match.reasons
+    assert "entity_exact" in entity_match.reasons
 
 
-def test_recall_candidates_merges_entity_object_fts_and_substring_reasons(
+def test_recall_candidates_merges_entity_topic_fts_and_substring_reasons(
     tmp_path,
 ) -> None:
     projection = _projection(tmp_path)
@@ -161,7 +183,7 @@ def test_recall_candidates_merges_entity_object_fts_and_substring_reasons(
             "User uses OpenAI API v3.0.1 at src/alpha_agent/runtime/agent.py "
             "for C++ examples.",
             about=[counterpart_a(), entity_ref("OpenAI API")],
-            object_="OpenAI API client",
+            topic="OpenAI API client",
         )
     )
     projection.upsert_atomic(
@@ -169,7 +191,7 @@ def test_recall_candidates_merges_entity_object_fts_and_substring_reasons(
             "belief:global-tech",
             "OpenAI API v3.0.1 has a migration guide.",
             about=[],
-            object_="OpenAI API",
+            topic="OpenAI API",
             memory_kind=MemoryKind.FACT,
         )
     )
@@ -187,10 +209,37 @@ def test_recall_candidates_merges_entity_object_fts_and_substring_reasons(
     assert [candidate.belief.id for candidate in candidates] == ["belief:tech"]
     assert set(candidates[0].reasons) >= {
         "entity_exact",
-        "object_partial",
+        "topic_partial",
         "term_fts",
         "trigram_fts",
         "substring",
     }
     assert candidates[0].term_rank is not None
     assert candidates[0].trigram_rank is not None
+
+
+def test_projection_entity_index_ignores_topic_content_and_non_entity_about_refs(tmp_path) -> None:
+    projection = _projection(tmp_path)
+    projection.upsert_atomic(
+        belief(
+            "belief:non-entity-python",
+            "Python appears in content and topic.",
+            about=[Reference("project", "python")],
+            topic="python",
+        )
+    )
+
+    with projection.store.connect() as conn:
+        rows = conn.execute(
+            "SELECT entity_id FROM belief_entity_index WHERE belief_id = ?",
+            ("belief:non-entity-python",),
+        ).fetchall()
+
+    candidates = projection.recall_candidates(
+        BeliefSearchParams(query="python", entities=("python",), include_global=True)
+    )
+
+    assert rows == []
+    [candidate] = candidates
+    assert candidate.belief.id == "belief:non-entity-python"
+    assert "entity_exact" not in candidate.reasons

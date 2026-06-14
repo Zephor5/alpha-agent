@@ -34,7 +34,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS atomic_beliefs (
     id TEXT PRIMARY KEY,
     record TEXT NOT NULL DEFAULT '{}',
-    object TEXT NOT NULL,
+    topic TEXT NOT NULL,
     content TEXT NOT NULL,
     normalized_content TEXT NOT NULL,
     memory_kind TEXT NOT NULL,
@@ -42,14 +42,12 @@ CREATE TABLE IF NOT EXISTS atomic_beliefs (
     scope TEXT NOT NULL,
     authority TEXT NOT NULL,
     lifecycle TEXT NOT NULL DEFAULT 'active',
-    structure TEXT NOT NULL DEFAULT '{}',
     sources TEXT NOT NULL DEFAULT '[]',
     validity TEXT NOT NULL DEFAULT '{}',
     relations TEXT NOT NULL DEFAULT '[]',
     update_policy TEXT NOT NULL DEFAULT '{}',
     formed_in_situation TEXT,
     holder_role TEXT,
-    action_orientation TEXT NOT NULL DEFAULT '[]',
     held_since TEXT NOT NULL,
     held_until TEXT,
     supersedes TEXT,
@@ -67,7 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_atomic_beliefs_scope
 CREATE TABLE IF NOT EXISTS summary_beliefs (
     id TEXT PRIMARY KEY,
     record TEXT NOT NULL DEFAULT '{}',
-    object TEXT NOT NULL,
+    topic TEXT NOT NULL,
     content TEXT NOT NULL,
     normalized_content TEXT NOT NULL,
     summary_kind TEXT NOT NULL,
@@ -83,7 +81,6 @@ CREATE TABLE IF NOT EXISTS summary_beliefs (
     source_belief_ids TEXT NOT NULL DEFAULT '[]',
     formed_in_situation TEXT,
     holder_role TEXT,
-    action_orientation TEXT NOT NULL DEFAULT '[]',
     held_since TEXT NOT NULL,
     held_until TEXT,
     supersedes TEXT,
@@ -124,7 +121,7 @@ USING fts5(
     belief_table UNINDEXED,
     belief_id UNINDEXED,
     search_terms,
-    object,
+    topic,
     about,
     tokenize = "unicode61 remove_diacritics 1 tokenchars '_-#./:+'"
 );
@@ -134,7 +131,7 @@ USING fts5(
     belief_table UNINDEXED,
     belief_id UNINDEXED,
     content,
-    object,
+    topic,
     normalized_content,
     tokenize = "trigram"
 );
@@ -142,8 +139,8 @@ USING fts5(
 
 _CANDIDATE_REASON_ORDER = {
     "entity_exact": 0,
-    "object_exact": 1,
-    "object_partial": 2,
+    "topic_exact": 1,
+    "topic_partial": 2,
     "term_fts": 3,
     "trigram_fts": 4,
     "substring": 5,
@@ -375,25 +372,18 @@ class BeliefProjection(Projection):
                 entity_ids = self._entity_ids(params.entities)
                 if entity_ids:
                     placeholders = ",".join("?" for _ in entity_ids)
-                    like_clause = " OR ".join(
-                        f"{spec.table_name}.normalized_content LIKE ?" for _ in entity_ids
-                    )
                     conditions.append(
                         f"""
-                        (
-                            {spec.table_name}.id IN (
-                                SELECT belief_id
-                                FROM belief_entity_index
-                                WHERE belief_table = ?
-                                  AND entity_id IN ({placeholders})
-                            )
-                            OR {like_clause}
+                        {spec.table_name}.id IN (
+                            SELECT belief_id
+                            FROM belief_entity_index
+                            WHERE belief_table = ?
+                              AND entity_id IN ({placeholders})
                         )
                         """
                     )
                     sql_params.append(spec.table_key)
                     sql_params.extend(entity_ids)
-                    sql_params.extend(f"%{entity_id}%" for entity_id in entity_ids)
                 rows = conn.execute(
                     f"""
                     SELECT *
@@ -421,7 +411,7 @@ class BeliefProjection(Projection):
         with self.store.connect() as conn:
             for spec in specs:
                 self._collect_entity_exact_candidates(conn, spec, params, candidates, source_limit)
-                self._collect_object_candidates(conn, spec, params, candidates, source_limit)
+                self._collect_topic_candidates(conn, spec, params, candidates, source_limit)
                 self._collect_term_fts_candidates(conn, spec, params, candidates, source_limit)
                 self._collect_trigram_fts_candidates(conn, spec, params, candidates, source_limit)
                 self._collect_substring_candidates(conn, spec, params, candidates, source_limit)
@@ -755,15 +745,14 @@ class BeliefProjection(Projection):
         conn.execute(
             """
             INSERT INTO atomic_beliefs
-                (id, record, object, content, normalized_content, memory_kind,
-                 derivation_stage, scope, authority, lifecycle, structure, sources,
-                 validity, relations, update_policy, formed_in_situation, holder_role,
-                 action_orientation, held_since, held_until, supersedes, superseded_by,
-                 updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, record, topic, content, normalized_content, memory_kind,
+                 derivation_stage, scope, authority, lifecycle, sources, validity,
+                 relations, update_policy, formed_in_situation, holder_role, held_since,
+                 held_until, supersedes, superseded_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 record = excluded.record,
-                object = excluded.object,
+                topic = excluded.topic,
                 content = excluded.content,
                 normalized_content = excluded.normalized_content,
                 memory_kind = excluded.memory_kind,
@@ -771,14 +760,12 @@ class BeliefProjection(Projection):
                 scope = excluded.scope,
                 authority = excluded.authority,
                 lifecycle = excluded.lifecycle,
-                structure = excluded.structure,
                 sources = excluded.sources,
                 validity = excluded.validity,
                 relations = excluded.relations,
                 update_policy = excluded.update_policy,
                 formed_in_situation = excluded.formed_in_situation,
                 holder_role = excluded.holder_role,
-                action_orientation = excluded.action_orientation,
                 held_since = excluded.held_since,
                 held_until = excluded.held_until,
                 supersedes = excluded.supersedes,
@@ -797,15 +784,15 @@ class BeliefProjection(Projection):
         conn.execute(
             """
             INSERT INTO summary_beliefs
-                (id, record, object, content, normalized_content, summary_kind,
+                (id, record, topic, content, normalized_content, summary_kind,
                  derivation_stage, scope, authority, lifecycle, structure, sources,
                  validity, relations, update_policy, source_belief_ids,
-                 formed_in_situation, holder_role, action_orientation, held_since,
-                 held_until, supersedes, superseded_by, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 formed_in_situation, holder_role, held_since, held_until, supersedes,
+                 superseded_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 record = excluded.record,
-                object = excluded.object,
+                topic = excluded.topic,
                 content = excluded.content,
                 normalized_content = excluded.normalized_content,
                 summary_kind = excluded.summary_kind,
@@ -821,7 +808,6 @@ class BeliefProjection(Projection):
                 source_belief_ids = excluded.source_belief_ids,
                 formed_in_situation = excluded.formed_in_situation,
                 holder_role = excluded.holder_role,
-                action_orientation = excluded.action_orientation,
                 held_since = excluded.held_since,
                 held_until = excluded.held_until,
                 supersedes = excluded.supersedes,
@@ -840,10 +826,10 @@ class BeliefProjection(Projection):
     ) -> tuple[Any, ...]:
         held_since = str(belief.held_since)
         updated_at = held_since or str(belief.validity.observed_at or "")
-        common = (
+        base = (
             str(belief.id),
             _dumps(belief.to_record()),
-            belief.object,
+            belief.topic,
             str(belief.content),
             _normalize_text(belief.content),
             kind_value,
@@ -851,22 +837,34 @@ class BeliefProjection(Projection):
             belief.scope.value,
             belief.authority.value,
             belief.lifecycle.value,
-            _dumps(belief.structure),
-            _dumps([source.to_record() for source in belief.sources]),
-            _dumps(belief.validity.to_record()),
-            _dumps([relation.to_record() for relation in belief.relations]),
-            _dumps(belief.update_policy),
-            *extra_values,
+        )
+        if isinstance(belief, AtomicBelief):
+            state_values = (
+                _dumps([source.to_record() for source in belief.sources]),
+                _dumps(belief.validity.to_record()),
+                _dumps([relation.to_record() for relation in belief.relations]),
+                _dumps(belief.update_policy),
+                *extra_values,
+            )
+        else:
+            state_values = (
+                _dumps(belief.structure),
+                _dumps([source.to_record() for source in belief.sources]),
+                _dumps(belief.validity.to_record()),
+                _dumps([relation.to_record() for relation in belief.relations]),
+                _dumps(belief.update_policy),
+                *extra_values,
+            )
+        tail = (
             belief.formed_in.id,
             str(belief.holder_role),
-            _dumps([str(action) for action in belief.action_orientation]),
             held_since,
             str(belief.held_until) if belief.held_until is not None else None,
             belief.supersedes.id if belief.supersedes is not None else None,
             belief.superseded_by.id if belief.superseded_by is not None else None,
             updated_at,
         )
-        return common
+        return (*base, *state_values, *tail)
 
     def _replace_indexes(self, conn: Any, table_key: str, belief: BeliefRecord) -> None:
         belief_id = str(belief.id)
@@ -897,8 +895,7 @@ class BeliefProjection(Projection):
         self._replace_belief_fts(conn, table_key, belief, entity_ids)
 
     def _belief_entity_ids(self, belief: BeliefRecord) -> list[str]:
-        entity_ids = {_normalize_text(belief.object)}
-        entity_ids.update(_normalize_text(ref.id) for ref in belief.about)
+        entity_ids = {_normalize_text(ref.id) for ref in belief.about if ref.kind == "entity"}
         entity_ids.discard("")
         return sorted(entity_ids)
 
@@ -953,7 +950,7 @@ class BeliefProjection(Projection):
         record.update(
             {
                 "id": row["id"],
-                "object": row["object"],
+                "topic": row["topic"],
                 "content": row["content"],
                 "derivation_stage": row["derivation_stage"],
                 "scope": row["scope"],
@@ -999,7 +996,7 @@ class BeliefProjection(Projection):
         candidates: dict[tuple[str, str], dict[str, Any]],
         limit: int,
     ) -> None:
-        entity_ids = _normalized_unique(self._search_probes(params))
+        entity_ids = _normalized_unique(params.entities)
         if not entity_ids:
             return
         conditions, sql_params = self._search_filter_clause(spec, params)
@@ -1022,7 +1019,7 @@ class BeliefProjection(Projection):
         for row in rows:
             self._merge_candidate(candidates, spec.table_key, row, "entity_exact")
 
-    def _collect_object_candidates(
+    def _collect_topic_candidates(
         self,
         conn: Any,
         spec: _TableSpec,
@@ -1040,14 +1037,14 @@ class BeliefProjection(Projection):
                 SELECT {spec.table_name}.*
                 FROM {spec.table_name}
                 WHERE {' AND '.join(conditions)}
-                  AND lower({spec.table_name}.object) IN ({placeholders})
+                  AND lower({spec.table_name}.topic) IN ({placeholders})
                 ORDER BY {spec.table_name}.held_since ASC, {spec.table_name}.id ASC
                 LIMIT ?
                 """,
                 [*sql_params, *exact_probes, limit],
             ).fetchall()
             for row in rows:
-                self._merge_candidate(candidates, spec.table_key, row, "object_exact")
+                self._merge_candidate(candidates, spec.table_key, row, "topic_exact")
 
         partial_probes = [probe for probe in probes if len(probe) >= 3]
         for probe in partial_probes:
@@ -1058,14 +1055,14 @@ class BeliefProjection(Projection):
                 SELECT {spec.table_name}.*
                 FROM {spec.table_name}
                 WHERE {' AND '.join(conditions)}
-                  AND lower({spec.table_name}.object) LIKE ? ESCAPE '!'
+                  AND lower({spec.table_name}.topic) LIKE ? ESCAPE '!'
                 ORDER BY {spec.table_name}.held_since ASC, {spec.table_name}.id ASC
                 LIMIT ?
                 """,
                 [*sql_params, like_probe, limit],
             ).fetchall()
             for row in rows:
-                self._merge_candidate(candidates, spec.table_key, row, "object_partial")
+                self._merge_candidate(candidates, spec.table_key, row, "topic_partial")
 
     def _collect_term_fts_candidates(
         self,
@@ -1156,7 +1153,7 @@ class BeliefProjection(Projection):
                 WHERE {' AND '.join(conditions)}
                   AND (
                     {spec.table_name}.normalized_content LIKE ? ESCAPE '!'
-                    OR lower({spec.table_name}.object) LIKE ? ESCAPE '!'
+                    OR lower({spec.table_name}.topic) LIKE ? ESCAPE '!'
                   )
                 ORDER BY {spec.table_name}.held_since ASC, {spec.table_name}.id ASC
                 LIMIT ?
@@ -1217,24 +1214,24 @@ class BeliefProjection(Projection):
         conn.execute(
             """
             INSERT INTO belief_search_terms_fts
-                (belief_table, belief_id, search_terms, object, about)
+                (belief_table, belief_id, search_terms, topic, about)
             VALUES (?, ?, ?, ?, ?)
             """,
             (
                 table_key,
                 belief_id,
                 self._belief_search_terms(belief, entity_ids, normalized_content),
-                belief.object,
+                belief.topic,
                 self._about_search_terms(belief.about),
             ),
         )
         conn.execute(
             """
             INSERT INTO belief_search_trigram_fts
-                (belief_table, belief_id, content, object, normalized_content)
+                (belief_table, belief_id, content, topic, normalized_content)
             VALUES (?, ?, ?, ?, ?)
             """,
-            (table_key, belief_id, content, belief.object, normalized_content),
+            (table_key, belief_id, content, belief.topic, normalized_content),
         )
 
     def _delete_belief_fts(self, conn: Any, table_key: str, belief_id: str) -> None:
@@ -1255,7 +1252,7 @@ class BeliefProjection(Projection):
     ) -> str:
         terms: list[str] = []
         terms.extend(tokenize_mixed_text(belief.content))
-        terms.extend(tokenize_mixed_text(belief.object))
+        terms.extend(tokenize_mixed_text(belief.topic))
         terms.extend(tokenize_mixed_text(self._about_search_terms(belief.about)))
         terms.append(normalized_content)
         terms.extend(entity_ids)

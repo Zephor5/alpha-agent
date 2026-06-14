@@ -16,10 +16,10 @@ def test_recall_about_returns_active_beliefs_for_explicit_ref_without_entity_fil
             "belief:a-python",
             "User A prefers Python.",
             about=[counterpart_a()],
-            object_="python",
+            topic="python",
         ),
-        belief("belief:a-rust", "User A prefers Rust.", about=[counterpart_a()], object_="rust"),
-        belief("belief:b-go", "User B prefers Go.", about=[counterpart_b()], object_="go"),
+        belief("belief:a-rust", "User A prefers Rust.", about=[counterpart_a()], topic="rust"),
+        belief("belief:b-go", "User B prefers Go.", about=[counterpart_b()], topic="go"),
     ]:
         projection.upsert_atomic(item)
 

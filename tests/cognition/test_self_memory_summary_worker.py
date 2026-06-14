@@ -11,10 +11,15 @@ from alpha_agent.cognition.loops.workers.memory_summary import MemorySummaryWork
 from alpha_agent.cognition.models import (
     AtomicBelief,
     Authority,
+    BeliefId,
     BeliefScope,
     DerivationStage,
+    Instant,
+    MemoryKind,
+    NLStatement,
     Reference,
     SummaryKind,
+    ValidityWindow,
 )
 from alpha_agent.cognition.processing_ledger import (
     BackgroundProgressStatus,
@@ -23,7 +28,6 @@ from alpha_agent.cognition.processing_ledger import (
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
 from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolChoice, LLMToolDefinitionInput
 from alpha_agent.state.store import StateStore
-from tests.cognition.test_belief_projection_apply import belief
 
 
 def test_self_memory_summary_worker_writes_validated_summary_with_program_sources(
@@ -181,7 +185,9 @@ def test_self_memory_summary_worker_prompt_includes_output_schema_and_target(
     ).run_once()
 
     assert report.emitted == 1
-    instruction = provider.calls[0]["messages"][0]["content"]
+    messages = provider.calls[0]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    instruction = messages[-1]["content"]
     assert isinstance(instruction, str)
     assert '"operation": {' in instruction
     assert '"const": "create_summary_belief"' in instruction
@@ -218,18 +224,20 @@ def _self_consolidated_belief(
     sources: list[Reference] | None = None,
     held_since: str = "2026-01-01T00:00:00+00:00",
 ) -> AtomicBelief:
-    record = belief(
-        belief_id,
-        content,
+    return AtomicBelief(
+        id=BeliefId(belief_id),
+        subject=Reference("subject", "subject:self"),
         about=[Reference("subject", "subject:self")],
-        object_="self memory source",
+        topic="self memory source",
+        content=NLStatement(content),
+        memory_kind=MemoryKind.FACT,
+        derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
         scope=BeliefScope.SELF,
-        held_since=held_since,
-    ).to_record()
-    record["authority"] = Authority.BACKGROUND_SYNTHESIZED.value
-    record["derivation_stage"] = DerivationStage.BACKGROUND_CONSOLIDATED.value
-    record["sources"] = [source.to_record() for source in sources or []]
-    return AtomicBelief.from_record(record)
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        sources=list(sources or []),
+        validity=ValidityWindow(observed_at=Instant("2026-01-01T00:00:00+00:00")),
+        held_since=Instant(held_since),
+    )
 
 
 class _RecordingLLMProvider:
@@ -271,9 +279,8 @@ def _summary_json(content: str) -> str:
                     "summary_kind": SummaryKind.SELF_MEMORY_SUMMARY.value,
                     "scope": BeliefScope.SELF.value,
                     "about": [{"kind": "subject", "id": "subject:self"}],
-                    "object": "self memory summary",
+                    "topic": "self memory summary",
                     "content": content,
-                    "structure": {},
                 }
             },
         },

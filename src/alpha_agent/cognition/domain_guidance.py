@@ -70,10 +70,6 @@ def summary_target_domain(summary: SummaryBelief) -> str | None:
     value = structure.get("target_domain")
     if isinstance(value, str) and value.strip():
         return value.strip()
-    policy = summary.update_policy if isinstance(summary.update_policy, dict) else {}
-    value = policy.get("target_domain")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
     return None
 
 

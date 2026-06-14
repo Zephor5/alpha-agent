@@ -370,7 +370,7 @@ def test_debug_prompt_trace_summarizes_memory_tool_results(tmp_path: Path) -> No
         belief(
             "belief:python",
             "User prefers Python examples.",
-            object_="Python examples",
+            topic="Python examples",
         )
     )
     AlphaAgent(store=store, llm_provider=_MemoryTraceProvider()).respond(
@@ -451,6 +451,7 @@ class _MemoryTraceProvider:
                         "target_hint": "Python examples preference",
                         "memory": {
                             "type": "preference",
+                            "topic": "example language",
                             "content": "User prefers Rust examples.",
                             "evidence": "User said: actually use Rust examples now.",
                             "scope": "global",

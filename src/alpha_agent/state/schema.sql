@@ -231,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_counterpart_role
 CREATE TABLE IF NOT EXISTS atomic_beliefs (
     id TEXT PRIMARY KEY,
     record TEXT NOT NULL DEFAULT '{}',
-    object TEXT NOT NULL,
+    topic TEXT NOT NULL,
     content TEXT NOT NULL,
     normalized_content TEXT NOT NULL,
     memory_kind TEXT NOT NULL,
@@ -239,14 +239,12 @@ CREATE TABLE IF NOT EXISTS atomic_beliefs (
     scope TEXT NOT NULL,
     authority TEXT NOT NULL,
     lifecycle TEXT NOT NULL DEFAULT 'active',
-    structure TEXT NOT NULL DEFAULT '{}',
     sources TEXT NOT NULL DEFAULT '[]',
     validity TEXT NOT NULL DEFAULT '{}',
     relations TEXT NOT NULL DEFAULT '[]',
     update_policy TEXT NOT NULL DEFAULT '{}',
     formed_in_situation TEXT,
     holder_role TEXT,
-    action_orientation TEXT NOT NULL DEFAULT '[]',
     held_since TEXT NOT NULL,
     held_until TEXT,
     supersedes TEXT,
@@ -264,7 +262,7 @@ CREATE INDEX IF NOT EXISTS idx_atomic_beliefs_scope
 CREATE TABLE IF NOT EXISTS summary_beliefs (
     id TEXT PRIMARY KEY,
     record TEXT NOT NULL DEFAULT '{}',
-    object TEXT NOT NULL,
+    topic TEXT NOT NULL,
     content TEXT NOT NULL,
     normalized_content TEXT NOT NULL,
     summary_kind TEXT NOT NULL,
@@ -280,7 +278,6 @@ CREATE TABLE IF NOT EXISTS summary_beliefs (
     source_belief_ids TEXT NOT NULL DEFAULT '[]',
     formed_in_situation TEXT,
     holder_role TEXT,
-    action_orientation TEXT NOT NULL DEFAULT '[]',
     held_since TEXT NOT NULL,
     held_until TEXT,
     supersedes TEXT,
@@ -321,7 +318,7 @@ USING fts5(
     belief_table UNINDEXED,
     belief_id UNINDEXED,
     search_terms,
-    object,
+    topic,
     about,
     tokenize = "unicode61 remove_diacritics 1 tokenchars '_-#./:+'"
 );
@@ -331,7 +328,7 @@ USING fts5(
     belief_table UNINDEXED,
     belief_id UNINDEXED,
     content,
-    object,
+    topic,
     normalized_content,
     tokenize = "trigram"
 );

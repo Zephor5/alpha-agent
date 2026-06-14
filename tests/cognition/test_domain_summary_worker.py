@@ -4,6 +4,7 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
+from alpha_agent.cognition.domain_guidance import summary_target_domain
 from alpha_agent.cognition.loops.workers.memory_summary import MemorySummaryWorker
 from alpha_agent.cognition.models import (
     AtomicBelief,
@@ -13,6 +14,7 @@ from alpha_agent.cognition.models import (
     BeliefScope,
     DerivationStage,
     Instant,
+    MemoryKind,
     NLStatement,
     Reference,
     SummaryBelief,
@@ -26,7 +28,6 @@ from alpha_agent.cognition.processing_ledger import (
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
 from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolChoice, LLMToolDefinitionInput
 from alpha_agent.state.store import StateStore
-from tests.cognition.test_belief_projection_apply import belief
 
 
 def test_domain_summary_worker_writes_llm_synthesized_summary_with_target_identity(
@@ -80,6 +81,7 @@ def test_domain_summary_worker_writes_llm_synthesized_summary_with_target_identi
         "memory_propose": {"requires_confirmation": True},
         "target_domain": "memory_propose",
     }
+    assert summary_target_domain(summary) == "memory_propose"
     assert set(summary.source_belief_ids) == {first.id, second.id}
     windows = service.ledger.list_source_windows(stage=BackgroundStage.SUMMARY)
     assert len(windows) == 1
@@ -266,7 +268,9 @@ def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) ->
     ).run_once()
 
     assert report.emitted == 1
-    instruction = provider.calls[0]["messages"][0]["content"]
+    messages = provider.calls[0]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    instruction = messages[-1]["content"]
     assert isinstance(instruction, str)
     assert '"summary_kind": {' in instruction
     assert '"const": "domain_summary"' in instruction
@@ -286,6 +290,55 @@ def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) ->
     ) in instruction
 
 
+def test_domain_summary_worker_uses_scope_owner_refs_for_target_identity(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    incidental_entity = Reference("entity", "python")
+    first = _consolidated_belief(
+        "belief:domain-global-1",
+        "Memory proposal confirmation required for Python preferences.",
+        target_domain="memory_propose",
+        about=[incidental_entity],
+    )
+    second = _consolidated_belief(
+        "belief:domain-global-2",
+        "Memory proposal confirmation required for Python constraints.",
+        target_domain="memory_propose",
+        about=[incidental_entity],
+    )
+    service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    provider = _RecordingLLMProvider(
+        _summary_json(
+            summary_kind=SummaryKind.DOMAIN_SUMMARY,
+            scope=BeliefScope.GLOBAL,
+            about=[],
+            content="Memory proposal confirmation required.",
+            structure={
+                "target_domain": "memory_propose",
+                "memory_propose": {"requires_confirmation": True},
+            },
+        )
+    )
+
+    report = MemorySummaryWorker(
+        service,
+        provider,
+        initial_min_beliefs=2,
+        changed_source_min=2,
+        invalidated_source_min=1,
+    ).run_once()
+
+    assert report.emitted == 1
+    window = service.ledger.list_source_windows(stage=BackgroundStage.SUMMARY)[0]
+    assert window.metadata["summary_target"]["about"] == []
+    instruction = provider.calls[0]["messages"][-1]["content"]
+    assert isinstance(instruction, str)
+    assert '"const": []' in instruction
+
+
 def _store(tmp_path) -> StateStore:
     store = StateStore(tmp_path / "alpha.db")
     store.initialize()
@@ -297,21 +350,26 @@ def _consolidated_belief(
     content: str,
     *,
     target_domain: str,
+    scope: BeliefScope = BeliefScope.GLOBAL,
+    about: list[Reference] | None = None,
     sources: list[Reference] | None = None,
     held_since: str = "2026-01-01T00:00:00+00:00",
 ) -> AtomicBelief:
-    record = belief(
-        belief_id,
-        content,
-        about=[],
-        object_=f"domain guidance {target_domain}",
-        held_since=held_since,
-    ).to_record()
-    record["authority"] = Authority.BACKGROUND_SYNTHESIZED.value
-    record["derivation_stage"] = DerivationStage.BACKGROUND_CONSOLIDATED.value
-    record["structure"] = {"target_domain": target_domain}
-    record["sources"] = [source.to_record() for source in sources or []]
-    return AtomicBelief.from_record(record)
+    return AtomicBelief(
+        id=BeliefId(belief_id),
+        subject=Reference("subject", "subject:self"),
+        about=list(about or []),
+        topic=f"domain guidance {target_domain}",
+        content=NLStatement(content),
+        memory_kind=MemoryKind.FACT,
+        derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+        scope=scope,
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        sources=list(sources or []),
+        validity=ValidityWindow(observed_at=Instant("2026-01-01T00:00:00+00:00")),
+        update_policy={"target_domain": target_domain},
+        held_since=Instant(held_since),
+    )
 
 
 def _domain_summary_belief(
@@ -323,7 +381,7 @@ def _domain_summary_belief(
         id=BeliefId(belief_id),
         subject=Reference("subject", "subject:self"),
         about=[],
-        object="memory proposal domain guidance",
+        topic="memory proposal domain guidance",
         content=NLStatement("Old memory proposal confirmation guidance."),
         summary_kind=SummaryKind.DOMAIN_SUMMARY,
         derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
@@ -385,7 +443,7 @@ def _summary_json(
                     "summary_kind": summary_kind.value,
                     "scope": scope.value,
                     "about": about,
-                    "object": "memory proposal domain guidance",
+                    "topic": "memory proposal domain guidance",
                     "content": content,
                     "structure": structure,
                 }
