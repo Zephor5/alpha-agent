@@ -73,8 +73,7 @@ Operation rules:
 - supersede: replace one active belief with a new consolidated atomic belief.
 - retract: mark one active belief retracted.
 - archive: mark one active belief archived.
-- Update-like operations must target one of the allowed update target belief ids
-  in the material message.
+- Update-like operations must target one of the supplied allowed update target belief ids.
 - Do not include source ids, provenance, idempotency keys, generated ids, confidence,
   scores, or numeric strength fields.
 - New or superseding atomic_belief_input payloads will be created as active memory
@@ -124,8 +123,7 @@ Operation rules:
 - supersede: replace one active belief with a new consolidated atomic belief.
 - retract: mark one active belief retracted.
 - archive: mark one active belief archived.
-- Update-like operations must target one of the allowed update target belief ids
-  in the material message.
+- Update-like operations must target one of the supplied allowed update target belief ids.
 - Do not mutate active memory unless the conflict can be safely resolved from the
   supplied evidence. If resolving the conflict automatically is unsafe, return
   skip with a short payload.reason.
