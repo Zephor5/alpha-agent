@@ -186,31 +186,36 @@ def test_self_memory_summary_worker_prompt_includes_output_schema_and_target(
 
     assert report.emitted == 1
     messages = provider.calls[0]["messages"]
-    assert [message["role"] for message in messages] == ["system", "user"]
-    instruction = messages[-1]["content"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    instruction = messages[1]["content"]
+    material = messages[2]["content"]
     assert isinstance(instruction, str)
+    assert isinstance(material, str)
     assert '"operation": {' in instruction
     assert '"const": "create_summary_belief"' in instruction
     assert '"const": "skip"' in instruction
     assert '"reason"' in instruction
     assert '"summary_belief_input"' in instruction
     assert '"summary_kind": {' in instruction
-    assert '"const": "self_memory_summary"' in instruction
+    assert '"enum": [' in instruction
+    assert '"const": "self_memory_summary"' not in instruction
     assert '"scope": {' in instruction
-    assert '"const": "self"' in instruction
+    assert '"const": "self"' not in instruction
     assert '"about": {' in instruction
-    assert '{"id": "subject:self", "kind": "subject"}' in instruction
+    assert '{"id": "subject:self", "kind": "subject"}' not in instruction
     assert "Do not present old source evidence as newly updated evidence." in instruction
-    assert '"held_since": "2026-06-12T02:00:00+00:00"' in instruction
-    assert '"held_since": "2026-06-12T02:17:00+00:00"' in instruction
+    assert '"summary_kind": "self_memory_summary"' in material
+    assert '{"id": "subject:self", "kind": "subject"}' in material
+    assert '"held_since": "2026-06-12T02:00:00+00:00"' in material
+    assert '"held_since": "2026-06-12T02:17:00+00:00"' in material
     assert (
         '"source_time_line": "Source message time: 2026-06-12 09:00 '
         '(Asia/Shanghai)."'
-    ) in instruction
+    ) in material
     assert (
         '"source_time_line": "Source message time: 2026-06-12 09:17 '
         '(Asia/Shanghai)."'
-    ) in instruction
+    ) in material
 
 
 def _store(tmp_path) -> StateStore:

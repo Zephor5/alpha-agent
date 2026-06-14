@@ -269,25 +269,31 @@ def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) ->
 
     assert report.emitted == 1
     messages = provider.calls[0]["messages"]
-    assert [message["role"] for message in messages] == ["system", "user"]
-    instruction = messages[-1]["content"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    instruction = messages[1]["content"]
+    material = messages[2]["content"]
     assert isinstance(instruction, str)
+    assert isinstance(material, str)
     assert '"summary_kind": {' in instruction
-    assert '"const": "domain_summary"' in instruction
+    assert '"enum": [' in instruction
+    assert '"const": "domain_summary"' not in instruction
     assert '"scope": {' in instruction
-    assert '"const": "global"' in instruction
+    assert '"const": "global"' not in instruction
     assert '"target_domain": {' in instruction
-    assert '"const": "memory_propose"' in instruction
-    assert '"held_since": "2026-06-12T02:00:00+00:00"' in instruction
-    assert '"held_since": "2026-06-12T02:17:00+00:00"' in instruction
+    assert '"const": "memory_propose"' not in instruction
+    assert '"summary_kind": "domain_summary"' in material
+    assert '"scope": "global"' in material
+    assert '"target_domain": "memory_propose"' in material
+    assert '"held_since": "2026-06-12T02:00:00+00:00"' in material
+    assert '"held_since": "2026-06-12T02:17:00+00:00"' in material
     assert (
         '"source_time_line": "Source message time: 2026-06-12 09:00 '
         '(Asia/Shanghai)."'
-    ) in instruction
+    ) in material
     assert (
         '"source_time_line": "Source message time: 2026-06-12 09:17 '
         '(Asia/Shanghai)."'
-    ) in instruction
+    ) in material
 
 
 def test_domain_summary_worker_uses_scope_owner_refs_for_target_identity(
@@ -334,9 +340,14 @@ def test_domain_summary_worker_uses_scope_owner_refs_for_target_identity(
     assert report.emitted == 1
     window = service.ledger.list_source_windows(stage=BackgroundStage.SUMMARY)[0]
     assert window.metadata["summary_target"]["about"] == []
-    instruction = provider.calls[0]["messages"][-1]["content"]
+    messages = provider.calls[0]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    instruction = messages[1]["content"]
+    material = messages[2]["content"]
     assert isinstance(instruction, str)
-    assert '"const": []' in instruction
+    assert isinstance(material, str)
+    assert '"const": []' not in instruction
+    assert '"about": []' in material
 
 
 def _store(tmp_path) -> StateStore:

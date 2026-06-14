@@ -12,7 +12,7 @@ from alpha_agent.cognition.authority import CognitionSourceKind
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     SourceWindowValidationContext,
-    consolidation_output_json_schema,
+    consolidation_instruction_output_json_schema,
 )
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
@@ -65,12 +65,6 @@ Return only one JSON object. Do not return markdown, code fences, arrays, commen
 multiple decisions. The output must validate against this JSON Schema:
 {output_schema_json}
 
-Allowed update target belief ids:
-{allowed_target_belief_ids_json}
-
-Allowed about references for newly created or superseding atomic belief inputs:
-{allowed_about_refs_json}
-
 Operation rules:
 - skip: write nothing when the extracted belief is uncertain, noisy, not useful, or unsafe to
   consolidate; include a short payload.reason.
@@ -79,7 +73,8 @@ Operation rules:
 - supersede: replace one active belief with a new consolidated atomic belief.
 - retract: mark one active belief retracted.
 - archive: mark one active belief archived.
-- Update-like operations must target one of the allowed belief ids above.
+- Update-like operations must target one of the allowed update target belief ids
+  in the material message.
 - Do not include source ids, provenance, idempotency keys, generated ids, confidence,
   scores, or numeric strength fields.
 - New or superseding atomic_belief_input payloads will be created as active memory
@@ -101,7 +96,13 @@ Operation rules:
 Time rules:
 - Recency decisions prefer source message time over held_since when source_time_line is present.
 - held_since is Alpha holding time, not evidence time.
-- Supersede, retract, and archive decisions must not infer source recency from held_since.
+- Supersede, retract, and archive decisions must not infer source recency from held_since."""
+
+_CONSOLIDATION_MATERIAL_MESSAGE = """Allowed update target belief ids:
+{allowed_target_belief_ids_json}
+
+Allowed about references for newly created or superseding atomic belief inputs:
+{allowed_about_refs_json}
 
 Extracted beliefs to consolidate:
 {drafts_json}
@@ -115,21 +116,32 @@ Return only one JSON object. Do not return markdown, code fences, arrays, commen
 multiple decisions. The output must validate against this JSON Schema:
 {output_schema_json}
 
-Allowed update target belief ids:
+Operation rules:
+- skip: write nothing when the conflict cannot be safely resolved from the supplied
+  evidence; include a short payload.reason.
+- create: create a new consolidated active atomic belief from atomic_belief_input.
+- strengthen: reaffirm one active belief with corroborating evidence.
+- supersede: replace one active belief with a new consolidated atomic belief.
+- retract: mark one active belief retracted.
+- archive: mark one active belief archived.
+- Update-like operations must target one of the allowed update target belief ids
+  in the material message.
+- Do not mutate active memory unless the conflict can be safely resolved from the
+  supplied evidence. If resolving the conflict automatically is unsafe, return
+  skip with a short payload.reason.
+- Do not include generated ids, source refs, provenance, idempotency keys, confidence,
+  scores, or numeric strength fields.
+- New or superseding atomic_belief_input payloads will be created as active memory
+  after validation and must include topic as a short topic phrase, not a sentence
+  and not the full assertion in content.
+- Use the same language as the conflict source evidence for new or superseding
+  topic and content; do not translate memories."""
+
+_CONFLICT_REVIEW_MATERIAL_MESSAGE = """Allowed update target belief ids:
 {allowed_target_belief_ids_json}
 
 Allowed about references for newly created or superseding atomic belief inputs:
 {allowed_about_refs_json}
-
-Do not mutate active memory unless the conflict can be safely resolved from the
-supplied evidence. If resolving the conflict automatically is unsafe, return
-skip with a short payload.reason. Do not include generated ids, source refs,
-provenance, idempotency keys, confidence, scores, or numeric strength fields.
-New or superseding atomic_belief_input payloads will be created as active memory
-after validation and must include topic as a short
-topic phrase, not a sentence and not the full assertion in content.
-Use the same language as the conflict source evidence for new or superseding
-topic and content; do not translate memories.
 
 Conflict source:
 {conflict_json}
@@ -321,14 +333,11 @@ class MemoryConsolidationWorker:
             context = _validation_context_for_candidate(window, candidate)
             response = traced_llm_complete(
                 llm_provider,
-                [
-                    _consolidation_system_message(),
-                    _consolidation_instruction_message(
-                        state_service.store,
-                        candidate,
-                        context=context,
-                    )
-                ],
+                _consolidation_messages(
+                    state_service.store,
+                    candidate,
+                    context=context,
+                ),
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -520,15 +529,12 @@ class MemoryConflictReviewWorker:
             context = _validation_context_for_conflict(window, active_beliefs)
             response = traced_llm_complete(
                 llm_provider,
-                [
-                    _consolidation_system_message(),
-                    _conflict_review_instruction_message(
-                        state_service.store,
-                        window,
-                        active_beliefs,
-                        context=context,
-                    )
-                ],
+                _conflict_review_messages(
+                    state_service.store,
+                    window,
+                    active_beliefs,
+                    context=context,
+                ),
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -731,68 +737,80 @@ def _allowed_about_refs(beliefs: Sequence[AtomicBelief]) -> frozenset[tuple[str,
     return frozenset(refs) if refs else frozenset()
 
 
-def _consolidation_instruction_message(
+def _consolidation_messages(
     store: StateStore,
     candidate: _ConsolidationCandidate,
     *,
     context: BackgroundLLMValidationContext,
-) -> ChatMessage:
-    return {
-        "role": "user",
-        "content": _CONSOLIDATION_INSTRUCTION.format(
-            output_schema_json=_consolidation_output_schema_json(context),
-            allowed_target_belief_ids_json=_allowed_target_belief_ids_json(context),
-            allowed_about_refs_json=_allowed_about_refs_json(context),
-            drafts_json=json.dumps(
-                [_belief_prompt_record(store, item) for item in candidate.drafts],
-                ensure_ascii=False,
-                sort_keys=True,
+) -> list[ChatMessage]:
+    return [
+        {"role": "system", "content": _CONSOLIDATION_SYSTEM_MESSAGE},
+        {
+            "role": "user",
+            "content": _CONSOLIDATION_INSTRUCTION.format(
+                output_schema_json=_consolidation_output_schema_json(),
             ),
-            active_beliefs_json=json.dumps(
-                [_belief_prompt_record(store, item) for item in candidate.active_beliefs],
-                ensure_ascii=False,
-                sort_keys=True,
+        },
+        {
+            "role": "user",
+            "content": _CONSOLIDATION_MATERIAL_MESSAGE.format(
+                allowed_target_belief_ids_json=_allowed_target_belief_ids_json(context),
+                allowed_about_refs_json=_allowed_about_refs_json(context),
+                drafts_json=json.dumps(
+                    [_belief_prompt_record(store, item) for item in candidate.drafts],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                active_beliefs_json=json.dumps(
+                    [_belief_prompt_record(store, item) for item in candidate.active_beliefs],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
             ),
-        ),
-    }
+        },
+    ]
 
 
 def _consolidation_system_message() -> ChatMessage:
     return {"role": "system", "content": _CONSOLIDATION_SYSTEM_MESSAGE}
 
 
-def _conflict_review_instruction_message(
+def _conflict_review_messages(
     store: StateStore,
     window: BackgroundSourceWindow,
     active_beliefs: Sequence[AtomicBelief],
     *,
     context: BackgroundLLMValidationContext,
-) -> ChatMessage:
-    return {
-        "role": "user",
-        "content": _CONFLICT_REVIEW_INSTRUCTION.format(
-            output_schema_json=_consolidation_output_schema_json(context),
-            allowed_target_belief_ids_json=_allowed_target_belief_ids_json(context),
-            allowed_about_refs_json=_allowed_about_refs_json(context),
-            conflict_json=json.dumps(window.metadata, ensure_ascii=False, sort_keys=True),
-            active_beliefs_json=json.dumps(
-                [
-                    _belief_prompt_record(store, item, include_source_time=False)
-                    for item in active_beliefs
-                ],
-                ensure_ascii=False,
-                sort_keys=True,
+) -> list[ChatMessage]:
+    return [
+        _consolidation_system_message(),
+        {
+            "role": "user",
+            "content": _CONFLICT_REVIEW_INSTRUCTION.format(
+                output_schema_json=_consolidation_output_schema_json(),
             ),
-        ),
-    }
+        },
+        {
+            "role": "user",
+            "content": _CONFLICT_REVIEW_MATERIAL_MESSAGE.format(
+                allowed_target_belief_ids_json=_allowed_target_belief_ids_json(context),
+                allowed_about_refs_json=_allowed_about_refs_json(context),
+                conflict_json=json.dumps(window.metadata, ensure_ascii=False, sort_keys=True),
+                active_beliefs_json=json.dumps(
+                    [
+                        _belief_prompt_record(store, item, include_source_time=False)
+                        for item in active_beliefs
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            ),
+        },
+    ]
 
 
-def _consolidation_output_schema_json(context: BackgroundLLMValidationContext) -> str:
-    return json_for_prompt(
-        consolidation_output_json_schema(
-            allowed_target_belief_ids=context.allowed_target_belief_ids
-        )
-    )
+def _consolidation_output_schema_json() -> str:
+    return json_for_prompt(consolidation_instruction_output_json_schema())
 
 
 def _allowed_target_belief_ids_json(context: BackgroundLLMValidationContext) -> str:

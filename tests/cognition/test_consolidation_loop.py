@@ -2089,12 +2089,21 @@ def test_memory_consolidation_worker_sends_structured_prompt_messages(
 
     assert report.emitted == 1
     messages = provider.calls[0]["messages"]
-    assert [message["role"] for message in messages] == ["system", "user"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
     assert all(isinstance(message["content"], str) for message in messages)
-    instruction = messages[-1]["content"]
+    instruction = messages[1]["content"]
+    material = messages[2]["content"]
     assert isinstance(instruction, str)
+    assert isinstance(material, str)
     assert '"const": "skip"' in instruction
     assert '"reason"' in instruction
+    assert str(target.id) not in instruction
+    assert str(extracted.id) not in instruction
+    assert "Allowed update target belief ids" in material
+    assert "Allowed about references" in material
+    assert f'"{target.id}"' in material
+    assert f'"id": "{target.id}"' in material
+    assert f'"id": "{extracted.id}"' in material
 
 
 def test_memory_consolidation_prompt_uses_source_time_before_held_since_for_recency(
@@ -2153,24 +2162,26 @@ def test_memory_consolidation_prompt_uses_source_time_before_held_since_for_rece
 
     assert report.emitted == 1
     messages = provider.calls[0]["messages"]
-    assert [message["role"] for message in messages] == ["system", "user"]
-    instruction = messages[-1]["content"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    instruction = messages[1]["content"]
+    material = messages[2]["content"]
     assert isinstance(instruction, str)
+    assert isinstance(material, str)
     assert "prefer source message time over held_since" in instruction
     assert "held_since is Alpha holding time, not evidence time" in instruction
     assert "must not infer source recency from held_since" in instruction
-    assert f'"id": "{extracted.id}"' in instruction
-    assert f'"id": "{target.id}"' in instruction
-    assert '"held_since": "2026-06-12T00:00:00+00:00"' in instruction
-    assert '"held_since": "2026-01-01T00:00:00+00:00"' in instruction
+    assert f'"id": "{extracted.id}"' in material
+    assert f'"id": "{target.id}"' in material
+    assert '"held_since": "2026-06-12T00:00:00+00:00"' in material
+    assert '"held_since": "2026-01-01T00:00:00+00:00"' in material
     assert (
         '"source_time_line": "Source message time: 2026-06-01 09:00 '
         '(Asia/Shanghai)."'
-    ) in instruction
+    ) in material
     assert (
         '"source_time_line": "Source message time: 2026-06-12 09:00 '
         '(Asia/Shanghai)."'
-    ) in instruction
+    ) in material
     retained = service.beliefs.get_by_id(target.id)
     assert isinstance(retained, AtomicBelief)
     assert retained.lifecycle == BeliefLifecycle.ACTIVE
@@ -2698,12 +2709,20 @@ def test_conflict_review_worker_sends_structured_prompt_messages(
 
     assert report.emitted == 1
     messages = provider.calls[0]["messages"]
-    assert [message["role"] for message in messages] == ["system", "user"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
     assert all(isinstance(message["content"], str) for message in messages)
-    instruction = messages[-1]["content"]
+    instruction = messages[1]["content"]
+    material = messages[2]["content"]
     assert isinstance(instruction, str)
+    assert isinstance(material, str)
     assert '"const": "skip"' in instruction
     assert '"reason"' in instruction
+    assert str(target.id) not in instruction
+    assert "User now prefers Rust examples" not in instruction
+    assert "Allowed update target belief ids" in material
+    assert f'"{target.id}"' in material
+    assert f'"id": "{target.id}"' in material
+    assert "User now prefers Rust examples" in material
 
 
 def test_memory_summary_worker_accepts_skip_without_superseding_active_summary(

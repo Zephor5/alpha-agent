@@ -13,7 +13,7 @@ from alpha_agent.cognition.authority import CognitionSourceKind
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     SourceWindowValidationContext,
-    summary_output_json_schema,
+    summary_instruction_output_json_schema,
 )
 from alpha_agent.cognition.domain_guidance import active_domain_guidance, summary_target_domain
 from alpha_agent.cognition.emitter import EventEmitter
@@ -77,7 +77,8 @@ Do not include belief ids, summary ids, source ids, provenance, idempotency keys
 confidence, scores, or numeric strength fields. Preserve the selected summary target exactly.
 If emitting create_summary_belief, use payload.summary_belief_input; it will be created
 as active summary memory after validation.
-For domain summaries, structure.target_domain is required and must match the selected target.
+For domain summaries, structure.target_domain is required and must match the selected
+target in the material message.
 topic is required and must be a short topic phrase, not a sentence and not the
 full assertion in content.
 Use the same language as the selected source memories and their original evidence
@@ -85,9 +86,9 @@ for summary topic and content; do not translate summaries.
 If the selected memories are uncertain, noisy, duplicative, or not useful enough for a
 summary update, return skip with a short payload.reason instead of omitting output.
 Use source_time_line as evidence time when present. held_since is Alpha holding time,
-not evidence time. Do not present old source evidence as newly updated evidence.
+not evidence time. Do not present old source evidence as newly updated evidence."""
 
-Selected summary target:
+_SUMMARY_MATERIAL_MESSAGE = """Selected summary target:
 {summary_target_json}
 
 Applicable domain guidance for this worker:
@@ -322,10 +323,7 @@ class MemorySummaryWorker:
             context = _validation_context(window=window, target=target)
             response = traced_llm_complete(
                 llm_provider,
-                [
-                    _summary_system_message(),
-                    _summary_instruction_message(state_service, target, context=context),
-                ],
+                _summary_messages(state_service, target),
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
                     worker_name=self.name,
@@ -640,66 +638,61 @@ def _summary_window_processed(
     )
 
 
-def _summary_instruction_message(
+def _summary_messages(
     state_service: CognitionStateStore,
     target: _SummaryTarget,
-    *,
-    context: BackgroundLLMValidationContext,
-) -> ChatMessage:
+) -> list[ChatMessage]:
     guidance = active_domain_guidance(
         state_service.beliefs,
         target_domain=MemorySummaryWorker.name,
     )
-    return {
-        "role": "user",
-        "content": _SUMMARY_INSTRUCTION.format(
-            output_schema_json=_summary_output_schema_json(context),
-            summary_target_json=json.dumps(
-                target.metadata["summary_target"],
-                ensure_ascii=False,
-                sort_keys=True,
+    return [
+        _summary_system_message(),
+        {
+            "role": "user",
+            "content": _SUMMARY_INSTRUCTION.format(
+                output_schema_json=_summary_output_schema_json(),
             ),
-            domain_guidance_json=json.dumps(
-                [
-                    {
-                        "id": str(item.belief.id),
-                        "content": str(item.belief.content),
-                        "target_domain": item.target_domain,
-                    }
-                    for item in guidance
-                ],
-                ensure_ascii=False,
-                sort_keys=True,
+        },
+        {
+            "role": "user",
+            "content": _SUMMARY_MATERIAL_MESSAGE.format(
+                summary_target_json=json.dumps(
+                    target.metadata["summary_target"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                domain_guidance_json=json.dumps(
+                    [
+                        {
+                            "id": str(item.belief.id),
+                            "content": str(item.belief.content),
+                            "target_domain": item.target_domain,
+                        }
+                        for item in guidance
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                source_beliefs_json=json.dumps(
+                    [
+                        _belief_prompt_record(state_service.store, item)
+                        for item in target.source_beliefs
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
             ),
-            source_beliefs_json=json.dumps(
-                [
-                    _belief_prompt_record(state_service.store, item)
-                    for item in target.source_beliefs
-                ],
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-        ),
-    }
+        },
+    ]
 
 
 def _summary_system_message() -> ChatMessage:
     return {"role": "system", "content": _SUMMARY_SYSTEM_MESSAGE}
 
 
-def _summary_output_schema_json(context: BackgroundLLMValidationContext) -> str:
-    if context.allowed_summary_kinds is None or len(context.allowed_summary_kinds) != 1:
-        raise ValueError("summary worker prompt requires exactly one allowed summary kind")
-    if context.required_summary_scope is None:
-        raise ValueError("summary worker prompt requires a selected summary scope")
-    return json_for_prompt(
-        summary_output_json_schema(
-            summary_kind=next(iter(context.allowed_summary_kinds)),
-            scope=context.required_summary_scope,
-            about_refs=context.required_summary_about_refs or frozenset(),
-            target_domain=context.required_summary_target_domain,
-        )
-    )
+def _summary_output_schema_json() -> str:
+    return json_for_prompt(summary_instruction_output_json_schema())
 
 
 def _validation_context(

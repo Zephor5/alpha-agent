@@ -202,6 +202,12 @@ def consolidation_output_json_schema(
     }
 
 
+def consolidation_instruction_output_json_schema() -> dict[str, Any]:
+    """Return the stable prompt schema for consolidation instructions."""
+
+    return consolidation_output_json_schema()
+
+
 def summary_output_json_schema(
     *,
     summary_kind: SummaryKind,
@@ -226,6 +232,24 @@ def summary_output_json_schema(
         structure_schema=structure_schema,
         required=required,
     )
+    return {
+        "oneOf": [
+            _background_output_schema(
+                operation="create_summary_belief",
+                payload_schema=_payload_schema({"summary_belief_input": summary_draft}),
+            ),
+            _background_output_schema(
+                operation=_SKIP_OPERATION,
+                payload_schema=_skip_payload_schema(),
+            ),
+        ]
+    }
+
+
+def summary_instruction_output_json_schema() -> dict[str, Any]:
+    """Return the stable prompt schema for summary instructions."""
+
+    summary_draft = _summary_belief_instruction_input_schema()
     return {
         "oneOf": [
             _background_output_schema(
@@ -390,6 +414,34 @@ def _summary_belief_input_schema(
         "additionalProperties": False,
         "required": required,
         "properties": properties,
+    }
+
+
+def _summary_belief_instruction_input_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["summary_kind", "scope", "about", "topic", "content"],
+        "properties": {
+            "summary_kind": {"enum": [item.value for item in SummaryKind]},
+            "scope": {"enum": [item.value for item in BeliefScope]},
+            "about": _reference_array_schema(),
+            "topic": _TOPIC_SCHEMA,
+            "content": {"type": "string", "minLength": 1},
+            "structure": {
+                "type": "object",
+                "required": ["target_domain"],
+                "properties": {"target_domain": {"type": "string", "minLength": 1}},
+            },
+            "validity": {"type": "object"},
+            "update_policy": {"type": "object"},
+            "project_descriptor": {
+                "oneOf": [
+                    {"type": "string", "minLength": 1},
+                    {"type": "object"},
+                ],
+            },
+        },
     }
 
 
