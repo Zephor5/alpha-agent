@@ -95,7 +95,10 @@ from alpha_agent.state.store import (
 )
 from alpha_agent.tools.base import ToolCall, TurnToolState, tool_output_kind
 from alpha_agent.tools.default import build_tool_registry
-from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_CONTEXT_KEY
+from alpha_agent.tools.memory_propose import (
+    MEMORY_PROPOSE_CONTEXT_KEY,
+    MEMORY_PROPOSE_TOOL_NAME,
+)
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_CONTEXT_KEY
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.ids import new_id
@@ -498,13 +501,6 @@ class AlphaAgent:
                 session_id=session_id,
                 prompt_frame=prompt_frame,
             )
-            self._submit_feedback_attribution(
-                turn_context=agent_turn,
-                user_record=user_record,
-                user_message=user_message,
-                prompt_messages=messages,
-                debug=debug,
-            )
             prompt_token_estimate = estimate_chat_tokens(messages, tools=model_tools or None)
             debug["prompt_token_estimate"] = prompt_token_estimate
             debug["renderer"] = "runtime_session_history"
@@ -537,6 +533,14 @@ class AlphaAgent:
                 initial_prompt_token_estimate=prompt_token_estimate,
                 memory_propose_context=memory_propose_context,
                 memory_recall_context=memory_recall_context,
+                debug=debug,
+            )
+            self._submit_feedback_attribution(
+                turn_context=agent_turn,
+                user_record=user_record,
+                user_message=user_message,
+                prompt_messages=messages,
+                loop_result=loop_result,
                 debug=debug,
             )
             llm_response = loop_result.response
@@ -781,6 +785,7 @@ class AlphaAgent:
         user_record: SessionMessage,
         user_message: str,
         prompt_messages: Sequence[ChatMessage],
+        loop_result: AgentLoopResult,
         debug: dict[str, Any],
     ) -> None:
         recalled_beliefs = recalled_beliefs_for_previous_turn(
@@ -805,6 +810,13 @@ class AlphaAgent:
             recall_tool_message_ids
         )
         debug["feedback_attribution_prompt_message_count"] = len(prompt_messages)
+        if any(
+            call.name == MEMORY_PROPOSE_TOOL_NAME
+            for call in loop_result.provider_tool_calls
+        ):
+            debug["feedback_attribution_submitted"] = False
+            debug["feedback_attribution_skip_reason"] = "memory_propose_called"
+            return
 
         submitter = self.feedback_attribution_submitter
         if submitter is None:

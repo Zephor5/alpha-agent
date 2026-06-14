@@ -91,6 +91,7 @@ from alpha_agent.tools.files import (
     FILE_WRITE_TOOL_NAME,
     FileGlobTool,
 )
+from alpha_agent.tools.memory_propose import MEMORY_PROPOSE_TOOL_NAME
 from alpha_agent.tools.memory_recall import MEMORY_RECALL_TOOL_NAME
 from alpha_agent.tools.registry import ToolRegistry
 from alpha_agent.utils.system_reminder import (
@@ -1399,6 +1400,37 @@ def test_feedback_attribution_submits_after_recall_bearing_turn(tmp_path) -> Non
     ]
 
 
+def test_feedback_attribution_skips_when_current_turn_calls_memory_propose(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    log = SQLiteEventLog(store)
+    _seed_active_belief(
+        store,
+        log,
+        "belief:python",
+        "User prefers Python examples.",
+        topic="python",
+    )
+    submitted: list[FeedbackAttributionJob] = []
+    provider = _MemoryRecallThenMemoryProposeProvider()
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        event_log=log,
+        feedback_attribution_submitter=submitted.append,
+    )
+
+    agent.respond("What examples do I prefer?", session_id="s1")
+    second = agent.respond("Actually I prefer TypeScript examples.", session_id="s1")
+
+    assert submitted == []
+    assert second.debug["feedback_attribution_submitted"] is False
+    assert second.debug["feedback_attribution_skip_reason"] == "memory_propose_called"
+    assert second.debug["feedback_attribution_recalled_belief_count"] == 1
+    assert MEMORY_PROPOSE_TOOL_NAME in provider.tool_names_seen[2]
+
+
 def test_feedback_attribution_skips_turns_without_prior_recall(tmp_path) -> None:
     store = _store(tmp_path)
     submitted: list[FeedbackAttributionJob] = []
@@ -2169,6 +2201,85 @@ class _MemoryRecallCallingProvider:
             )
         return LLMResponse(
             content="You prefer Python examples.",
+            model="test",
+            provider=self.name,
+        )
+
+
+class _MemoryRecallThenMemoryProposeProvider:
+    name = "memory-recall-then-memory-propose-provider"
+
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.calls: list[list[ChatMessage]] = []
+        self.tool_names_seen: list[list[str]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
+    ) -> LLMResponse:
+        del tool_choice, response_format
+        self.call_count += 1
+        self.calls.append([_copy_chat_message(message) for message in messages])
+        self.tool_names_seen.append([_tool_name(tool) for tool in tools or []])
+        if self.call_count == 1:
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_recall",
+                        name=MEMORY_RECALL_TOOL_NAME,
+                        arguments={
+                            "query": "what examples do I prefer?",
+                            "scope": "counterpart",
+                        },
+                        raw_arguments=(
+                            '{"query":"what examples do I prefer?",'
+                            '"scope":"counterpart"}'
+                        ),
+                    )
+                ],
+            )
+        if self.call_count == 3:
+            arguments = {
+                "updates": [
+                    {
+                        "operation": "append_distinct",
+                        "memory": {
+                            "type": "preference",
+                            "topic": "example language",
+                            "content": "User prefers TypeScript examples.",
+                            "evidence": "User said: Actually I prefer TypeScript examples.",
+                            "scope": "counterpart",
+                        },
+                        "target_hint": "example language preference",
+                        "reason": "User explicitly stated a new example-language preference.",
+                    }
+                ]
+            }
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_propose",
+                        name=MEMORY_PROPOSE_TOOL_NAME,
+                        arguments=arguments,
+                        raw_arguments=json.dumps(arguments, sort_keys=True),
+                    )
+                ],
+            )
+        return LLMResponse(
+            content="Updated preference.",
             model="test",
             provider=self.name,
         )
