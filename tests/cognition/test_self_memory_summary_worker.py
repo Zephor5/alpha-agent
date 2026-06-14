@@ -191,6 +191,8 @@ def test_self_memory_summary_worker_prompt_includes_output_schema_and_target(
     assert isinstance(instruction, str)
     assert '"operation": {' in instruction
     assert '"const": "create_summary_belief"' in instruction
+    assert '"const": "skip"' in instruction
+    assert '"reason"' in instruction
     assert '"summary_belief_draft"' in instruction
     assert '"summary_kind": {' in instruction
     assert '"const": "self_memory_summary"' in instruction
@@ -272,7 +274,6 @@ def _summary_json(content: str) -> str:
             "operation": "create_summary_belief",
             "authority": Authority.BACKGROUND_SYNTHESIZED.value,
             "rationale": "Fixture self-memory synthesis.",
-            "requires_confirmation": False,
             "source_span_note": "from selected self-memory sources",
             "payload": {
                 "summary_belief_draft": {

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -72,12 +72,13 @@ Allowed about references for newly created or superseding atomic drafts:
 {allowed_about_refs_json}
 
 Operation rules:
+- skip: write nothing when the draft is uncertain, noisy, not useful, or unsafe to
+  consolidate; include a short payload.reason.
 - create: accept a draft as a new consolidated atomic belief.
 - strengthen: reaffirm one active belief with corroborating evidence.
 - supersede: replace one active belief with a new consolidated atomic belief.
 - retract: mark one active belief retracted.
 - archive: mark one active belief archived.
-- pending-confirmation: create a pending atomic belief candidate for human confirmation.
 - Update-like operations must target one of the allowed belief ids above.
 - Do not include source ids, provenance, idempotency keys, generated ids, confidence,
   scores, or numeric strength fields.
@@ -85,12 +86,11 @@ Operation rules:
   topic phrase, not a sentence and not the full assertion in content.
 - Each draft content value must contain exactly one atomic assertion.
 - Do not write scope "self" for user-subject content such as "The user prefers
-  direct feedback"; use scope "counterpart" or pending-confirmation instead.
+  direct feedback"; use scope "counterpart" or skip it.
 - Do not write scope "global" for user profile content.
-- Keep uncertain imported drafts pending. If an imported draft is inferred from
-  assistant output, a single-turn technical request/question, inferred
-  capability, or historical temporary state, use pending-confirmation or set
-  requires_confirmation true; do not auto-activate it with create or supersede.
+- Skip uncertain imported drafts. If an imported draft is inferred from assistant
+  output, a single-turn technical request/question, inferred capability, or
+  historical temporary state, return skip instead of create or supersede.
 - Negative cases: sentence-like topic, multi-claim content, imported assistant
   answer as global knowledge, and imported assistant identity as Alpha self memory.
 
@@ -117,9 +117,9 @@ Allowed update target belief ids:
 Allowed about references for newly created or superseding atomic drafts:
 {allowed_about_refs_json}
 
-If resolving the conflict automatically is unsafe, use operation "pending-confirmation"
-and set requires_confirmation to true. Do not mutate active memory unless the conflict can
-be safely resolved from the supplied evidence. Do not include generated ids, source refs,
+Do not mutate active memory unless the conflict can be safely resolved from the
+supplied evidence. If resolving the conflict automatically is unsafe, return
+skip with a short payload.reason. Do not include generated ids, source refs,
 provenance, idempotency keys, confidence, scores, or numeric strength fields.
 New or superseding atomic_belief_draft payloads must include topic as a short
 topic phrase, not a sentence and not the full assertion in content.
@@ -333,13 +333,8 @@ class MemoryConsolidationWorker:
                 tool_choice="none",
                 response_format=JSON_OBJECT_RESPONSE_FORMAT,
             )
-            response_content = _harden_uncertain_import_consolidation_output(
-                response.content,
-                store=state_service.store,
-                candidate=candidate,
-            )
             written = state_service.accept_background_llm_json(
-                response_content,
+                response.content,
                 context,
                 window_id=window.window_id,
                 run_id=run.run_id,
@@ -373,7 +368,7 @@ class MemoryConsolidationWorker:
 
 
 class MemoryConflictReviewWorker:
-    """Review queued conflicts and persist only validated safe or pending outcomes."""
+    """Review queued conflicts and persist only validated safe outcomes."""
 
     name: ClassVar[str] = "memory_conflict_review"
 
@@ -832,43 +827,6 @@ def _belief_prompt_record(
         if source_time is not None:
             record["source_time_line"] = render_source_time_line(store, source_time)
     return record
-
-
-def _harden_uncertain_import_consolidation_output(
-    raw_output: str,
-    *,
-    store: StateStore,
-    candidate: _ConsolidationCandidate,
-) -> str:
-    try:
-        decoded = json.loads(raw_output)
-    except json.JSONDecodeError:
-        return raw_output
-    if not isinstance(decoded, Mapping):
-        return raw_output
-    operation = decoded.get("operation")
-    if operation not in {"create", "supersede"}:
-        return raw_output
-    if decoded.get("requires_confirmation") is True:
-        return raw_output
-    if not any(_has_import_source(store, draft) for draft in candidate.drafts):
-        return raw_output
-    hardened = dict(decoded)
-    hardened["requires_confirmation"] = True
-    return json.dumps(hardened, ensure_ascii=False, sort_keys=True)
-
-
-def _has_import_source(
-    store: StateStore,
-    draft: AtomicBelief,
-) -> bool:
-    message_ids = [ref.id for ref in draft.sources if ref.kind == "session_message"]
-    if not message_ids:
-        return False
-    return any(
-        store.is_import_session(message.session_id)
-        for message in store.list_session_messages_by_ids(message_ids)
-    )
 
 
 def _target_unit_for_belief(belief: AtomicBelief) -> str:

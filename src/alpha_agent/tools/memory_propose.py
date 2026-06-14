@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from alpha_agent.cognition.domain_guidance import memory_propose_requires_confirmation
 from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.models import (
     AtomicBelief,
@@ -56,13 +55,11 @@ _ALLOWED_SCOPES = frozenset({"counterpart", "global"})
 
 Decision = Literal[
     "accepted",
-    "pending_confirmation",
     "needs_target_selection",
     "rejected",
 ]
 MemoryStatus = Literal[
     "accepted",
-    "pending_confirmation",
     "needs_target_selection",
     "rejected",
     "mixed",
@@ -70,7 +67,6 @@ MemoryStatus = Literal[
 NextAction = Literal[
     "none",
     "review_candidates",
-    "ask_user_confirmation",
     "explain_rejection",
 ]
 _RESOLUTION_OPTIONS = (
@@ -227,7 +223,7 @@ class MemoryProposeTool:
         description=(
             "Propose explicit long-term memories. append_distinct adds a new memory "
             "after reviewed_candidate_ids; reinforce, replace, merge, and retract use "
-            "target_belief_ids; correct waits for confirmation. Not for transient facts, "
+            "target_belief_ids; correct applies a targeted correction. Not for transient facts, "
             "guesses, or tool summaries. Returns status and next_action."
         ),
         parameters={
@@ -397,7 +393,6 @@ class MemoryProposeTool:
                     errors=[*parsed.errors, "too_many_updates"],
                 )
             plan = _plan_update(parsed, memory_context)
-            plan = _apply_domain_guidance(parsed, memory_context, plan)
             result = _UpdateResult(
                 proposal_id=proposal_id,
                 update_index=index,
@@ -430,14 +425,6 @@ class MemoryProposeTool:
                 )
                 result.new_belief_id = emitted.new_belief_id
                 cognitive_event_ids.extend(emitted.event_ids)
-            elif plan.decision == "pending_confirmation":
-                pending = _apply_pending_update(
-                    context=memory_context,
-                    proposal_id=proposal_id,
-                    parsed=parsed,
-                    plan=plan,
-                )
-                result.new_belief_id = pending.new_belief_id
             results.append(result)
 
         status = _aggregate_status(results)
@@ -511,13 +498,18 @@ def _apply_accepted_update(
             audit=_state_audit("memory_propose_write", proposal_id, parsed, plan),
         )
         return _AcceptedEmission(event_ids=[], new_belief_id=str(belief.id))
-    if plan.operation == "replace":
+    if plan.operation in {"replace", "correct"}:
+        audit_kind = (
+            "memory_propose_correct"
+            if plan.operation == "correct"
+            else "memory_propose_replace"
+        )
         memory_state.supersede_atomic_beliefs(
             [plan.target_beliefs[0].id],
             belief,
             source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
             at=context.emitter.clock(),
-            audit=_state_audit("memory_propose_replace", proposal_id, parsed, plan),
+            audit=_state_audit(audit_kind, proposal_id, parsed, plan),
         )
         return _AcceptedEmission(event_ids=[], new_belief_id=str(belief.id))
     if plan.operation == "merge":
@@ -530,38 +522,6 @@ def _apply_accepted_update(
         )
         return _AcceptedEmission(event_ids=[], new_belief_id=str(belief.id))
     return _AcceptedEmission(event_ids=[])
-
-
-def _apply_pending_update(
-    *,
-    context: MemoryProposalContext,
-    proposal_id: str,
-    parsed: _ParsedUpdate,
-    plan: _OperationPlan,
-) -> _AcceptedEmission:
-    memory_state = context.memory_state
-    if memory_state is None or plan.memory is None:
-        return _AcceptedEmission(event_ids=[])
-    if plan.memory.scope == "counterpart" and context.counterpart is None:
-        return _AcceptedEmission(event_ids=[])
-    extra_sources = [Reference("belief", str(belief.id)) for belief in plan.target_beliefs]
-    belief = build_belief_from_memory_update(
-        memory=plan.memory,
-        proposal_id=proposal_id,
-        proposed_event_id="",
-        operation=plan.operation,
-        reason=parsed.reason,
-        context=context,
-        extra_sources=extra_sources,
-        lifecycle=BeliefLifecycle.PENDING_CONFIRMATION,
-    )
-    memory_state.write_atomic_belief(
-        belief,
-        source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
-        audit=_state_audit("memory_propose_pending", proposal_id, parsed, plan),
-    )
-    return _AcceptedEmission(event_ids=[], new_belief_id=str(belief.id))
-
 
 def build_belief_from_memory_update(
     *,
@@ -841,11 +801,19 @@ def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _Oper
             memory=parsed.memory,
         )
     if parsed.operation == "correct":
-        if target_check.target_beliefs:
+        if len(target_check.target_beliefs) == 1:
             return _OperationPlan(
-                decision="pending_confirmation",
+                decision="accepted",
                 operation="correct",
-                reason="correct_requires_confirmation",
+                reason="accepted_correct",
+                target_beliefs=target_check.target_beliefs,
+                memory=parsed.memory,
+            )
+        if len(target_check.target_beliefs) > 1:
+            return _OperationPlan(
+                decision="rejected",
+                operation="correct",
+                reason="correct_requires_exactly_one_target",
                 target_beliefs=target_check.target_beliefs,
                 memory=parsed.memory,
             )
@@ -859,9 +827,9 @@ def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _Oper
                 memory=parsed.memory,
             )
         return _OperationPlan(
-            decision="pending_confirmation",
+            decision="rejected",
             operation="correct",
-            reason="correct_requires_confirmed_target",
+            reason="correct_requires_target",
             memory=parsed.memory,
         )
     if parsed.operation == "retract":
@@ -874,7 +842,7 @@ def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _Oper
             )
         if not parsed.evidence:
             return _OperationPlan(
-                decision="pending_confirmation",
+                decision="rejected",
                 operation="retract",
                 reason="retract_requires_evidence",
                 target_beliefs=target_check.target_beliefs,
@@ -893,27 +861,6 @@ def _plan_update(parsed: _ParsedUpdate, context: MemoryProposalContext) -> _Oper
         reason="invalid_operation",
         memory=parsed.memory,
     )
-
-
-def _apply_domain_guidance(
-    parsed: _ParsedUpdate,
-    context: MemoryProposalContext,
-    plan: _OperationPlan,
-) -> _OperationPlan:
-    del parsed
-    if plan.decision != "accepted" or context.belief_projection is None:
-        return plan
-    if not memory_propose_requires_confirmation(
-        context.belief_projection,
-        counterpart=context.counterpart,
-    ):
-        return plan
-    return replace(
-        plan,
-        decision="pending_confirmation",
-        reason="domain_guidance_requires_confirmation",
-    )
-
 
 def _plan_append_distinct(
     parsed: _ParsedUpdate,
@@ -1404,8 +1351,6 @@ def _aggregate_status(results: list[_UpdateResult]) -> MemoryStatus:
 
 def _aggregate_next_action(results: list[_UpdateResult]) -> NextAction:
     decisions = {result.decision for result in results}
-    if "pending_confirmation" in decisions:
-        return "ask_user_confirmation"
     if "needs_target_selection" in decisions:
         return "review_candidates"
     if "rejected" in decisions:

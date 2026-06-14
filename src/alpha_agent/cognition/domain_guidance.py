@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
 
 from alpha_agent.cognition.models import (
     BeliefScope,
@@ -46,23 +45,6 @@ def active_domain_guidance(
     return routed
 
 
-def memory_propose_requires_confirmation(
-    projection: BeliefProjection,
-    *,
-    counterpart: Reference | None,
-) -> bool:
-    """Return whether active memory_propose guidance requires confirmation."""
-
-    return any(
-        _requires_confirmation(item.belief)
-        for item in active_domain_guidance(
-            projection,
-            target_domain="memory_propose",
-            counterpart=counterpart,
-        )
-    )
-
-
 def summary_target_domain(summary: SummaryBelief) -> str | None:
     """Read the optional summary target domain from structured summary metadata."""
 
@@ -97,23 +79,8 @@ def _is_expired(summary: SummaryBelief, *, now: datetime | None) -> bool:
     return parsed < (now or datetime.now(UTC))
 
 
-def _requires_confirmation(summary: SummaryBelief) -> bool:
-    structure = summary.structure if isinstance(summary.structure, dict) else {}
-    memory_propose = structure.get("memory_propose")
-    if isinstance(memory_propose, dict) and _bool_value(
-        memory_propose.get("requires_confirmation")
-    ):
-        return True
-    return _bool_value(structure.get("requires_confirmation"))
-
-
-def _bool_value(value: Any) -> bool:
-    return isinstance(value, bool) and value
-
-
 __all__ = [
     "DomainGuidance",
     "active_domain_guidance",
-    "memory_propose_requires_confirmation",
     "summary_target_domain",
 ]

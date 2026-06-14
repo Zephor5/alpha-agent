@@ -58,7 +58,6 @@ class Authority(StrEnum):
 class BeliefLifecycle(StrEnum):
     """Lifecycle state for a belief entity."""
 
-    PENDING_CONFIRMATION = "pending_confirmation"
     ACTIVE = "active"
     SUPERSEDED = "superseded"
     RETRACTED = "retracted"

@@ -293,7 +293,7 @@ def test_memory_propose_replace_supersedes_directly_without_belief_event(tmp_pat
     assert tool_output["results"][0]["reason"] == "accepted_replace"
 
 
-def test_memory_propose_correct_pending_writes_pending_atomic_belief(tmp_path) -> None:
+def test_memory_propose_correct_supersedes_target_directly(tmp_path) -> None:
     store = _store(tmp_path)
     target = _append_memory(
         store,
@@ -324,24 +324,29 @@ def test_memory_propose_correct_pending_writes_pending_atomic_belief(tmp_path) -
     )
 
     projection = BeliefProjection(store)
-    assert [item.id for item in projection.list_active()] == [target.id]
+    active = projection.list_active()
+    assert len(active) == 1
+    assert active[0].id != target.id
+    assert active[0].content == "User prefers Rust examples."
     events = list(SQLiteEventLog(store).iter())
     proposed = [event for event in events if event.kind == CognitiveEventKind.MEMORY_PROPOSED]
     assert proposed[-1].payload["gate"] == {
-        "decision": "pending_confirmation",
-        "reason": "correct_requires_confirmation",
+        "decision": "accepted",
+        "reason": "accepted_correct",
     }
     tool_output = json.loads(store.list_session_messages("s1")[-2].raw_content)
-    assert tool_output["status"] == "pending_confirmation"
-    assert tool_output["next_action"] == "ask_user_confirmation"
-    pending_id = tool_output["results"][0]["new_belief_id"]
-    pending = projection.get_by_id(pending_id)
-    assert isinstance(pending, AtomicBelief)
-    assert pending.lifecycle == BeliefLifecycle.PENDING_CONFIRMATION
-    assert pending.content == "User prefers Rust examples."
-    assert pending.memory_kind == MemoryKind.PREFERENCE
-    assert pending.scope == BeliefScope.COUNTERPART
-    assert [item.id for item in projection.list_active()] == [target.id]
+    assert tool_output["status"] == "accepted"
+    assert tool_output["next_action"] == "none"
+    replacement_id = tool_output["results"][0]["new_belief_id"]
+    replacement = projection.get_by_id(replacement_id)
+    assert isinstance(replacement, AtomicBelief)
+    assert replacement.lifecycle == BeliefLifecycle.ACTIVE
+    assert replacement.content == "User prefers Rust examples."
+    assert replacement.memory_kind == MemoryKind.PREFERENCE
+    assert replacement.scope == BeliefScope.COUNTERPART
+    superseded = projection.get_by_id(target.id)
+    assert isinstance(superseded, AtomicBelief)
+    assert superseded.lifecycle == BeliefLifecycle.SUPERSEDED
 
 
 def test_memory_propose_rejects_summary_belief_targets_cleanly(tmp_path) -> None:
@@ -383,7 +388,7 @@ def test_memory_propose_rejects_summary_belief_targets_cleanly(tmp_path) -> None
 @pytest.mark.parametrize(
     ("target_domain", "valid_until", "expected_status", "expected_reason"),
     [
-        ("memory_propose", None, "pending_confirmation", "domain_guidance_requires_confirmation"),
+        ("memory_propose", None, "accepted", "accepted_append_distinct"),
         ("memory_propose", "2020-01-01T00:00:00+00:00", "accepted", "accepted_append_distinct"),
         ("memory_recall", None, "accepted", "accepted_append_distinct"),
     ],
@@ -429,12 +434,7 @@ def test_memory_propose_applies_only_active_matching_domain_summary_guidance(
     assert tool_output["results"][0]["reason"] == expected_reason
     written = projection.get_by_id(tool_output["results"][0]["new_belief_id"])
     assert isinstance(written, AtomicBelief)
-    expected_lifecycle = (
-        BeliefLifecycle.PENDING_CONFIRMATION
-        if expected_status == "pending_confirmation"
-        else BeliefLifecycle.ACTIVE
-    )
-    assert written.lifecycle == expected_lifecycle
+    assert written.lifecycle == BeliefLifecycle.ACTIVE
 
 
 def test_memory_propose_noops_without_reactive_write_context(tmp_path) -> None:
@@ -530,14 +530,14 @@ def _domain_summary(
         subject=Reference("subject", "subject:self"),
         about=[],
         topic="memory proposal domain guidance",
-        content=NLStatement("Memory proposal guidance requires confirmation."),
+        content=NLStatement("Memory proposal domain guidance."),
         summary_kind=SummaryKind.DOMAIN_SUMMARY,
         derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
         scope=BeliefScope.GLOBAL,
         authority=Authority.BACKGROUND_SYNTHESIZED,
         structure={
             "target_domain": target_domain,
-            "memory_propose": {"requires_confirmation": True},
+            "memory_propose": {"policy": "direct_accept"},
         },
         validity=ValidityWindow(
             observed_at=Instant("2026-01-01T00:00:00+00:00"),

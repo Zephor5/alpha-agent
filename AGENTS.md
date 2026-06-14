@@ -40,7 +40,7 @@ src/
       background_llm_contract.py JSON schemas and validators for LLM-mediated extraction, consolidation, summaries, and feedback attribution.
       controller.py   Default cognition projection registry construction.
       coordinator.py  LoopCoordinator lock, priority, yield, and lease control for cognition loops.
-      domain_guidance.py Active summary-derived guidance and memory proposal confirmation policy.
+      domain_guidance.py Active summary-derived guidance routing.
       emitter.py      Cognitive event emission helpers.
       payload_contract.py Fail-fast validation for consumed cognition event payload fields.
       processing_ledger.py Background source/window/stage ledger, status tracking, idempotency keys, and recovery helpers.

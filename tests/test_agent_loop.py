@@ -1937,7 +1937,6 @@ def _summary_json(
             "operation": "create_summary_belief",
             "authority": "background_synthesized",
             "rationale": "Fixture summary synthesis.",
-            "requires_confirmation": False,
             "source_span_note": "from selected summary sources",
             "payload": {"summary_belief_draft": summary_draft},
         },

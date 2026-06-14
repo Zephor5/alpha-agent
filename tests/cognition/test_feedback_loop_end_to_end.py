@@ -486,7 +486,6 @@ def _background_llm_json(
             "operation": operation,
             "payload": payload,
             "rationale": "Fixture conflict review decision.",
-            "requires_confirmation": False,
             "source_span_note": "from user correction feedback",
         },
         sort_keys=True,

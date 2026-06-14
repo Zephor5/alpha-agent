@@ -37,12 +37,12 @@ def test_domain_summary_worker_writes_llm_synthesized_summary_with_target_identi
     service = CognitionStateStore(store)
     first = _consolidated_belief(
         "belief:domain-memory-propose-1",
-        "Memory proposal confirmation required for remembered preferences.",
+        "Memory proposal direct acceptance applies to remembered preferences.",
         target_domain="memory_propose",
     )
     second = _consolidated_belief(
         "belief:domain-memory-propose-2",
-        "Memory proposal confirmation required before changing constraints.",
+        "Memory proposal direct acceptance applies before changing constraints.",
         target_domain="memory_propose",
     )
     service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
@@ -52,10 +52,10 @@ def test_domain_summary_worker_writes_llm_synthesized_summary_with_target_identi
             summary_kind=SummaryKind.DOMAIN_SUMMARY,
             scope=BeliefScope.GLOBAL,
             about=[],
-            content="Memory proposal confirmation required.",
+            content="Memory proposal direct acceptance applies.",
             structure={
                 "target_domain": "memory_propose",
-                "memory_propose": {"requires_confirmation": True},
+                "memory_propose": {"policy": "direct_accept"},
             },
         )
     )
@@ -75,10 +75,10 @@ def test_domain_summary_worker_writes_llm_synthesized_summary_with_target_identi
         scope=BeliefScope.GLOBAL,
     )
     assert summary is not None
-    assert summary.content == "Memory proposal confirmation required."
+    assert summary.content == "Memory proposal direct acceptance applies."
     assert summary.derivation_stage == DerivationStage.BACKGROUND_SUMMARIZED
     assert summary.structure == {
-        "memory_propose": {"requires_confirmation": True},
+        "memory_propose": {"policy": "direct_accept"},
         "target_domain": "memory_propose",
     }
     assert summary_target_domain(summary) == "memory_propose"
@@ -99,12 +99,12 @@ def test_domain_summary_worker_runs_invalidated_source_gate(tmp_path) -> None:
     service = CognitionStateStore(store)
     old_source = _consolidated_belief(
         "belief:domain-memory-propose-old",
-        "Memory proposal confirmation required for obsolete guidance.",
+        "Memory proposal direct acceptance applies to obsolete guidance.",
         target_domain="memory_propose",
     )
     current_source = _consolidated_belief(
         "belief:domain-memory-propose-current",
-        "Memory proposal confirmation required for current guidance.",
+        "Memory proposal direct acceptance applies to current guidance.",
         target_domain="memory_propose",
     )
     service.write_atomic_belief(old_source, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
@@ -129,10 +129,10 @@ def test_domain_summary_worker_runs_invalidated_source_gate(tmp_path) -> None:
             summary_kind=SummaryKind.DOMAIN_SUMMARY,
             scope=BeliefScope.GLOBAL,
             about=[],
-            content="Memory proposal confirmation required.",
+            content="Memory proposal direct acceptance applies.",
             structure={
                 "target_domain": "memory_propose",
-                "memory_propose": {"requires_confirmation": True},
+                "memory_propose": {"policy": "direct_accept"},
             },
         )
     )
@@ -153,7 +153,7 @@ def test_domain_summary_worker_runs_invalidated_source_gate(tmp_path) -> None:
         scope=BeliefScope.GLOBAL,
     )
     assert latest is not None
-    assert latest.content == "Memory proposal confirmation required."
+    assert latest.content == "Memory proposal direct acceptance applies."
 
 
 def test_domain_summary_worker_gate_ignores_source_and_holding_time_when_sources_unchanged(
@@ -163,13 +163,13 @@ def test_domain_summary_worker_gate_ignores_source_and_holding_time_when_sources
     service = CognitionStateStore(store)
     first = _consolidated_belief(
         "belief:domain-memory-propose-1",
-        "Memory proposal confirmation required for remembered preferences.",
+        "Memory proposal direct acceptance applies to remembered preferences.",
         target_domain="memory_propose",
         held_since="2026-06-12T00:00:00+00:00",
     )
     second = _consolidated_belief(
         "belief:domain-memory-propose-2",
-        "Memory proposal confirmation required before changing constraints.",
+        "Memory proposal direct acceptance applies before changing constraints.",
         target_domain="memory_propose",
         held_since="2026-06-12T01:00:00+00:00",
     )
@@ -187,10 +187,10 @@ def test_domain_summary_worker_gate_ignores_source_and_holding_time_when_sources
             summary_kind=SummaryKind.DOMAIN_SUMMARY,
             scope=BeliefScope.GLOBAL,
             about=[],
-            content="Memory proposal confirmation required.",
+            content="Memory proposal direct acceptance applies.",
             structure={
                 "target_domain": "memory_propose",
-                "memory_propose": {"requires_confirmation": True},
+                "memory_propose": {"policy": "direct_accept"},
             },
         )
     )
@@ -220,26 +220,26 @@ def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) ->
         session_id="s1",
         kind="user_message",
         llm_role="user",
-        raw_content="Memory proposal confirmation required for remembered preferences.",
+        raw_content="Memory proposal direct acceptance applies to remembered preferences.",
         created_at="2026-06-12T01:00:00+00:00",
     )
     second_source = store.append_session_message(
         session_id="s1",
         kind="user_message",
         llm_role="user",
-        raw_content="Memory proposal confirmation required before changing constraints.",
+        raw_content="Memory proposal direct acceptance applies before changing constraints.",
         created_at="2026-06-12T01:17:00+00:00",
     )
     first = _consolidated_belief(
         "belief:domain-memory-propose-1",
-        "Memory proposal confirmation required for remembered preferences.",
+        "Memory proposal direct acceptance applies to remembered preferences.",
         target_domain="memory_propose",
         sources=[Reference("session_message", first_source.id)],
         held_since="2026-06-12T02:00:00+00:00",
     )
     second = _consolidated_belief(
         "belief:domain-memory-propose-2",
-        "Memory proposal confirmation required before changing constraints.",
+        "Memory proposal direct acceptance applies before changing constraints.",
         target_domain="memory_propose",
         sources=[Reference("session_message", second_source.id)],
         held_since="2026-06-12T02:17:00+00:00",
@@ -251,10 +251,10 @@ def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) ->
             summary_kind=SummaryKind.DOMAIN_SUMMARY,
             scope=BeliefScope.GLOBAL,
             about=[],
-            content="Memory proposal confirmation required.",
+            content="Memory proposal direct acceptance applies.",
             structure={
                 "target_domain": "memory_propose",
-                "memory_propose": {"requires_confirmation": True},
+                "memory_propose": {"policy": "direct_accept"},
             },
         )
     )
@@ -298,13 +298,13 @@ def test_domain_summary_worker_uses_scope_owner_refs_for_target_identity(
     incidental_entity = Reference("entity", "python")
     first = _consolidated_belief(
         "belief:domain-global-1",
-        "Memory proposal confirmation required for Python preferences.",
+        "Memory proposal direct acceptance applies to Python preferences.",
         target_domain="memory_propose",
         about=[incidental_entity],
     )
     second = _consolidated_belief(
         "belief:domain-global-2",
-        "Memory proposal confirmation required for Python constraints.",
+        "Memory proposal direct acceptance applies to Python constraints.",
         target_domain="memory_propose",
         about=[incidental_entity],
     )
@@ -315,10 +315,10 @@ def test_domain_summary_worker_uses_scope_owner_refs_for_target_identity(
             summary_kind=SummaryKind.DOMAIN_SUMMARY,
             scope=BeliefScope.GLOBAL,
             about=[],
-            content="Memory proposal confirmation required.",
+            content="Memory proposal direct acceptance applies.",
             structure={
                 "target_domain": "memory_propose",
-                "memory_propose": {"requires_confirmation": True},
+                "memory_propose": {"policy": "direct_accept"},
             },
         )
     )
@@ -382,14 +382,14 @@ def _domain_summary_belief(
         subject=Reference("subject", "subject:self"),
         about=[],
         topic="memory proposal domain guidance",
-        content=NLStatement("Old memory proposal confirmation guidance."),
+        content=NLStatement("Old memory proposal direct-accept guidance."),
         summary_kind=SummaryKind.DOMAIN_SUMMARY,
         derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
         scope=BeliefScope.GLOBAL,
         authority=Authority.BACKGROUND_SYNTHESIZED,
         structure={
             "target_domain": "memory_propose",
-            "memory_propose": {"requires_confirmation": True},
+            "memory_propose": {"policy": "direct_accept"},
         },
         source_belief_ids=source_belief_ids,
         validity=ValidityWindow(observed_at=Instant("2026-01-01T00:00:00+00:00")),
@@ -436,7 +436,6 @@ def _summary_json(
             "operation": "create_summary_belief",
             "authority": Authority.BACKGROUND_SYNTHESIZED.value,
             "rationale": "Fixture domain guidance synthesis.",
-            "requires_confirmation": False,
             "source_span_note": "from selected consolidated memories",
             "payload": {
                 "summary_belief_draft": {

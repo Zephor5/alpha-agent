@@ -78,6 +78,8 @@ confidence, scores, or numeric strength fields. Preserve the selected summary ta
 For domain summaries, structure.target_domain is required and must match the selected target.
 topic is required and must be a short topic phrase, not a sentence and not the
 full assertion in content.
+If the selected memories are uncertain, noisy, duplicative, or not useful enough for a
+summary update, return skip with a short payload.reason instead of omitting output.
 Use source_time_line as evidence time when present. held_since is Alpha holding time,
 not evidence time. Do not present old source evidence as newly updated evidence.
 
@@ -447,17 +449,18 @@ def _summary_targets(
         )
         if gate is None:
             continue
-        targets.append(
-            _build_summary_target(
-                summary_kind=summary_kind,
-                scope=scope,
-                about=about,
-                target_domain=domain,
-                source_beliefs=source_beliefs,
-                active_summary=active_summary,
-                gate=gate,
-            )
+        target = _build_summary_target(
+            summary_kind=summary_kind,
+            scope=scope,
+            about=about,
+            target_domain=domain,
+            source_beliefs=source_beliefs,
+            active_summary=active_summary,
+            gate=gate,
         )
+        if _summary_window_processed(state_service, target):
+            continue
+        targets.append(target)
     targets.sort(key=lambda item: item.target_unit)
     return targets
 
@@ -615,6 +618,21 @@ def _build_summary_target(
         target_unit=target_unit,
         source_text=_render_source_text(source_beliefs),
         metadata=metadata,
+    )
+
+
+def _summary_window_processed(
+    state_service: CognitionStateStore,
+    target: _SummaryTarget,
+) -> bool:
+    idempotency_key = _target_idempotency_key(target)
+    return any(
+        window.idempotency_key == idempotency_key
+        for window in state_service.ledger.list_source_windows(
+            stage=BackgroundStage.SUMMARY,
+            target_unit=target.target_unit,
+            status=BackgroundProgressStatus.PROCESSED,
+        )
     )
 
 

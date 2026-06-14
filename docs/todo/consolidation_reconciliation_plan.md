@@ -33,7 +33,7 @@ Implementation:
 - Add a `consolidation_plan` operation for consolidation-stage LLM output.
 - Add `payload.decisions` as a non-empty array.
 - Define decision variants for `create`, `strengthen`, `supersede`, `retract`,
-  `archive`, `drop_as_noise`, and `pending-confirmation`.
+  `archive`, and `drop_as_noise`.
 - Require each decision to include `source_draft_ids`.
 - Require update-like decisions to include validated `target_belief_ids`.
 - Require create-like decisions to include one id-less `atomic_belief_draft`.
@@ -302,7 +302,6 @@ Implementation:
 - Reaffirm targets for strengthen decisions.
 - Supersede targets for supersede decisions.
 - Mark target lifecycle for retract and archive decisions.
-- Write confirmation records for pending-confirmation decisions.
 - Record drop-as-noise decisions through audit and source progress.
 - Collect output refs for all written or updated beliefs.
 
@@ -312,7 +311,6 @@ Acceptance criteria:
 - [ ] A failed decision rolls back the whole plan.
 - [ ] Output refs include all written or updated belief refs.
 - [ ] Drop-as-noise decisions consume source drafts through audit-only records.
-- [ ] Confirmation-required decisions write auditable pending records.
 
 Verification:
 
@@ -363,7 +361,6 @@ Implementation:
   belief.
 - Add tests for a plan that supersedes one active belief.
 - Add tests for a plan that drops one source draft as noise.
-- Add tests for a plan that routes one source draft to pending confirmation.
 - Add tests for transactional rollback on invalid target lifecycle.
 
 Acceptance criteria:
@@ -371,7 +368,6 @@ Acceptance criteria:
 - [ ] Multi-decision plan writes expected beliefs and source progress.
 - [ ] Supersede plan archives the target and writes the replacement.
 - [ ] Drop-as-noise plan records audit-only source draft consumption.
-- [ ] Pending confirmation plan writes auditable confirmation state.
 - [ ] Invalid mixed plan rolls back all decisions.
 
 Verification:

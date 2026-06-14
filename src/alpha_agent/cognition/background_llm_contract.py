@@ -36,16 +36,16 @@ _SUPPORTED_OPERATIONS = frozenset(
         "supersede",
         "retract",
         "archive",
-        "pending-confirmation",
-        "pending_confirmation",
+        "skip",
     }
 )
 _EXTRACTION_OPERATION = "create_atomic_belief"
 _EXTRACTION_PAYLOAD_KEYS = frozenset({"atomic_belief_drafts"})
+_SKIP_OPERATION = "skip"
+_SKIP_PAYLOAD_KEYS = frozenset({"reason"})
 _SEMANTIC_OPERATIONS = frozenset(
-    {"create", "strengthen", "supersede", "retract", "archive", "pending-confirmation"}
+    {"create", "strengthen", "supersede", "retract", "archive", _SKIP_OPERATION}
 )
-_SEMANTIC_OPERATION_ALIASES = {"pending_confirmation": "pending-confirmation"}
 _FEEDBACK_ATTRIBUTION_VERDICTS = frozenset(
     {"confirmed", "contradicted", "corrected", "irrelevant"}
 )
@@ -140,6 +140,8 @@ _SUMMARY_DRAFT_KEYS = frozenset(
 _SUMMARY_SCHEDULING_UPDATE_POLICY_KEYS = frozenset(
     {"target_domain", "target_domains"}
 )
+
+
 def extraction_output_json_schema() -> dict[str, Any]:
     """Return the LLM-facing JSON schema for extraction-stage outputs."""
 
@@ -166,6 +168,10 @@ def consolidation_output_json_schema(
     atomic_payload = _payload_schema({"atomic_belief_draft": _atomic_belief_draft_schema()})
     return {
         "oneOf": [
+            _background_output_schema(
+                operation=_SKIP_OPERATION,
+                payload_schema=_skip_payload_schema(),
+            ),
             _background_output_schema(operation="create", payload_schema=atomic_payload),
             _background_output_schema(
                 operation="strengthen",
@@ -191,11 +197,6 @@ def consolidation_output_json_schema(
                     operation="archive",
                     allowed_target_belief_ids=target_ids,
                 ),
-            ),
-            _background_output_schema(
-                operation="pending-confirmation",
-                payload_schema=atomic_payload,
-                requires_confirmation=True,
             ),
         ]
     }
@@ -225,10 +226,18 @@ def summary_output_json_schema(
         structure_schema=structure_schema,
         required=required,
     )
-    return _background_output_schema(
-        operation="create_summary_belief",
-        payload_schema=_payload_schema({"summary_belief_draft": summary_draft}),
-    )
+    return {
+        "oneOf": [
+            _background_output_schema(
+                operation="create_summary_belief",
+                payload_schema=_payload_schema({"summary_belief_draft": summary_draft}),
+            ),
+            _background_output_schema(
+                operation=_SKIP_OPERATION,
+                payload_schema=_skip_payload_schema(),
+            ),
+        ]
+    }
 
 
 def feedback_attribution_output_json_schema() -> dict[str, Any]:
@@ -287,13 +296,7 @@ def _background_output_schema(
     *,
     operation: str,
     payload_schema: dict[str, Any],
-    requires_confirmation: bool | None = None,
 ) -> dict[str, Any]:
-    requires_confirmation_schema: dict[str, Any] = (
-        {"type": "boolean"}
-        if requires_confirmation is None
-        else {"const": requires_confirmation}
-    )
     return {
         "type": "object",
         "additionalProperties": False,
@@ -301,14 +304,12 @@ def _background_output_schema(
             "operation",
             "authority",
             "rationale",
-            "requires_confirmation",
             "payload",
         ],
         "properties": {
             "operation": {"const": operation},
             "authority": {"const": Authority.BACKGROUND_SYNTHESIZED.value},
             "rationale": {"type": "string", "minLength": 1},
-            "requires_confirmation": requires_confirmation_schema,
             "source_span_note": {"type": ["string", "null"]},
             "payload": payload_schema,
         },
@@ -322,6 +323,18 @@ def _payload_schema(properties: dict[str, Any]) -> dict[str, Any]:
         "required": list(properties),
         "properties": properties,
     }
+
+
+def _skip_payload_schema() -> dict[str, Any]:
+    return _payload_schema(
+        {
+            "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+            }
+        }
+    )
 
 
 def _atomic_belief_draft_schema() -> dict[str, Any]:
@@ -565,7 +578,6 @@ class ValidatedBackgroundLLMOutput:
     operation: str
     authority: Authority
     rationale: str
-    requires_confirmation: bool
     source_span_note: str | None
     payloads: tuple[ValidatedPayload, ...]
 
@@ -695,6 +707,7 @@ def validate_background_llm_output(
     _reject_numeric_strength_fields(output)
     _reject_forbidden_provenance_keys(output)
     _reject_prompt_injection(output)
+    _validate_background_output_keys(output)
 
     operation = _canonical_operation(_required_str(output, "operation"))
     if operation not in _SUPPORTED_OPERATIONS:
@@ -708,9 +721,6 @@ def validate_background_llm_output(
         raise BackgroundLLMValidationError(f"authority overclaim: {exc}") from exc
 
     rationale = _required_str(output, "rationale")
-    requires_confirmation = output.get("requires_confirmation")
-    if not isinstance(requires_confirmation, bool):
-        raise BackgroundLLMValidationError("requires_confirmation must be a boolean")
     source_span_note = output.get("source_span_note")
     if source_span_note is not None and not isinstance(source_span_note, str):
         raise BackgroundLLMValidationError("source_span_note must be a string when provided")
@@ -725,7 +735,6 @@ def validate_background_llm_output(
         operation=operation,
         authority=authority,
         rationale=rationale,
-        requires_confirmation=requires_confirmation,
         source_span_note=source_span_note,
         payloads=payloads,
     )
@@ -747,7 +756,10 @@ def _validate_payloads(
         return (_validate_summary_draft(payload.get("profile_summary_candidate"), context),)
     if operation == "update_belief":
         return (_validate_belief_update(payload.get("belief_update"), context, operation),)
-    if operation in {"create", "pending-confirmation"}:
+    if operation == _SKIP_OPERATION:
+        _validate_skip_payload(payload)
+        return ()
+    if operation == "create":
         return (_validate_atomic_draft(payload.get("atomic_belief_draft"), context),)
     if operation == "supersede":
         return (
@@ -802,20 +814,28 @@ def _validate_consolidation_stage_output_shape(
     if operation not in _SEMANTIC_OPERATIONS:
         raise BackgroundLLMValidationError(
             "consolidation stages accept only semantic operations: create, strengthen, "
-            "supersede, retract, archive, pending-confirmation"
+            "supersede, retract, archive, skip"
         )
     keys = {str(key) for key in payload}
-    if operation in {"create", "pending-confirmation"}:
-        expected = {"atomic_belief_draft"}
+    expected: frozenset[str]
+    if operation == _SKIP_OPERATION:
+        expected = _SKIP_PAYLOAD_KEYS
+    elif operation == "create":
+        expected = frozenset({"atomic_belief_draft"})
     elif operation in {"strengthen", "retract", "archive"}:
-        expected = {"belief_update"}
+        expected = frozenset({"belief_update"})
     else:
-        expected = {"belief_update", "atomic_belief_draft"}
+        expected = frozenset({"belief_update", "atomic_belief_draft"})
     if keys != expected:
         expected_text = ", ".join(sorted(expected))
         raise BackgroundLLMValidationError(
             f"{operation} payload must contain exactly: {expected_text}"
         )
+
+
+def _validate_background_output_keys(output: Mapping[str, Any]) -> None:
+    allowed = frozenset({"operation", "authority", "rationale", "source_span_note", "payload"})
+    _validate_allowed_keys(output, allowed, "background LLM output")
 
 
 def _validate_summary_stage_output_shape(
@@ -823,13 +843,17 @@ def _validate_summary_stage_output_shape(
     operation: str,
     payload: Mapping[str, Any],
 ) -> None:
+    expected: frozenset[str]
     if operation == "create_summary_belief":
-        expected = {"summary_belief_draft"}
+        expected = frozenset({"summary_belief_draft"})
     elif operation == "profile_summary_candidate":
-        expected = {"profile_summary_candidate"}
+        expected = frozenset({"profile_summary_candidate"})
+    elif operation == _SKIP_OPERATION:
+        expected = _SKIP_PAYLOAD_KEYS
     else:
         raise BackgroundLLMValidationError(
-            "summary stage accepts only create_summary_belief outputs"
+            "summary stage accepts only create_summary_belief, "
+            "profile_summary_candidate, or skip outputs"
         )
     keys = {str(key) for key in payload}
     if keys != expected:
@@ -837,6 +861,13 @@ def _validate_summary_stage_output_shape(
         raise BackgroundLLMValidationError(
             f"{operation} payload must contain exactly: {expected_text}"
         )
+
+
+def _validate_skip_payload(payload: Mapping[str, Any]) -> None:
+    _validate_exact_keys(payload, set(_SKIP_PAYLOAD_KEYS), "skip payload")
+    reason = _required_str(payload, "reason")
+    if len(reason) > 256:
+        raise BackgroundLLMValidationError("skip reason must be at most 256 characters")
 
 
 def _validate_atomic_draft(
@@ -969,7 +1000,7 @@ def _validate_belief_update(
 
 
 def _canonical_operation(operation: str) -> str:
-    return _SEMANTIC_OPERATION_ALIASES.get(operation, operation)
+    return operation
 
 
 def _validate_scope_about(

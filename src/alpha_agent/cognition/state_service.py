@@ -534,7 +534,6 @@ class CognitionStateStore:
                 belief = self._atomic_belief_from_draft(
                     payload,
                     authority=validated.authority,
-                    requires_confirmation=validated.requires_confirmation,
                     context=context,
                     run_id=run_id,
                     now=now,
@@ -559,7 +558,6 @@ class CognitionStateStore:
                 summary_belief = self._summary_belief_from_draft(
                     payload,
                     authority=validated.authority,
-                    requires_confirmation=validated.requires_confirmation,
                     context=context,
                     run_id=run_id,
                     now=now,
@@ -593,6 +591,9 @@ class CognitionStateStore:
         conn: sqlite3.Connection,
     ) -> tuple[list[BeliefRecord], list[BackgroundSourceRef]]:
         operation = validated.operation
+        if operation == "skip":
+            return [], []
+
         updates = [
             payload for payload in validated.payloads if isinstance(payload, ValidatedBeliefUpdate)
         ]
@@ -605,18 +606,14 @@ class CognitionStateStore:
             self._require_active_atomic_target(update.target_belief_id, conn=conn)
             for update in updates
         ]
-        requires_confirmation = (
-            validated.requires_confirmation or operation == "pending-confirmation"
-        )
         written: list[BeliefRecord] = []
         output_refs: list[BackgroundSourceRef] = []
         protected_source_ids = {str(target.id) for target in targets}
 
-        if operation in {"create", "pending-confirmation"}:
+        if operation == "create":
             belief = self._atomic_belief_from_draft(
                 drafts[0],
                 authority=validated.authority,
-                requires_confirmation=requires_confirmation,
                 context=context,
                 run_id=run_id,
                 now=now,
@@ -630,67 +627,41 @@ class CognitionStateStore:
             written.append(belief)
             output_refs.append(BackgroundSourceRef("atomic_belief", str(belief.id)))
         elif operation == "strengthen":
-            if not requires_confirmation:
-                updated = self.reaffirm_atomic_belief(
-                    targets[0].id,
-                    sources=_program_attached_sources(context, run_id=run_id),
-                    observed_at=now,
-                    audit=_background_operation_audit(
-                        validated,
-                        window_id=window_id,
-                        run_id=run_id,
-                    ),
-                    conn=conn,
-                )
-                if updated is not None:
-                    written.append(updated)
-                    output_refs.append(BackgroundSourceRef("atomic_belief", str(updated.id)))
-            else:
-                self._write_optional_audit(
-                    conn,
-                    _background_operation_audit(
-                        validated,
-                        window_id=window_id,
-                        run_id=run_id,
-                    ),
-                    default_kind="background_consolidation_confirmation_required",
-                    entity_refs=(Reference("belief", str(targets[0].id)),),
-                )
-                output_refs.append(BackgroundSourceRef("atomic_belief", str(targets[0].id)))
+            updated = self.reaffirm_atomic_belief(
+                targets[0].id,
+                sources=_program_attached_sources(context, run_id=run_id),
+                observed_at=now,
+                audit=_background_operation_audit(
+                    validated,
+                    window_id=window_id,
+                    run_id=run_id,
+                ),
+                conn=conn,
+            )
+            if updated is not None:
+                written.append(updated)
+                output_refs.append(BackgroundSourceRef("atomic_belief", str(updated.id)))
         elif operation == "supersede":
             new_belief = self._atomic_belief_from_draft(
                 drafts[0],
                 authority=validated.authority,
-                requires_confirmation=requires_confirmation,
                 context=context,
                 run_id=run_id,
                 now=now,
                 supersedes=targets[0].id,
             )
-            if requires_confirmation:
-                self.write_atomic_belief(
-                    new_belief,
-                    source_kind=context.source_kind,
-                    audit=_background_operation_audit(
-                        validated,
-                        window_id=window_id,
-                        run_id=run_id,
-                    ),
-                    conn=conn,
-                )
-            else:
-                self.supersede_atomic_beliefs(
-                    [targets[0].id],
-                    new_belief,
-                    source_kind=context.source_kind,
-                    at=now,
-                    audit=_background_operation_audit(
-                        validated,
-                        window_id=window_id,
-                        run_id=run_id,
-                    ),
-                    conn=conn,
-                )
+            self.supersede_atomic_beliefs(
+                [targets[0].id],
+                new_belief,
+                source_kind=context.source_kind,
+                at=now,
+                audit=_background_operation_audit(
+                    validated,
+                    window_id=window_id,
+                    run_id=run_id,
+                ),
+                conn=conn,
+            )
             written.append(new_belief)
             output_refs.append(BackgroundSourceRef("atomic_belief", str(new_belief.id)))
         elif operation in {"retract", "archive"}:
@@ -699,32 +670,20 @@ class CognitionStateStore:
                 if operation == "retract"
                 else BeliefLifecycle.ARCHIVED
             )
-            if not requires_confirmation:
-                self.mark_belief_lifecycle(
-                    targets[0].id,
-                    lifecycle,
-                    at=now,
-                    audit=_background_operation_audit(
-                        validated,
-                        window_id=window_id,
-                        run_id=run_id,
-                    ),
-                    conn=conn,
-                )
-                materialized = self.beliefs.get_by_id(targets[0].id, conn=conn)
-                if isinstance(materialized, AtomicBelief):
-                    written.append(materialized)
-            else:
-                self._write_optional_audit(
-                    conn,
-                    _background_operation_audit(
-                        validated,
-                        window_id=window_id,
-                        run_id=run_id,
-                    ),
-                    default_kind="background_consolidation_confirmation_required",
-                    entity_refs=(Reference("belief", str(targets[0].id)),),
-                )
+            self.mark_belief_lifecycle(
+                targets[0].id,
+                lifecycle,
+                at=now,
+                audit=_background_operation_audit(
+                    validated,
+                    window_id=window_id,
+                    run_id=run_id,
+                ),
+                conn=conn,
+            )
+            materialized = self.beliefs.get_by_id(targets[0].id, conn=conn)
+            if isinstance(materialized, AtomicBelief):
+                written.append(materialized)
             output_refs.append(BackgroundSourceRef("atomic_belief", str(targets[0].id)))
         else:
             raise BackgroundLLMValidationError(f"unsupported consolidation operation: {operation}")
@@ -792,7 +751,6 @@ class CognitionStateStore:
         draft: Any,
         *,
         authority: Authority,
-        requires_confirmation: bool,
         context: Any,
         run_id: str | None,
         now: str,
@@ -809,11 +767,7 @@ class CognitionStateStore:
             derivation_stage=DerivationStage(context.derivation_stage),
             scope=BeliefScope(draft.scope),
             authority=authority,
-            lifecycle=(
-                BeliefLifecycle.PENDING_CONFIRMATION
-                if requires_confirmation
-                else BeliefLifecycle.ACTIVE
-            ),
+            lifecycle=BeliefLifecycle.ACTIVE,
             sources=_program_attached_sources(context, run_id=run_id),
             validity=draft.validity or ValidityWindow(observed_at=Instant(now)),
             update_policy=draft.update_policy,
@@ -840,7 +794,6 @@ class CognitionStateStore:
         draft: Any,
         *,
         authority: Authority,
-        requires_confirmation: bool,
         context: Any,
         run_id: str | None,
         now: str,
@@ -856,11 +809,7 @@ class CognitionStateStore:
             derivation_stage=DerivationStage(context.derivation_stage),
             scope=BeliefScope(draft.scope),
             authority=authority,
-            lifecycle=(
-                BeliefLifecycle.PENDING_CONFIRMATION
-                if requires_confirmation
-                else BeliefLifecycle.ACTIVE
-            ),
+            lifecycle=BeliefLifecycle.ACTIVE,
             structure=draft.structure,
             sources=_program_attached_sources(context, run_id=run_id),
             validity=draft.validity or ValidityWindow(observed_at=Instant(now)),
@@ -1121,7 +1070,6 @@ def _background_operation_audit(
             "operation": validated.operation,
             "window_id": window_id,
             "run_id": run_id,
-            "requires_confirmation": validated.requires_confirmation,
             "source_span_note": validated.source_span_note,
         },
     }

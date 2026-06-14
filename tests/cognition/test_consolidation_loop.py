@@ -36,7 +36,10 @@ from alpha_agent.cognition.loops.workers.memory_extraction import (
     _session_backlog_candidate,
     _window_idempotency_key,
 )
-from alpha_agent.cognition.loops.workers.memory_summary import MemorySummaryWorker
+from alpha_agent.cognition.loops.workers.memory_summary import (
+    MemorySummaryWorker,
+    pending_summary_target_count,
+)
 from alpha_agent.cognition.models import (
     AtomicBelief,
     Authority,
@@ -49,6 +52,7 @@ from alpha_agent.cognition.models import (
     NLStatement,
     Reference,
     Role,
+    SummaryBelief,
     SummaryKind,
     ValidityWindow,
 )
@@ -56,6 +60,7 @@ from alpha_agent.cognition.processing_ledger import (
     BackgroundProgressStatus,
     BackgroundSourceRef,
     BackgroundStage,
+    BackgroundStageRun,
     BackgroundStageRunStatus,
 )
 from alpha_agent.cognition.projections.belief import BeliefRecallParams, BeliefSearchParams
@@ -600,7 +605,7 @@ def test_background_service_extraction_rotates_downstream_after_session_cap(
             operation="create",
             payload={
                 "atomic_belief_draft": {
-                    "memory_kind": MemoryKind.FACT.value,
+                    "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
                     "topic": "Alpha Agent package management",
@@ -1604,14 +1609,60 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
     assert progress.status == BackgroundProgressStatus.PROCESSED
 
 
+def test_memory_consolidation_worker_accepts_skip_without_mutating_draft(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    extracted = _atomic_belief(
+        "belief:extracted-noisy",
+        "A noisy imported assistant answer might imply Alpha Agent uses Poetry.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    service.write_atomic_belief(
+        extracted,
+        source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="skip",
+            payload={"reason": "No safe durable belief can be consolidated."},
+        )
+    )
+
+    report = MemoryConsolidationWorker(service, provider).run_once()
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "ok"
+    assert service.beliefs.get_by_id(extracted.id) == extracted
+    assert service.beliefs.list_active() == [extracted]
+    source_ref = BackgroundSourceRef("atomic_belief", str(extracted.id))
+    window = service.ledger.list_source_windows(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+    )[0]
+    assert window.status == BackgroundProgressStatus.PROCESSED
+    progress = service.ledger.get_source_progress(
+        source_ref,
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+    )
+    assert progress.status == BackgroundProgressStatus.PROCESSED
+    assert progress.checkpoint_id == f"checkpoint:memory_consolidation:{window.window_id}"
+    run_record = _stage_run_for_window(service, window.window_id)
+    assert run_record.status == BackgroundStageRunStatus.SUCCEEDED
+    assert run_record.output_refs == ()
+
+
 @pytest.mark.parametrize(
     "user_content",
     [
-        "How do I use FastAPI dependency injection?",
-        "Explain FastAPI dependency injection.",
+        "I prefer concise answers.",
+        "Please remember that I prefer concise answers.",
     ],
 )
-def test_memory_consolidation_keeps_uncertain_imported_draft_pending(
+def test_memory_consolidation_accepts_imported_direct_user_preference_as_active(
     tmp_path,
     user_content: str,
 ) -> None:
@@ -1644,15 +1695,15 @@ def test_memory_consolidation_keeps_uncertain_imported_draft_pending(
     assert counterpart is not None
     imported_message = store.list_session_messages(imported.session_id)[0]
     extracted = _atomic_belief(
-        "belief:extracted-fastapi-request",
-        "User asked for an explanation of FastAPI dependency injection.",
-        memory_kind=MemoryKind.FACT,
+        "belief:extracted-answer-style",
+        "User prefers concise answers.",
+        memory_kind=MemoryKind.PREFERENCE,
         scope=BeliefScope.COUNTERPART,
         about=[Reference("counterpart", counterpart.counterpart_id)],
         authority=Authority.BACKGROUND_SYNTHESIZED,
         derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
         sources=[Reference("session_message", imported_message.id)],
-        topic="FastAPI explanation request",
+        topic="answer style preference",
     )
     service.write_atomic_belief(
         extracted,
@@ -1668,8 +1719,8 @@ def test_memory_consolidation_keeps_uncertain_imported_draft_pending(
                     "about": [
                         {"kind": "counterpart", "id": counterpart.counterpart_id}
                     ],
-                    "topic": "FastAPI explanation request",
-                    "content": "User asked for an explanation of FastAPI dependency injection.",
+                    "topic": "answer style preference",
+                    "content": "User prefers concise answers.",
                 }
             },
         )
@@ -1681,20 +1732,14 @@ def test_memory_consolidation_keeps_uncertain_imported_draft_pending(
     archived = service.beliefs.get_by_id(extracted.id)
     assert isinstance(archived, AtomicBelief)
     assert archived.lifecycle == BeliefLifecycle.ARCHIVED
-    assert service.beliefs.list_active() == []
-    pending = service.beliefs.recall(
-        BeliefRecallParams(
-            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
-            counterpart=Reference("counterpart", counterpart.counterpart_id),
-            limit=8,
-        )
-    )
-    assert len(pending) == 1
-    assert pending[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+    active = service.beliefs.list_active()
+    assert len(active) == 1
+    assert active[0].content == "User prefers concise answers."
+    assert active[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
 
 
 @pytest.mark.parametrize("operation", ["create", "supersede"])
-def test_memory_consolidation_keeps_mixed_window_imported_request_pending(
+def test_memory_consolidation_applies_mixed_window_imported_direct_preference_as_active(
     tmp_path,
     operation: str,
 ) -> None:
@@ -1733,9 +1778,9 @@ def test_memory_consolidation_keeps_mixed_window_imported_request_pending(
     assert counterpart is not None
     imported_messages = store.list_session_messages(imported.session_id)
     extracted = _atomic_belief(
-        "belief:extracted-fastapi-request",
-        "User wants help with FastAPI dependency injection.",
-        memory_kind=MemoryKind.FACT,
+        "belief:extracted-answer-style",
+        "User prefers concise answers.",
+        memory_kind=MemoryKind.PREFERENCE,
         scope=BeliefScope.COUNTERPART,
         about=[Reference("counterpart", counterpart.counterpart_id)],
         authority=Authority.BACKGROUND_SYNTHESIZED,
@@ -1744,7 +1789,7 @@ def test_memory_consolidation_keeps_mixed_window_imported_request_pending(
             Reference("session_message", imported_messages[0].id),
             Reference("session_message", imported_messages[1].id),
         ],
-        topic="FastAPI explanation request",
+        topic="answer style preference",
     )
     service.write_atomic_belief(
         extracted,
@@ -1753,29 +1798,29 @@ def test_memory_consolidation_keeps_mixed_window_imported_request_pending(
     target: AtomicBelief | None = None
     if operation == "supersede":
         target = _atomic_belief(
-            "belief:target-fastapi",
-            "User prefers FastAPI examples.",
+            "belief:target-answer-style",
+            "User prefers detailed answers.",
             memory_kind=MemoryKind.PREFERENCE,
             scope=BeliefScope.COUNTERPART,
             about=[Reference("counterpart", counterpart.counterpart_id)],
-            topic="FastAPI response preference",
+            topic="answer style preference",
         )
         service.write_atomic_belief(
             target,
             source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
         )
     draft_payload = {
-        "memory_kind": MemoryKind.FACT.value,
+        "memory_kind": MemoryKind.PREFERENCE.value,
         "scope": BeliefScope.COUNTERPART.value,
         "about": [{"kind": "counterpart", "id": counterpart.counterpart_id}],
-        "topic": "FastAPI explanation request",
-        "content": "User wants help with FastAPI dependency injection.",
+        "topic": "answer style preference",
+        "content": "User prefers concise answers.",
     }
     provider_payload: dict[str, object] = {"atomic_belief_draft": draft_payload}
     if target is not None:
         provider_payload["belief_update"] = {
             "target_belief_id": str(target.id),
-            "rationale": "The imported request replaces the target preference.",
+            "rationale": "The imported preference replaces the target preference.",
         }
     provider = _RecordingLLMProvider(
         _llm_json(operation=operation, payload=provider_payload)
@@ -1790,17 +1835,15 @@ def test_memory_consolidation_keeps_mixed_window_imported_request_pending(
     if target is not None:
         retained = service.beliefs.get_by_id(target.id)
         assert isinstance(retained, AtomicBelief)
-        assert retained.lifecycle == BeliefLifecycle.ACTIVE
-    pending = service.beliefs.recall(
-        BeliefRecallParams(
-            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
-            counterpart=Reference("counterpart", counterpart.counterpart_id),
-            limit=8,
-        )
-    )
-    assert len(pending) == 1
-    assert pending[0].content == "User wants help with FastAPI dependency injection."
-    assert pending[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+        assert retained.lifecycle == BeliefLifecycle.SUPERSEDED
+    active = [
+        belief
+        for belief in service.beliefs.list_active()
+        if str(belief.id) != str(extracted.id)
+    ]
+    assert len(active) == 1
+    assert active[0].content == "User prefers concise answers."
+    assert active[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
 
 
 def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation(
@@ -2013,7 +2056,7 @@ def test_memory_summary_worker_errors_after_claim_when_budget_exhausts_before_ll
     ).status == BackgroundProgressStatus.FAILED
 
 
-def test_memory_consolidation_worker_prompt_includes_output_schema_and_valid_targets(
+def test_memory_consolidation_worker_sends_structured_prompt_messages(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -2045,17 +2088,13 @@ def test_memory_consolidation_worker_prompt_includes_output_schema_and_valid_tar
     report = MemoryConsolidationWorker(service, provider).run_once()
 
     assert report.emitted == 1
-    instruction = provider.calls[0]["messages"][-1]["content"]
+    messages = provider.calls[0]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    assert all(isinstance(message["content"], str) for message in messages)
+    instruction = messages[-1]["content"]
     assert isinstance(instruction, str)
-    assert '"oneOf": [' in instruction
-    assert '"const": "create"' in instruction
-    assert '"const": "strengthen"' in instruction
-    assert '"const": "supersede"' in instruction
-    assert '"const": "pending-confirmation"' in instruction
-    assert '"belief_update"' in instruction
-    assert '"target_belief_id": {' in instruction
-    assert '"enum": [' in instruction
-    assert f'"{target.id}"' in instruction
+    assert '"const": "skip"' in instruction
+    assert '"reason"' in instruction
 
 
 def test_memory_consolidation_prompt_uses_source_time_before_held_since_for_recency(
@@ -2406,7 +2445,7 @@ def test_consolidation_rejects_invalid_lifecycle_transition_without_partial_writ
     ).status == BackgroundProgressStatus.FAILED
 
 
-def test_conflict_review_requires_confirmation_writes_pending_candidate_without_mutating_target(
+def test_conflict_review_create_writes_active_candidate_without_mutating_target(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -2426,7 +2465,7 @@ def test_conflict_review_requires_confirmation_writes_pending_candidate_without_
     )
     provider = _RecordingLLMProvider(
         _llm_json(
-            operation="pending-confirmation",
+            operation="create",
             payload={
                 "atomic_belief_draft": {
                     "memory_kind": MemoryKind.PREFERENCE.value,
@@ -2436,7 +2475,6 @@ def test_conflict_review_requires_confirmation_writes_pending_candidate_without_
                     "content": "User now prefers Rust examples instead of Python examples.",
                 }
             },
-            extra={"requires_confirmation": True},
         )
     )
 
@@ -2446,24 +2484,67 @@ def test_conflict_review_requires_confirmation_writes_pending_candidate_without_
     retained = service.beliefs.get_by_id(target.id)
     assert isinstance(retained, AtomicBelief)
     assert retained.lifecycle == BeliefLifecycle.ACTIVE
-    pending = [
+    created = [
         belief
         for belief in service.beliefs.recall(
-            BeliefRecallParams(
-                lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
-                limit=8,
-            )
+            BeliefRecallParams(lifecycles=frozenset({BeliefLifecycle.ACTIVE}), limit=8)
         )
-        if isinstance(belief, AtomicBelief)
+        if isinstance(belief, AtomicBelief) and str(belief.id) != str(target.id)
     ]
-    assert len(pending) == 1
-    assert pending[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
-    assert pending[0].lifecycle == BeliefLifecycle.PENDING_CONFIRMATION
+    assert len(created) == 1
+    assert created[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+    assert created[0].lifecycle == BeliefLifecycle.ACTIVE
     assert service.ledger.get_source_progress(
         conflict,
         stage=BackgroundStage.CONFLICT_REVIEW,
         target_unit="scope:global",
     ).status == BackgroundProgressStatus.PROCESSED
+
+
+def test_conflict_review_worker_accepts_skip_without_mutating_target(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    target = _atomic_belief("belief:target-python", "User prefers Python examples.")
+    service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    conflict = BackgroundSourceRef("conflict", "conflict:noisy-feedback")
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.CONFLICT_REVIEW,
+        target_unit="scope:global",
+        source_refs=(conflict,),
+        idempotency_key="conflict:noisy-feedback",
+        metadata={
+            "active_belief_ids": [str(target.id)],
+            "source_text": "The feedback is too ambiguous to change memory.",
+        },
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="skip",
+            payload={"reason": "Conflict evidence is insufficient."},
+        )
+    )
+
+    report = MemoryConflictReviewWorker(service, provider).run_once()
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "ok"
+    assert service.beliefs.get_by_id(target.id) == target
+    assert service.beliefs.list_active() == [target]
+    assert service.ledger.get_source_window(window.window_id).status == (
+        BackgroundProgressStatus.PROCESSED
+    )
+    progress = service.ledger.get_source_progress(
+        conflict,
+        stage=BackgroundStage.CONFLICT_REVIEW,
+        target_unit="scope:global",
+    )
+    assert progress.status == BackgroundProgressStatus.PROCESSED
+    assert progress.checkpoint_id == f"checkpoint:memory_conflict_review:{window.window_id}"
+    run_record = _stage_run_for_window(service, window.window_id)
+    assert run_record.status == BackgroundStageRunStatus.SUCCEEDED
+    assert run_record.output_refs == ()
 
 
 def test_conflict_review_worker_consumes_feedback_shaped_window_and_supersedes(
@@ -2583,7 +2664,7 @@ def test_conflict_review_rejects_invalid_output_without_mutating_target_and_rema
     assert [item.window_id for item in retryable] == [window.window_id]
 
 
-def test_conflict_review_worker_prompt_includes_output_schema_and_valid_targets(
+def test_conflict_review_worker_sends_structured_prompt_messages(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -2603,17 +2684,13 @@ def test_conflict_review_worker_prompt_includes_output_schema_and_valid_targets(
     )
     provider = _RecordingLLMProvider(
         _llm_json(
-            operation="pending-confirmation",
+            operation="strengthen",
             payload={
-                "atomic_belief_draft": {
-                    "memory_kind": MemoryKind.PREFERENCE.value,
-                    "scope": BeliefScope.GLOBAL.value,
-                    "about": [],
-                    "topic": "example language preference",
-                    "content": "User now prefers Rust examples instead of Python examples.",
+                "belief_update": {
+                    "target_belief_id": str(target.id),
+                    "rationale": "The conflict metadata corroborates the target.",
                 }
             },
-            extra={"requires_confirmation": True},
         )
     )
 
@@ -2622,13 +2699,112 @@ def test_conflict_review_worker_prompt_includes_output_schema_and_valid_targets(
     assert report.emitted == 1
     messages = provider.calls[0]["messages"]
     assert [message["role"] for message in messages] == ["system", "user"]
+    assert all(isinstance(message["content"], str) for message in messages)
     instruction = messages[-1]["content"]
     assert isinstance(instruction, str)
-    assert '"oneOf": [' in instruction
-    assert '"const": "pending-confirmation"' in instruction
-    assert '"belief_update"' in instruction
-    assert '"target_belief_id": {' in instruction
-    assert f'"{target.id}"' in instruction
+    assert '"const": "skip"' in instruction
+    assert '"reason"' in instruction
+
+
+def test_memory_summary_worker_accepts_skip_without_superseding_active_summary(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    source = _atomic_belief(
+        "belief:consolidated-self",
+        "Agent validates changes with tests.",
+        about=[Reference("subject", "subject:self")],
+        scope=BeliefScope.SELF,
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+    )
+    active_summary = _summary_belief(
+        "belief:summary-self",
+        summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+        scope=BeliefScope.SELF,
+        about=[Reference("subject", "subject:self")],
+        source_belief_ids=[],
+    )
+    service.write_atomic_belief(source, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_summary_belief(
+        active_summary,
+        source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            operation="skip",
+            payload={"reason": "Sources do not improve the existing summary."},
+        )
+    )
+    initial_min_beliefs = 99
+    changed_source_min = 1
+    invalidated_source_min = 99
+
+    assert (
+        pending_summary_target_count(
+            service,
+            initial_min_beliefs=initial_min_beliefs,
+            changed_source_min=changed_source_min,
+            invalidated_source_min=invalidated_source_min,
+        )
+        == 1
+    )
+
+    report = MemorySummaryWorker(
+        service,
+        provider,
+        initial_min_beliefs=initial_min_beliefs,
+        changed_source_min=changed_source_min,
+        invalidated_source_min=invalidated_source_min,
+    ).run_once()
+
+    assert report.emitted == 0
+    assert report.new_checkpoint.last_status == "ok"
+    assert (
+        pending_summary_target_count(
+            service,
+            initial_min_beliefs=initial_min_beliefs,
+            changed_source_min=changed_source_min,
+            invalidated_source_min=invalidated_source_min,
+        )
+        == 0
+    )
+    second_report = MemorySummaryWorker(
+        service,
+        provider,
+        initial_min_beliefs=initial_min_beliefs,
+        changed_source_min=changed_source_min,
+        invalidated_source_min=invalidated_source_min,
+    ).run_once()
+    assert second_report.emitted == 0
+    assert second_report.new_checkpoint.last_status == "skipped_no_backlog"
+    assert len(provider.calls) == 1
+    retained_summary = service.beliefs.get_by_id(active_summary.id)
+    assert retained_summary == active_summary
+    assert service.beliefs.latest_summary(
+        summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+        scope=BeliefScope.SELF,
+        about=Reference("subject", "subject:self"),
+    ) == active_summary
+    active_summaries = service.beliefs.list_active_summaries(
+        summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+        scope=BeliefScope.SELF,
+    )
+    assert active_summaries == [active_summary]
+    source_ref = BackgroundSourceRef("atomic_belief", str(source.id))
+    window = service.ledger.list_source_windows(stage=BackgroundStage.SUMMARY)[0]
+    assert window.status == BackgroundProgressStatus.PROCESSED
+    progress = service.ledger.get_source_progress(
+        source_ref,
+        stage=BackgroundStage.SUMMARY,
+        target_unit=window.target_unit,
+    )
+    assert progress.status == BackgroundProgressStatus.PROCESSED
+    assert progress.checkpoint_id == f"checkpoint:memory_summary:{window.window_id}"
+    run_record = _stage_run_for_window(service, window.window_id)
+    assert run_record.status == BackgroundStageRunStatus.SUCCEEDED
+    assert run_record.output_refs == ()
 
 
 def test_background_llm_contract_allows_content_without_source_text_validation() -> None:
@@ -3461,7 +3637,7 @@ def test_memory_extraction_worker_import_prompt_excludes_runtime_context_and_ses
     assert window.metadata["compressed_message_id"] is None
 
 
-def test_import_extraction_keeps_direct_user_stable_preference_pending(
+def test_import_extraction_writes_direct_user_stable_preference_active(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -3514,19 +3690,13 @@ def test_import_extraction_keeps_direct_user_stable_preference_pending(
     ).run_once()
 
     assert report.emitted == 1
-    assert service.beliefs.list_active() == []
-    pending = service.beliefs.recall(
-        BeliefRecallParams(
-            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
-            counterpart=Reference("counterpart", counterpart.counterpart_id),
-            limit=8,
-        )
-    )
-    assert len(pending) == 1
-    assert pending[0].content == "User prefers direct feedback."
+    active = service.beliefs.list_active()
+    assert len(active) == 1
+    assert active[0].content == "User prefers direct feedback."
+    assert active[0].lifecycle == BeliefLifecycle.ACTIVE
 
 
-def test_import_extraction_keeps_mixed_window_direct_preference_pending(
+def test_import_extraction_writes_mixed_window_direct_preference_active(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -3585,19 +3755,13 @@ def test_import_extraction_keeps_mixed_window_direct_preference_pending(
     ).run_once()
 
     assert report.emitted == 1
-    assert service.beliefs.list_active() == []
-    pending = service.beliefs.recall(
-        BeliefRecallParams(
-            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
-            counterpart=Reference("counterpart", counterpart.counterpart_id),
-            limit=8,
-        )
-    )
-    assert len(pending) == 1
-    assert pending[0].content == "User prefers concise answers."
+    active = service.beliefs.list_active()
+    assert len(active) == 1
+    assert active[0].content == "User prefers concise answers."
+    assert active[0].lifecycle == BeliefLifecycle.ACTIVE
 
 
-def test_import_extraction_keeps_mixed_window_inferred_request_pending(
+def test_import_extraction_skips_mixed_window_inferred_request(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -3634,19 +3798,7 @@ def test_import_extraction_keeps_mixed_window_inferred_request_pending(
     counterpart = store.get_session_counterpart(imported.session_id)
     assert counterpart is not None
     provider = _RecordingLLMProvider(
-        _llm_json(
-            payload=_extraction_payload(
-                {
-                    "memory_kind": MemoryKind.FACT.value,
-                    "scope": BeliefScope.COUNTERPART.value,
-                    "about": [
-                        {"kind": "counterpart", "id": counterpart.counterpart_id}
-                    ],
-                    "topic": "FastAPI explanation request",
-                    "content": "User wants help with FastAPI dependency injection.",
-                }
-            )
-        )
+        _llm_json(payload=_extraction_payload())
     )
 
     report = MemoryExtractionWorker(
@@ -3655,17 +3807,8 @@ def test_import_extraction_keeps_mixed_window_inferred_request_pending(
         inactive_session_ids={imported.session_id},
     ).run_once()
 
-    assert report.emitted == 1
+    assert report.emitted == 0
     assert service.beliefs.list_active() == []
-    pending = service.beliefs.recall(
-        BeliefRecallParams(
-            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
-            counterpart=Reference("counterpart", counterpart.counterpart_id),
-            limit=8,
-        )
-    )
-    assert len(pending) == 1
-    assert pending[0].content == "User wants help with FastAPI dependency injection."
 
 
 @pytest.mark.parametrize(
@@ -3675,7 +3818,7 @@ def test_import_extraction_keeps_mixed_window_inferred_request_pending(
         "Explain FastAPI dependency injection.",
     ],
 )
-def test_import_extraction_keeps_single_turn_technical_request_history_pending(
+def test_import_extraction_skips_single_turn_technical_request_history(
     tmp_path,
     user_content: str,
 ) -> None:
@@ -3713,19 +3856,7 @@ def test_import_extraction_keeps_single_turn_technical_request_history_pending(
     counterpart = store.get_session_counterpart(imported.session_id)
     assert counterpart is not None
     provider = _RecordingLLMProvider(
-        _llm_json(
-            payload=_extraction_payload(
-                {
-                    "memory_kind": MemoryKind.FACT.value,
-                    "scope": BeliefScope.COUNTERPART.value,
-                    "about": [
-                        {"kind": "counterpart", "id": counterpart.counterpart_id}
-                    ],
-                    "topic": "FastAPI explanation request",
-                    "content": "User asked for an explanation of FastAPI dependency injection.",
-                }
-            )
-        )
+        _llm_json(payload=_extraction_payload())
     )
 
     report = MemoryExtractionWorker(
@@ -3734,23 +3865,11 @@ def test_import_extraction_keeps_single_turn_technical_request_history_pending(
         inactive_session_ids={imported.session_id},
     ).run_once()
 
-    assert report.emitted == 1
+    assert report.emitted == 0
     assert service.beliefs.list_active() == []
-    pending = service.beliefs.recall(
-        BeliefRecallParams(
-            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
-            counterpart=Reference("counterpart", counterpart.counterpart_id),
-            limit=8,
-        )
-    )
-    assert len(pending) == 1
-    assert (
-        pending[0].content
-        == "User asked for an explanation of FastAPI dependency injection."
-    )
 
 
-def test_import_extraction_keeps_imported_assistant_answer_global_memory_pending(
+def test_import_extraction_skips_imported_assistant_answer_global_memory(
     tmp_path,
 ) -> None:
     store = _store(tmp_path)
@@ -3785,17 +3904,7 @@ def test_import_extraction_keeps_imported_assistant_answer_global_memory_pending
     imported = store.get_imported_conversation("chatgpt", "conv_1")
     assert imported is not None
     provider = _RecordingLLMProvider(
-        _llm_json(
-            payload=_extraction_payload(
-                {
-                    "memory_kind": MemoryKind.FACT.value,
-                    "scope": BeliefScope.GLOBAL.value,
-                    "about": [],
-                    "topic": "FastAPI framework",
-                    "content": "FastAPI is a Python web framework.",
-                }
-            )
-        )
+        _llm_json(payload=_extraction_payload())
     )
 
     report = MemoryExtractionWorker(
@@ -3804,16 +3913,8 @@ def test_import_extraction_keeps_imported_assistant_answer_global_memory_pending
         inactive_session_ids={imported.session_id},
     ).run_once()
 
-    assert report.emitted == 1
+    assert report.emitted == 0
     assert service.beliefs.list_active() == []
-    pending = service.beliefs.recall(
-        BeliefRecallParams(
-            lifecycles=frozenset({BeliefLifecycle.PENDING_CONFIRMATION}),
-            limit=8,
-        )
-    )
-    assert len(pending) == 1
-    assert pending[0].scope == BeliefScope.GLOBAL
 
 
 def test_memory_extraction_worker_import_backlog_honors_latest_compressed_boundary(
@@ -4530,6 +4631,32 @@ def _atomic_belief(
     )
 
 
+def _summary_belief(
+    belief_id: str,
+    *,
+    summary_kind: SummaryKind,
+    scope: BeliefScope,
+    about: list[Reference],
+    source_belief_ids: list[BeliefId],
+) -> SummaryBelief:
+    return SummaryBelief(
+        id=BeliefId(belief_id),
+        subject=Reference("subject", "subject:self"),
+        about=list(about),
+        topic="self memory summary",
+        content=NLStatement("Agent already has a useful self-memory summary."),
+        summary_kind=summary_kind,
+        derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
+        scope=scope,
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        source_belief_ids=list(source_belief_ids),
+        validity=ValidityWindow(observed_at=Instant("2026-01-01T00:00:00+00:00")),
+        formed_in=Reference("situation", "situation:test"),
+        holder_role=Role("agent"),
+        held_since=Instant("2026-01-01T00:00:00+00:00"),
+    )
+
+
 class _NeverYieldCoordinator:
     def yield_to_higher_priority(self) -> bool:
         return False
@@ -4690,6 +4817,25 @@ def _source_progress_status(
         return None
 
 
+def _stage_run_for_window(
+    service: CognitionStateStore,
+    window_id: str,
+) -> BackgroundStageRun:
+    with service.store.connect() as conn:
+        row = conn.execute(
+            """
+            SELECT run_id
+            FROM background_stage_run
+            WHERE window_id = ?
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (window_id,),
+        ).fetchone()
+    assert row is not None
+    return service.ledger.get_stage_run(row["run_id"])
+
+
 def _extraction_payload(*drafts: dict[str, object]) -> dict[str, object]:
     return {"atomic_belief_drafts": [_draft_with_topic(draft) for draft in drafts]}
 
@@ -4724,7 +4870,6 @@ def _llm_json(
         "operation": operation,
         "authority": authority,
         "rationale": "Fixture rationale.",
-        "requires_confirmation": False,
         "source_span_note": "from previous messages",
         "payload": payload
         or _extraction_payload(

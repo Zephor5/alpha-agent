@@ -105,13 +105,24 @@ def test_background_json_schemas_require_topic_and_drop_legacy_atomic_fields() -
         scope=BeliefScope.GLOBAL,
         about_refs=(),
     )
-    summary_draft_schema = summary_schema["properties"]["payload"]["properties"][
+    summary_create_schema = next(
+        branch
+        for branch in summary_schema["oneOf"]
+        if branch["properties"]["operation"]["const"] == "create_summary_belief"
+    )
+    summary_skip_schema = next(
+        branch
+        for branch in summary_schema["oneOf"]
+        if branch["properties"]["operation"]["const"] == "skip"
+    )
+    summary_draft_schema = summary_create_schema["properties"]["payload"]["properties"][
         "summary_belief_draft"
     ]
     assert "topic" in summary_draft_schema["required"]
     assert "topic" in summary_draft_schema["properties"]
     assert "object" not in summary_draft_schema["properties"]
     assert "structure" not in summary_draft_schema["properties"]
+    assert summary_skip_schema["properties"]["payload"]["required"] == ["reason"]
 
 
 def test_background_atomic_draft_requires_explicit_valid_topic() -> None:
@@ -394,7 +405,6 @@ def _llm_json(
             "operation": operation,
             "authority": Authority.BACKGROUND_SYNTHESIZED.value,
             "rationale": "Fixture rationale.",
-            "requires_confirmation": False,
             "payload": payload,
         },
         sort_keys=True,
