@@ -262,7 +262,7 @@ def test_recalled_wrong_preference_is_corrected_through_feedback_loop(
                     "target_belief_id": wrong_belief_id,
                     "rationale": "The user corrected the recalled preference.",
                 },
-                "atomic_belief_draft": {
+                "atomic_belief_input": {
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.COUNTERPART.value,
                     "about": [_counterpart_record()],

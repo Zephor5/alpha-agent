@@ -75,6 +75,8 @@ multiple summaries. The output must validate against this JSON Schema:
 
 Do not include belief ids, summary ids, source ids, provenance, idempotency keys,
 confidence, scores, or numeric strength fields. Preserve the selected summary target exactly.
+If emitting create_summary_belief, use payload.summary_belief_input; it will be created
+as active summary memory after validation.
 For domain summaries, structure.target_domain is required and must match the selected target.
 topic is required and must be a short topic phrase, not a sentence and not the
 full assertion in content.

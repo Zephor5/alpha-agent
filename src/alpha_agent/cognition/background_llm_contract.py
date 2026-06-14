@@ -40,7 +40,7 @@ _SUPPORTED_OPERATIONS = frozenset(
     }
 )
 _EXTRACTION_OPERATION = "create_atomic_belief"
-_EXTRACTION_PAYLOAD_KEYS = frozenset({"atomic_belief_drafts"})
+_EXTRACTION_PAYLOAD_KEYS = frozenset({"atomic_belief_inputs"})
 _SKIP_OPERATION = "skip"
 _SKIP_PAYLOAD_KEYS = frozenset({"reason"})
 _SEMANTIC_OPERATIONS = frozenset(
@@ -149,9 +149,9 @@ def extraction_output_json_schema() -> dict[str, Any]:
         operation=_EXTRACTION_OPERATION,
         payload_schema=_payload_schema(
             {
-                "atomic_belief_drafts": {
+                "atomic_belief_inputs": {
                     "type": "array",
-                    "items": _atomic_belief_draft_schema(),
+                    "items": _atomic_belief_input_schema(),
                 }
             }
         ),
@@ -165,7 +165,7 @@ def consolidation_output_json_schema(
     """Return the LLM-facing JSON schema for consolidation-stage outputs."""
 
     target_ids = tuple(sorted({item for item in allowed_target_belief_ids if item.strip()}))
-    atomic_payload = _payload_schema({"atomic_belief_draft": _atomic_belief_draft_schema()})
+    atomic_payload = _payload_schema({"atomic_belief_input": _atomic_belief_input_schema()})
     return {
         "oneOf": [
             _background_output_schema(
@@ -219,7 +219,7 @@ def summary_output_json_schema(
     )
     if target_domain is not None:
         required.append("structure")
-    summary_draft = _summary_belief_draft_schema(
+    summary_draft = _summary_belief_input_schema(
         summary_kind=summary_kind,
         scope=scope,
         about_refs=about_refs,
@@ -230,7 +230,7 @@ def summary_output_json_schema(
         "oneOf": [
             _background_output_schema(
                 operation="create_summary_belief",
-                payload_schema=_payload_schema({"summary_belief_draft": summary_draft}),
+                payload_schema=_payload_schema({"summary_belief_input": summary_draft}),
             ),
             _background_output_schema(
                 operation=_SKIP_OPERATION,
@@ -337,7 +337,7 @@ def _skip_payload_schema() -> dict[str, Any]:
     )
 
 
-def _atomic_belief_draft_schema() -> dict[str, Any]:
+def _atomic_belief_input_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
@@ -360,7 +360,7 @@ def _atomic_belief_draft_schema() -> dict[str, Any]:
     }
 
 
-def _summary_belief_draft_schema(
+def _summary_belief_input_schema(
     *,
     summary_kind: SummaryKind,
     scope: BeliefScope,
@@ -418,7 +418,7 @@ def _supersede_payload_schema(
                 operation="supersede",
                 allowed_target_belief_ids=allowed_target_belief_ids,
             ),
-            "atomic_belief_draft": _atomic_belief_draft_schema(),
+            "atomic_belief_input": _atomic_belief_input_schema(),
         }
     )
 
@@ -521,7 +521,7 @@ class FeedbackAttributionValidationContext:
 
 @dataclass(frozen=True)
 class ValidatedAtomicBeliefDraft:
-    """Id-less atomic belief draft accepted from a background LLM output."""
+    """Id-less atomic belief creation input accepted from a background LLM output."""
 
     memory_kind: MemoryKind
     scope: BeliefScope
@@ -535,7 +535,7 @@ class ValidatedAtomicBeliefDraft:
 
 @dataclass(frozen=True)
 class ValidatedSummaryBeliefDraft:
-    """Id-less summary belief draft accepted from a background LLM output."""
+    """Id-less summary belief creation input accepted from a background LLM output."""
 
     summary_kind: SummaryKind
     scope: BeliefScope
@@ -748,10 +748,10 @@ def _validate_payloads(
 ) -> tuple[ValidatedPayload, ...]:
     if operation == "create_atomic_belief":
         if BackgroundStage(context.source_window.stage) == BackgroundStage.EXTRACTION:
-            return _validate_atomic_drafts(payload.get("atomic_belief_drafts"), context)
-        return (_validate_atomic_draft(payload.get("atomic_belief_draft"), context),)
+            return _validate_atomic_drafts(payload.get("atomic_belief_inputs"), context)
+        return (_validate_atomic_draft(payload.get("atomic_belief_input"), context),)
     if operation == "create_summary_belief":
-        return (_validate_summary_draft(payload.get("summary_belief_draft"), context),)
+        return (_validate_summary_draft(payload.get("summary_belief_input"), context),)
     if operation == "profile_summary_candidate":
         return (_validate_summary_draft(payload.get("profile_summary_candidate"), context),)
     if operation == "update_belief":
@@ -760,11 +760,11 @@ def _validate_payloads(
         _validate_skip_payload(payload)
         return ()
     if operation == "create":
-        return (_validate_atomic_draft(payload.get("atomic_belief_draft"), context),)
+        return (_validate_atomic_draft(payload.get("atomic_belief_input"), context),)
     if operation == "supersede":
         return (
             _validate_belief_update(payload.get("belief_update"), context, operation),
-            _validate_atomic_draft(payload.get("atomic_belief_draft"), context),
+            _validate_atomic_draft(payload.get("atomic_belief_input"), context),
         )
     if operation in {"strengthen", "retract", "archive"}:
         return (_validate_belief_update(payload.get("belief_update"), context, operation),)
@@ -801,7 +801,7 @@ def _validate_stage_output_shape(
             details.append(f"unexpected payload keys: {', '.join(sorted(unexpected))}")
         detail_text = "; ".join(details)
         raise BackgroundLLMValidationError(
-            "extraction payload must contain exactly atomic_belief_drafts"
+            "extraction payload must contain exactly atomic_belief_inputs"
             + (f"; {detail_text}" if detail_text else "")
         )
 
@@ -821,11 +821,11 @@ def _validate_consolidation_stage_output_shape(
     if operation == _SKIP_OPERATION:
         expected = _SKIP_PAYLOAD_KEYS
     elif operation == "create":
-        expected = frozenset({"atomic_belief_draft"})
+        expected = frozenset({"atomic_belief_input"})
     elif operation in {"strengthen", "retract", "archive"}:
         expected = frozenset({"belief_update"})
     else:
-        expected = frozenset({"belief_update", "atomic_belief_draft"})
+        expected = frozenset({"belief_update", "atomic_belief_input"})
     if keys != expected:
         expected_text = ", ".join(sorted(expected))
         raise BackgroundLLMValidationError(
@@ -845,7 +845,7 @@ def _validate_summary_stage_output_shape(
 ) -> None:
     expected: frozenset[str]
     if operation == "create_summary_belief":
-        expected = frozenset({"summary_belief_draft"})
+        expected = frozenset({"summary_belief_input"})
     elif operation == "profile_summary_candidate":
         expected = frozenset({"profile_summary_candidate"})
     elif operation == _SKIP_OPERATION:
@@ -875,9 +875,9 @@ def _validate_atomic_draft(
     context: BackgroundLLMValidationContext,
 ) -> ValidatedAtomicBeliefDraft:
     if not isinstance(raw, Mapping):
-        raise BackgroundLLMValidationError("atomic_belief_draft must be an object")
-    _reject_generated_draft_ids(raw, label="atomic_belief_draft")
-    _validate_allowed_keys(raw, _ATOMIC_DRAFT_KEYS, "atomic_belief_draft")
+        raise BackgroundLLMValidationError("atomic_belief_input must be an object")
+    _reject_generated_draft_ids(raw, label="atomic_belief_input")
+    _validate_allowed_keys(raw, _ATOMIC_DRAFT_KEYS, "atomic_belief_input")
     try:
         memory_kind = MemoryKind(_required_str(raw, "memory_kind"))
     except ValueError as exc:
@@ -904,7 +904,7 @@ def _validate_atomic_drafts(
     context: BackgroundLLMValidationContext,
 ) -> tuple[ValidatedAtomicBeliefDraft, ...]:
     if not isinstance(raw, list):
-        raise BackgroundLLMValidationError("atomic_belief_drafts must be an array")
+        raise BackgroundLLMValidationError("atomic_belief_inputs must be an array")
     return tuple(_validate_atomic_draft(item, context) for item in raw)
 
 
@@ -913,9 +913,9 @@ def _validate_summary_draft(
     context: BackgroundLLMValidationContext,
 ) -> ValidatedSummaryBeliefDraft:
     if not isinstance(raw, Mapping):
-        raise BackgroundLLMValidationError("summary_belief_draft must be an object")
-    _reject_generated_draft_ids(raw, label="summary_belief_draft")
-    _validate_allowed_keys(raw, _SUMMARY_DRAFT_KEYS, "summary_belief_draft")
+        raise BackgroundLLMValidationError("summary_belief_input must be an object")
+    _reject_generated_draft_ids(raw, label="summary_belief_input")
+    _validate_allowed_keys(raw, _SUMMARY_DRAFT_KEYS, "summary_belief_input")
     try:
         summary_kind = SummaryKind(_required_str(raw, "summary_kind"))
     except ValueError as exc:

@@ -604,7 +604,7 @@ def test_background_service_extraction_rotates_downstream_after_session_cap(
         _llm_json(
             operation="create",
             payload={
-                "atomic_belief_draft": {
+                "atomic_belief_input": {
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -1158,11 +1158,11 @@ def test_background_llm_acceptance_allows_empty_extraction_and_marks_window_proc
 
 
 def test_extraction_stage_rejects_singular_atomic_draft_payload() -> None:
-    with pytest.raises(BackgroundLLMValidationError, match="atomic_belief_drafts"):
+    with pytest.raises(BackgroundLLMValidationError, match="atomic_belief_inputs"):
         validate_background_llm_json(
             _llm_json(
                 payload={
-                    "atomic_belief_draft": {
+                    "atomic_belief_input": {
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -1348,7 +1348,7 @@ def test_background_llm_contract_rejects_generated_summary_and_audit_ids_anywher
     generated_key: str,
 ) -> None:
     output = json.loads(_llm_json())
-    draft = output["payload"]["atomic_belief_drafts"][0]
+    draft = output["payload"]["atomic_belief_inputs"][0]
     draft["update_policy"] = {"nested": [{generated_key: "llm-generated"}]}
 
     with pytest.raises(BackgroundLLMValidationError, match="generated|id"):
@@ -1443,7 +1443,7 @@ def test_failed_background_llm_validation_logs_raw_output_preview(
         (
             "create_summary_belief",
             {
-                "summary_belief_draft": {
+                "summary_belief_input": {
                     "summary_kind": SummaryKind.DOMAIN_SUMMARY.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -1480,7 +1480,7 @@ def test_failed_background_llm_validation_logs_raw_output_preview(
         (
             "create_atomic_belief",
             {
-                "atomic_belief_drafts": [
+                "atomic_belief_inputs": [
                     {
                         "memory_kind": MemoryKind.FACT.value,
                         "scope": BeliefScope.GLOBAL.value,
@@ -1488,7 +1488,7 @@ def test_failed_background_llm_validation_logs_raw_output_preview(
                         "content": "Alpha Agent uses uv.",
                     }
                 ],
-                "summary_belief_draft": {
+                "summary_belief_input": {
                     "summary_kind": SummaryKind.DOMAIN_SUMMARY.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -1496,7 +1496,7 @@ def test_failed_background_llm_validation_logs_raw_output_preview(
                     "content": "Alpha Agent uses uv.",
                 },
             },
-            "summary_belief_draft",
+            "summary_belief_input",
         ),
     ],
 )
@@ -1571,7 +1571,7 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
         _llm_json(
             operation="create",
             payload={
-                "atomic_belief_draft": {
+                "atomic_belief_input": {
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -1713,7 +1713,7 @@ def test_memory_consolidation_accepts_imported_direct_user_preference_as_active(
         _llm_json(
             operation="create",
             payload={
-                "atomic_belief_draft": {
+                "atomic_belief_input": {
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.COUNTERPART.value,
                     "about": [
@@ -1816,7 +1816,7 @@ def test_memory_consolidation_applies_mixed_window_imported_direct_preference_as
         "topic": "answer style preference",
         "content": "User prefers concise answers.",
     }
-    provider_payload: dict[str, object] = {"atomic_belief_draft": draft_payload}
+    provider_payload: dict[str, object] = {"atomic_belief_input": draft_payload}
     if target is not None:
         provider_payload["belief_update"] = {
             "target_belief_id": str(target.id),
@@ -1869,7 +1869,7 @@ def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation
         _llm_json(
             operation="create",
             payload={
-                "atomic_belief_draft": {
+                "atomic_belief_input": {
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -2026,7 +2026,7 @@ def test_memory_summary_worker_errors_after_claim_when_budget_exhausts_before_ll
         _llm_json(
             operation="create_summary_belief",
             payload={
-                "summary_belief_draft": {
+                "summary_belief_input": {
                     "summary_kind": SummaryKind.SELF_MEMORY_SUMMARY.value,
                     "scope": BeliefScope.SELF.value,
                     "about": [Reference("subject", "subject:self").to_record()],
@@ -2248,7 +2248,7 @@ def test_memory_consolidation_worker_accepts_direct_supersede(
                     "target_belief_id": str(target.id),
                     "rationale": "The extracted draft replaces the older package manager belief.",
                 },
-                "atomic_belief_draft": {
+                "atomic_belief_input": {
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -2467,7 +2467,7 @@ def test_conflict_review_create_writes_active_candidate_without_mutating_target(
         _llm_json(
             operation="create",
             payload={
-                "atomic_belief_draft": {
+                "atomic_belief_input": {
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -2571,7 +2571,7 @@ def test_conflict_review_worker_consumes_feedback_shaped_window_and_supersedes(
                     "target_belief_id": str(target.id),
                     "rationale": "The user corrected the recalled preference.",
                 },
-                "atomic_belief_draft": {
+                "atomic_belief_input": {
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
@@ -3405,7 +3405,7 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
     assert '"const": "create_atomic_belief"' in instruction
     assert '"authority": {' in instruction
     assert '"const": "background_synthesized"' in instruction
-    assert '"atomic_belief_drafts"' in instruction
+    assert '"atomic_belief_inputs"' in instruction
     assert '"memory_kind": {' in instruction
     assert '"scope": {' in instruction
     assert '"enum": [' in instruction
@@ -4837,7 +4837,7 @@ def _stage_run_for_window(
 
 
 def _extraction_payload(*drafts: dict[str, object]) -> dict[str, object]:
-    return {"atomic_belief_drafts": [_draft_with_topic(draft) for draft in drafts]}
+    return {"atomic_belief_inputs": [_draft_with_topic(draft) for draft in drafts]}
 
 
 def _draft_with_topic(draft: dict[str, object]) -> dict[str, object]:

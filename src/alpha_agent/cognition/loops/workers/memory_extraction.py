@@ -74,11 +74,12 @@ _ACTIVE_WINDOW_STATUSES = {
     BackgroundProgressStatus.CLAIMED,
 }
 
-_EXTRACTION_INSTRUCTION = """Extract atomic memory candidates from the previous messages.
+_EXTRACTION_INSTRUCTION = """Extract atomic beliefs to create from the previous messages.
 
 Return only one JSON object. Do not return markdown, code fences, top-level arrays, or
-commentary. Put candidates in payload.atomic_belief_drafts, using an empty array when
-nothing should be extracted. The output must validate against this JSON Schema:
+commentary. Put belief creation inputs in payload.atomic_belief_inputs, using an
+empty array when nothing should be extracted. Each accepted input will be created as
+active memory after validation. The output must validate against this JSON Schema:
 {output_schema_json}
 
 Allowed about references for this session:
@@ -118,7 +119,7 @@ Content rules:
   {system_reminder_open} message.
 - topic is required and must be a short topic phrase, not a sentence and not the
   full assertion in content.
-- If a memory is plausible but not safe to accept directly, omit it.
+- If a memory is plausible but not safe to create as active memory, omit it.
 - Negative cases:
   - Do not use a sentence-like topic such as "The user prefers concise replies."
   - Do not combine multiple claims in content such as "The user uses uv and prefers Rust."
@@ -134,12 +135,13 @@ _IMPORT_EXTRACTION_SYSTEM_MESSAGE = (
     "Return only the requested JSON object."
 )
 
-_IMPORT_EXTRACTION_INSTRUCTION = """Extract atomic memory candidates from the previous
+_IMPORT_EXTRACTION_INSTRUCTION = """Extract atomic beliefs to create from the previous
 imported conversation messages.
 
 Return only one JSON object. Do not return markdown, code fences, top-level arrays, or
-commentary. Put candidates in payload.atomic_belief_drafts, using an empty array when
-nothing should be extracted. The output must validate against this JSON Schema:
+commentary. Put belief creation inputs in payload.atomic_belief_inputs, using an
+empty array when nothing should be extracted. Each accepted input will be created as
+active memory after validation. The output must validate against this JSON Schema:
 {output_schema_json}
 
 Allowed about references for this imported conversation:
@@ -183,7 +185,7 @@ Content rules:
   produce no belief.
 - topic is required and must be a short topic phrase, not a sentence and not the
   full assertion in content.
-- If a memory is plausible but not safe to accept directly, omit it.
+- If a memory is plausible but not safe to create as active memory, omit it.
 - Import counterpart memory may be active only when the user directly stated a
   stable fact or preference. If it is inferred from assistant output, a
   single-turn technical request/question, inferred capability, or historical

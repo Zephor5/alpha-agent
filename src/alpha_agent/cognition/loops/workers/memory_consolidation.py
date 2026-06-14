@@ -56,10 +56,10 @@ from alpha_agent.utils.time import utc_now_iso
 _RETRYABLE_SOURCE_STATUSES = {None, BackgroundProgressStatus.FAILED}
 _CONSOLIDATION_SYSTEM_MESSAGE = (
     "You are Alpha Agent's background memory consolidation worker. "
-    "Use only the supplied drafts, active beliefs, conflict metadata, schemas, "
+    "Use only the supplied extracted beliefs, active beliefs, conflict metadata, schemas, "
     "and allowed targets; return only the requested JSON object."
 )
-_CONSOLIDATION_INSTRUCTION = """Compare extracted atomic belief drafts with active beliefs.
+_CONSOLIDATION_INSTRUCTION = """Compare extracted atomic beliefs with active beliefs.
 
 Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
 multiple decisions. The output must validate against this JSON Schema:
@@ -68,13 +68,13 @@ multiple decisions. The output must validate against this JSON Schema:
 Allowed update target belief ids:
 {allowed_target_belief_ids_json}
 
-Allowed about references for newly created or superseding atomic drafts:
+Allowed about references for newly created or superseding atomic belief inputs:
 {allowed_about_refs_json}
 
 Operation rules:
-- skip: write nothing when the draft is uncertain, noisy, not useful, or unsafe to
+- skip: write nothing when the extracted belief is uncertain, noisy, not useful, or unsafe to
   consolidate; include a short payload.reason.
-- create: accept a draft as a new consolidated atomic belief.
+- create: create a new consolidated active atomic belief from atomic_belief_input.
 - strengthen: reaffirm one active belief with corroborating evidence.
 - supersede: replace one active belief with a new consolidated atomic belief.
 - retract: mark one active belief retracted.
@@ -82,15 +82,17 @@ Operation rules:
 - Update-like operations must target one of the allowed belief ids above.
 - Do not include source ids, provenance, idempotency keys, generated ids, confidence,
   scores, or numeric strength fields.
-- New or superseding atomic_belief_draft payloads must include topic as a short
+- New or superseding atomic_belief_input payloads will be created as active memory
+  after validation and must include topic as a short
   topic phrase, not a sentence and not the full assertion in content.
-- Each draft content value must contain exactly one atomic assertion.
+- Each atomic_belief_input content value must contain exactly one atomic assertion.
 - Do not write scope "self" for user-subject content such as "The user prefers
   direct feedback"; use scope "counterpart" or skip it.
 - Do not write scope "global" for user profile content.
-- Skip uncertain imported drafts. If an imported draft is inferred from assistant
-  output, a single-turn technical request/question, inferred capability, or
-  historical temporary state, return skip instead of create or supersede.
+- Skip uncertain imported extracted beliefs. If an imported extracted belief is
+  inferred from assistant output, a single-turn technical request/question,
+  inferred capability, or historical temporary state, return skip instead of
+  create or supersede.
 - Negative cases: sentence-like topic, multi-claim content, imported assistant
   answer as global knowledge, and imported assistant identity as Alpha self memory.
 
@@ -99,7 +101,7 @@ Time rules:
 - held_since is Alpha holding time, not evidence time.
 - Supersede, retract, and archive decisions must not infer source recency from held_since.
 
-Extracted drafts:
+Extracted beliefs to consolidate:
 {drafts_json}
 
 Active beliefs included as valid update targets:
@@ -114,14 +116,15 @@ multiple decisions. The output must validate against this JSON Schema:
 Allowed update target belief ids:
 {allowed_target_belief_ids_json}
 
-Allowed about references for newly created or superseding atomic drafts:
+Allowed about references for newly created or superseding atomic belief inputs:
 {allowed_about_refs_json}
 
 Do not mutate active memory unless the conflict can be safely resolved from the
 supplied evidence. If resolving the conflict automatically is unsafe, return
 skip with a short payload.reason. Do not include generated ids, source refs,
 provenance, idempotency keys, confidence, scores, or numeric strength fields.
-New or superseding atomic_belief_draft payloads must include topic as a short
+New or superseding atomic_belief_input payloads will be created as active memory
+after validation and must include topic as a short
 topic phrase, not a sentence and not the full assertion in content.
 
 Conflict source:

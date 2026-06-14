@@ -1938,7 +1938,7 @@ def _summary_json(
             "authority": "background_synthesized",
             "rationale": "Fixture summary synthesis.",
             "source_span_note": "from selected summary sources",
-            "payload": {"summary_belief_draft": summary_draft},
+            "payload": {"summary_belief_input": summary_draft},
         },
         sort_keys=True,
     )

@@ -36,7 +36,7 @@ Implementation:
   `archive`, and `drop_as_noise`.
 - Require each decision to include `source_draft_ids`.
 - Require update-like decisions to include validated `target_belief_ids`.
-- Require create-like decisions to include one id-less `atomic_belief_draft`.
+- Require create-like decisions to include one id-less `atomic_belief_input`.
 
 Acceptance criteria:
 

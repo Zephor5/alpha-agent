@@ -93,7 +93,7 @@ def test_summary_belief_from_record_rejects_legacy_fields(legacy_key: str) -> No
 def test_background_json_schemas_require_topic_and_drop_legacy_atomic_fields() -> None:
     extraction_schema = extraction_output_json_schema()
     atomic_schema = extraction_schema["properties"]["payload"]["properties"][
-        "atomic_belief_drafts"
+        "atomic_belief_inputs"
     ]["items"]
     assert "topic" in atomic_schema["required"]
     assert "topic" in atomic_schema["properties"]
@@ -116,7 +116,7 @@ def test_background_json_schemas_require_topic_and_drop_legacy_atomic_fields() -
         if branch["properties"]["operation"]["const"] == "skip"
     )
     summary_draft_schema = summary_create_schema["properties"]["payload"]["properties"][
-        "summary_belief_draft"
+        "summary_belief_input"
     ]
     assert "topic" in summary_draft_schema["required"]
     assert "topic" in summary_draft_schema["properties"]
@@ -129,7 +129,7 @@ def test_background_atomic_draft_requires_explicit_valid_topic() -> None:
     validated = validate_background_llm_json(
         _llm_json(
             payload={
-                "atomic_belief_drafts": [
+                "atomic_belief_inputs": [
                     {
                         "memory_kind": MemoryKind.FACT.value,
                         "scope": BeliefScope.GLOBAL.value,
@@ -175,7 +175,7 @@ def test_background_atomic_draft_rejects_invalid_topic_or_legacy_fields(
 
     with pytest.raises(BackgroundLLMValidationError, match=match):
         validate_background_llm_json(
-            _llm_json(payload={"atomic_belief_drafts": [draft]}),
+            _llm_json(payload={"atomic_belief_inputs": [draft]}),
             _context(),
         )
 
@@ -184,7 +184,7 @@ def test_background_summary_draft_requires_explicit_valid_topic() -> None:
     output = _llm_json(
         operation="create_summary_belief",
         payload={
-            "summary_belief_draft": {
+            "summary_belief_input": {
                 "summary_kind": SummaryKind.DOMAIN_SUMMARY.value,
                 "scope": BeliefScope.GLOBAL.value,
                 "about": [],
@@ -215,7 +215,7 @@ def test_background_non_domain_summary_draft_rejects_structure() -> None:
     output = _llm_json(
         operation="create_summary_belief",
         payload={
-            "summary_belief_draft": {
+            "summary_belief_input": {
                 "summary_kind": SummaryKind.SELF_MEMORY_SUMMARY.value,
                 "scope": BeliefScope.SELF.value,
                 "about": [{"kind": "subject", "id": SUBJECT_SELF}],
@@ -249,12 +249,12 @@ def test_background_output_rejects_update_policy_summary_targets_by_default() ->
 
     with pytest.raises(BackgroundLLMValidationError, match="target_domain"):
         validate_background_llm_json(
-            _llm_json(payload={"atomic_belief_drafts": [draft]}),
+            _llm_json(payload={"atomic_belief_inputs": [draft]}),
             _context(),
         )
 
     validated = validate_background_llm_json(
-        _llm_json(payload={"atomic_belief_drafts": [draft]}),
+        _llm_json(payload={"atomic_belief_inputs": [draft]}),
         _context(allow_summary_scheduling_hints=True),
     )
     payload = validated.payloads[0]
@@ -306,7 +306,7 @@ def test_state_service_accepts_background_topic_without_content_fallback(tmp_pat
     accepted = service.accept_background_llm_json(
         _llm_json(
             payload={
-                "atomic_belief_drafts": [
+                "atomic_belief_inputs": [
                     {
                         "memory_kind": MemoryKind.FACT.value,
                         "scope": BeliefScope.GLOBAL.value,

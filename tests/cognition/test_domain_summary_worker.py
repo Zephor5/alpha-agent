@@ -438,7 +438,7 @@ def _summary_json(
             "rationale": "Fixture domain guidance synthesis.",
             "source_span_note": "from selected consolidated memories",
             "payload": {
-                "summary_belief_draft": {
+                "summary_belief_input": {
                     "summary_kind": summary_kind.value,
                     "scope": scope.value,
                     "about": about,
