@@ -86,6 +86,8 @@ Operation rules:
   after validation and must include topic as a short
   topic phrase, not a sentence and not the full assertion in content.
 - Each atomic_belief_input content value must contain exactly one atomic assertion.
+- Use the same language as the source conversation evidence for new or
+  superseding topic and content; do not translate memories.
 - Do not write scope "self" for user-subject content such as "The user prefers
   direct feedback"; use scope "counterpart" or skip it.
 - Do not write scope "global" for user profile content.
@@ -126,6 +128,8 @@ provenance, idempotency keys, confidence, scores, or numeric strength fields.
 New or superseding atomic_belief_input payloads will be created as active memory
 after validation and must include topic as a short
 topic phrase, not a sentence and not the full assertion in content.
+Use the same language as the conflict source evidence for new or superseding
+topic and content; do not translate memories.
 
 Conflict source:
 {conflict_json}

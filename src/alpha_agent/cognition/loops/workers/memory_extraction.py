@@ -113,6 +113,8 @@ Content rules:
 - Each content value must be directly supported by the previous messages.
 - Each content value must contain exactly one atomic assertion, not multiple
   claims joined together.
+- Use the same language as the source conversation for topic and content; do not
+  translate extracted memories.
 - Messages wrapped in {system_reminder_placeholder} are session context,
   not new user evidence. Use them only to interpret ordinary user, assistant, and
   tool messages. Do not extract a new memory whose only support is a
@@ -174,6 +176,8 @@ Reference rules:
 
 Content rules:
 - Each content value must be directly supported by the previous imported messages.
+- Use the same language as the imported source conversation for topic and content;
+  do not translate extracted memories.
 - Imported assistant output is context for interpreting the transcript, not
   durable knowledge by default.
 - Assistant output is evidence about the user only when a user message adopts,

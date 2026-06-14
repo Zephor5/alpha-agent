@@ -80,6 +80,8 @@ as active summary memory after validation.
 For domain summaries, structure.target_domain is required and must match the selected target.
 topic is required and must be a short topic phrase, not a sentence and not the
 full assertion in content.
+Use the same language as the selected source memories and their original evidence
+for summary topic and content; do not translate summaries.
 If the selected memories are uncertain, noisy, duplicative, or not useful enough for a
 summary update, return skip with a short payload.reason instead of omitting output.
 Use source_time_line as evidence time when present. held_since is Alpha holding time,
