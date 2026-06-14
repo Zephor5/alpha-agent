@@ -80,17 +80,19 @@ Operation rules:
   after validation and must include topic as a short
   topic phrase, not a sentence and not the full assertion in content.
 - Each atomic_belief_input content value must contain exactly one atomic assertion.
-- Use the same language as the source conversation evidence for new or
+- Use the same language as the supplied extracted belief content for new or
   superseding topic and content; do not translate memories.
+- Do not infer source message roles, transcript provenance, or session context
+  that is not present in the supplied records.
+- Do not skip based on unsupported assumptions about omitted source messages;
+  skip only when the supplied extracted belief record itself is uncertain, noisy,
+  not useful, unsafe, or contract-violating.
 - Do not write scope "self" for user-subject content such as "The user prefers
   direct feedback"; use scope "counterpart" or skip it.
 - Do not write scope "global" for user profile content.
-- Skip uncertain imported extracted beliefs. If an imported extracted belief is
-  inferred from assistant output, a single-turn technical request/question,
-  inferred capability, or historical temporary state, return skip instead of
-  create or supersede.
-- Negative cases: sentence-like topic, multi-claim content, imported assistant
-  answer as global knowledge, and imported assistant identity as Alpha self memory.
+- Negative cases: sentence-like topic, multi-claim content, user profile content
+  under scope "global", user-subject content under scope "self", and update-like
+  operations targeting ids outside the supplied allowed update target belief ids.
 
 Time rules:
 - Recency decisions prefer source message time over held_since when source_time_line is present.
