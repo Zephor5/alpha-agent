@@ -3636,11 +3636,13 @@ def test_memory_extraction_worker_import_prompt_excludes_runtime_context_and_ses
     prompt_messages = provider.calls[0]["messages"]
     assert [message["role"] for message in prompt_messages] == [
         "system",
-        "system",
+        "user",
         "user",
         "assistant",
         "user",
     ]
+    assert isinstance(prompt_messages[1]["content"], str)
+    assert prompt_messages[1]["content"].startswith(SYSTEM_REMINDER_OPEN)
     prompt_text = json.dumps(prompt_messages, sort_keys=True)
     assert "External system instruction." in prompt_text
     assert "Identity: Alpha Agent" not in prompt_text

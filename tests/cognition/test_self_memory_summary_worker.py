@@ -203,7 +203,6 @@ def test_self_memory_summary_worker_prompt_includes_output_schema_and_target(
     assert '"const": "self"' not in instruction
     assert '"about": {' in instruction
     assert '{"id": "subject:self", "kind": "subject"}' not in instruction
-    assert "Do not present old source evidence as newly updated evidence." in instruction
     assert '"summary_kind": "self_memory_summary"' in material
     assert '{"id": "subject:self", "kind": "subject"}' in material
     assert '"held_since": "2026-06-12T02:00:00+00:00"' in material

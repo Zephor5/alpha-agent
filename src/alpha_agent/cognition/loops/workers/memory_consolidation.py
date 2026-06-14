@@ -119,7 +119,7 @@ multiple decisions. The output must validate against this JSON Schema:
 
 Operation rules:
 - skip: write nothing when the conflict cannot be safely resolved from the supplied
-  evidence; include a short payload.reason.
+  conflict source fields and active beliefs; include a short payload.reason.
 - create: create a new consolidated active atomic belief from atomic_belief_input.
 - strengthen: reaffirm one active belief with corroborating evidence.
 - supersede: replace one active belief with a new consolidated atomic belief.
@@ -127,15 +127,24 @@ Operation rules:
 - archive: mark one active belief archived.
 - Update-like operations must target one of the supplied allowed update target belief ids.
 - Do not mutate active memory unless the conflict can be safely resolved from the
-  supplied evidence. If resolving the conflict automatically is unsafe, return
-  skip with a short payload.reason.
+  supplied conflict source fields and active beliefs. If resolving the conflict
+  automatically is unsafe, return skip with a short payload.reason.
 - Do not include generated ids, source refs, provenance, idempotency keys, confidence,
   scores, or numeric strength fields.
 - New or superseding atomic_belief_input payloads will be created as active memory
   after validation and must include topic as a short topic phrase, not a sentence
   and not the full assertion in content.
-- Use the same language as the conflict source evidence for new or superseding
-  topic and content; do not translate memories."""
+- Each atomic_belief_input content value must contain exactly one atomic assertion.
+- Use the same language as the supplied conflict source fields for new or superseding
+  topic and content; do not translate memories.
+- Do not infer source message roles, transcript provenance, or session context
+  that is not present in the supplied records.
+- Do not write scope "self" for user-subject content such as "The user prefers
+  direct feedback"; use scope "counterpart" or skip it.
+- Do not write scope "global" for user profile content.
+- Negative cases: sentence-like topic, multi-claim content, user profile content
+  under scope "global", user-subject content under scope "self", and update-like
+  operations targeting ids outside the supplied allowed update target belief ids."""
 
 _CONFLICT_REVIEW_MATERIAL_MESSAGE = """Allowed update target belief ids:
 {allowed_target_belief_ids_json}
