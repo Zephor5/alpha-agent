@@ -265,7 +265,6 @@ class MemoryExtractionWorker:
         return self._run_with(
             state_service=self.state_service,
             llm_provider=self.llm_provider,
-            tools=self.tools,
             checkpoint=checkpoint or WorkerCheckpoint(worker_name=self.name),
             coordinator=coordinator or _NeverYieldCoordinator(),
             inactive_session_ids=self.inactive_session_ids,
@@ -289,7 +288,6 @@ class MemoryExtractionWorker:
         return self._run_session_with(
             state_service=self.state_service,
             llm_provider=self.llm_provider,
-            tools=self.tools,
             checkpoint=checkpoint,
             coordinator=coordinator or _NeverYieldCoordinator(),
             session_id=session_id,
@@ -361,7 +359,6 @@ class MemoryExtractionWorker:
         provider = self.llm_provider or getattr(config, "llm_provider", None)
         if provider is None:
             return _missing_llm_provider_report(self.name, checkpoint)
-        tools = tuple(getattr(config, "tools", self.tools) or ())
         inactive_session_ids = frozenset(
             getattr(config, "inactive_session_ids", self.inactive_session_ids) or ()
         )
@@ -372,7 +369,6 @@ class MemoryExtractionWorker:
         return self._run_with(
             state_service=state_service,
             llm_provider=provider,
-            tools=tools,
             checkpoint=checkpoint,
             coordinator=coordinator,
             inactive_session_ids=inactive_session_ids,
@@ -384,7 +380,6 @@ class MemoryExtractionWorker:
         *,
         state_service: CognitionStateStore,
         llm_provider: LLMProvider,
-        tools: Sequence[LLMToolDefinitionInput],
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
         inactive_session_ids: frozenset[str],
@@ -394,7 +389,6 @@ class MemoryExtractionWorker:
             report = self._run_session_with(
                 state_service=state_service,
                 llm_provider=llm_provider,
-                tools=tools,
                 checkpoint=checkpoint,
                 coordinator=coordinator,
                 session_id=session_id,
@@ -415,7 +409,6 @@ class MemoryExtractionWorker:
         *,
         state_service: CognitionStateStore,
         llm_provider: LLMProvider,
-        tools: Sequence[LLMToolDefinitionInput],
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
         session_id: str,
@@ -425,7 +418,6 @@ class MemoryExtractionWorker:
             state_service,
             session_id=session_id,
             extraction_version=self.extraction_version,
-            tools=tools,
         )
         if candidate is None:
             return _worker_report(
@@ -441,7 +433,7 @@ class MemoryExtractionWorker:
             worker_id=self.worker_id,
             state_service=state_service,
             llm_provider=llm_provider,
-            tools=tools,
+            tools=(),
             checkpoint=checkpoint,
             coordinator=coordinator,
             candidate=candidate,
@@ -538,6 +530,7 @@ def _run_candidate(
         ]
         if import_session:
             messages.insert(0, _import_extraction_system_message())
+        llm_tools = tuple(tools) if candidate.source_path == _COMPACT_SOURCE_PATH else ()
         response = traced_llm_complete(
             llm_provider,
             messages,
@@ -550,8 +543,8 @@ def _run_candidate(
                 run_id=run.run_id,
                 session_id=candidate.session_id,
             ),
-            tools=list(tools) if tools else None,
-            tool_choice=_tool_choice_for_extraction(tools),
+            tools=list(llm_tools) if llm_tools else None,
+            tool_choice=_tool_choice_for_extraction(llm_tools),
             response_format=JSON_OBJECT_RESPONSE_FORMAT,
         )
         written = state_service.accept_background_llm_json(
@@ -663,7 +656,6 @@ def _session_backlog_candidate(
     *,
     session_id: str,
     extraction_version: str,
-    tools: Sequence[LLMToolDefinitionInput],
 ) -> _SourceWindowCandidate | None:
     store = state_service.store
     target_unit = f"session:{session_id}"
@@ -763,7 +755,6 @@ def _session_backlog_candidate(
             "compressed_message_id": compressed.id if compressed is not None else None,
             "boundary_ordinal": boundary_ordinal,
             "prompt_prefix_hash": handover_prompt_prefix_hash(prompt_prefix_messages),
-            "tools_schema_hash": handover_tools_schema_hash(tools),
             "extraction_version": extraction_version,
             **source_time_metadata,
         },

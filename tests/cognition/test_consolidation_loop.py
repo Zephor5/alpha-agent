@@ -3391,14 +3391,24 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
             )
         )
     )
+    tools = [
+        LLMToolDefinition(
+            name="memory_recall",
+            description="Recall memory.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ]
 
     report = MemoryExtractionWorker(
         service,
         provider,
+        tools=tools,
         inactive_session_ids={"s1"},
     ).run_once()
 
     assert report.emitted == 1
+    assert provider.calls[0]["tools"] is None
+    assert provider.calls[0]["tool_choice"] is None
     instruction = provider.calls[0]["messages"][-1]["content"]
     assert isinstance(instruction, str)
     assert '"operation": {' in instruction
@@ -3436,6 +3446,11 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
     assert "only support is a" in instruction
     assert f"{SYSTEM_REMINDER_OPEN} message" in instruction
     assert "User prefers Chinese replies." not in instruction
+    [window] = service.ledger.list_source_windows(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    assert "tools_schema_hash" not in window.metadata
 
 
 def test_memory_extraction_worker_skips_reminder_only_backlog(tmp_path) -> None:
@@ -3682,14 +3697,24 @@ def test_import_extraction_writes_direct_user_stable_preference_active(
             )
         )
     )
+    tools = [
+        LLMToolDefinition(
+            name="memory_recall",
+            description="Recall memory.",
+            parameters={"type": "object", "properties": {}},
+        )
+    ]
 
     report = MemoryExtractionWorker(
         service,
         provider,
+        tools=tools,
         inactive_session_ids={imported.session_id},
     ).run_once()
 
     assert report.emitted == 1
+    assert provider.calls[0]["tools"] is None
+    assert provider.calls[0]["tool_choice"] is None
     active = service.beliefs.list_active()
     assert len(active) == 1
     assert active[0].content == "User prefers direct feedback."
@@ -4157,7 +4182,6 @@ def test_memory_extraction_worker_claims_preexisting_pending_retryable_session_w
         service,
         session_id="s1",
         extraction_version=DEFAULT_MEMORY_EXTRACTION_VERSION,
-        tools=(),
     )
     assert candidate is not None
     pending_window = service.ledger.create_source_window(
