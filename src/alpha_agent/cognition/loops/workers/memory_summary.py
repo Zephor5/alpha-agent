@@ -1,4 +1,4 @@
-"""LLM-mediated cognition-maintenance summaries from consolidated memories."""
+"""LLM-mediated cognition-maintenance summaries from final atomic memories."""
 
 from __future__ import annotations
 
@@ -62,12 +62,19 @@ _RETRYABLE_WINDOW_STATUSES = {
     BackgroundProgressStatus.PENDING,
     BackgroundProgressStatus.FAILED,
 }
+_FINAL_ATOMIC_DERIVATION_STAGES = frozenset(
+    {
+        DerivationStage.BACKGROUND_CONSOLIDATED,
+        DerivationStage.TOOL_WRITTEN,
+        DerivationStage.HUMAN_CONFIRMED,
+    }
+)
 _SUMMARY_SYSTEM_MESSAGE = (
     "You are Alpha Agent's background memory summary worker. "
     "Synthesize one summary only from the selected source beliefs, selected target, "
     "schema, and supplied guidance records; return only the requested JSON object."
 )
-_SUMMARY_INSTRUCTION = """Synthesize one summary belief from selected consolidated memories.
+_SUMMARY_INSTRUCTION = """Synthesize one summary belief from selected final atomic memories.
 
 Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
 multiple summaries. The output must validate against this JSON Schema:
@@ -96,7 +103,7 @@ _SUMMARY_MATERIAL_MESSAGE = """Selected summary target:
 Applicable domain guidance memory records:
 {domain_guidance_json}
 
-Selected consolidated memories:
+Selected final atomic memories:
 {source_beliefs_json}"""
 
 
@@ -126,7 +133,7 @@ class _NeverYieldCoordinator:
 
 
 class MemorySummaryWorker:
-    """Ask an LLM to synthesize summary beliefs from consolidated atomic beliefs."""
+    """Ask an LLM to synthesize summary beliefs from final atomic beliefs."""
 
     name: ClassVar[str] = "memory_summary"
 
@@ -424,7 +431,7 @@ def _summary_targets(
     invalidated_source_min: int,
 ) -> list[_SummaryTarget]:
     groups: dict[tuple[str, str, tuple[tuple[str, str], ...], str], list[AtomicBelief]] = {}
-    for belief in _eligible_consolidated_beliefs(state_service):
+    for belief in _eligible_summary_source_beliefs(state_service):
         for key in _target_keys_for_belief(belief):
             groups.setdefault(key, []).append(belief)
 
@@ -469,13 +476,13 @@ def _summary_targets(
     return targets
 
 
-def _eligible_consolidated_beliefs(
+def _eligible_summary_source_beliefs(
     state_service: CognitionStateStore,
 ) -> list[AtomicBelief]:
     return [
         belief
         for belief in state_service.beliefs.list_active()
-        if belief.derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+        if belief.derivation_stage in _FINAL_ATOMIC_DERIVATION_STAGES
         and not _is_expired_belief(belief)
     ]
 

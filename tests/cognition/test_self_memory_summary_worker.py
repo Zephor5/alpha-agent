@@ -78,6 +78,73 @@ def test_self_memory_summary_worker_writes_validated_summary_with_program_source
     assert ("atomic_belief", str(second.id)) in evidence
 
 
+def test_self_memory_summary_worker_uses_only_final_atomic_derivation_stages(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    consolidated = _self_consolidated_belief(
+        "belief:self-final-consolidated",
+        "Agent solves root causes.",
+        derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+    )
+    tool_written = _self_consolidated_belief(
+        "belief:self-final-tool",
+        "Agent uses memory tools deliberately.",
+        derivation_stage=DerivationStage.TOOL_WRITTEN,
+    )
+    human_confirmed = _self_consolidated_belief(
+        "belief:self-final-human",
+        "Agent should avoid local patches.",
+        derivation_stage=DerivationStage.HUMAN_CONFIRMED,
+    )
+    extracted = _self_consolidated_belief(
+        "belief:self-extracted",
+        "Extracted self memory is not finalized.",
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    summarized_stage = _self_consolidated_belief(
+        "belief:self-summarized-stage",
+        "Summarized-stage atomic records are not summary sources.",
+        derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
+    )
+    for belief in (consolidated, tool_written, human_confirmed, extracted, summarized_stage):
+        service.write_atomic_belief(
+            belief,
+            source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+        )
+    provider = _RecordingLLMProvider(
+        _summary_json("Agent combines final self memories only.")
+    )
+
+    report = MemorySummaryWorker(
+        service,
+        provider,
+        initial_min_beliefs=3,
+        changed_source_min=3,
+        invalidated_source_min=1,
+    ).run_once()
+
+    assert report.emitted == 1
+    summary = service.beliefs.latest_summary(
+        summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+        scope=BeliefScope.SELF,
+        about=Reference("subject", "subject:self"),
+    )
+    assert summary is not None
+    assert set(summary.source_belief_ids) == {
+        consolidated.id,
+        tool_written.id,
+        human_confirmed.id,
+    }
+    material = str(provider.calls[0]["messages"][-1]["content"])
+    assert str(consolidated.id) in material
+    assert str(tool_written.id) in material
+    assert str(human_confirmed.id) in material
+    assert str(extracted.id) not in material
+    assert str(summarized_stage.id) not in material
+
+
 def test_self_memory_summary_worker_rejects_malformed_llm_output_without_write(
     tmp_path,
 ) -> None:
@@ -229,6 +296,7 @@ def _self_consolidated_belief(
     *,
     sources: list[Reference] | None = None,
     held_since: str = "2026-01-01T00:00:00+00:00",
+    derivation_stage: DerivationStage = DerivationStage.BACKGROUND_CONSOLIDATED,
 ) -> AtomicBelief:
     return AtomicBelief(
         id=BeliefId(belief_id),
@@ -237,7 +305,7 @@ def _self_consolidated_belief(
         topic="self memory source",
         content=NLStatement(content),
         memory_kind=MemoryKind.FACT,
-        derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+        derivation_stage=derivation_stage,
         scope=BeliefScope.SELF,
         authority=Authority.BACKGROUND_SYNTHESIZED,
         sources=list(sources or []),

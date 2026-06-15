@@ -94,6 +94,88 @@ def test_domain_summary_worker_writes_llm_synthesized_summary_with_target_identi
     }
 
 
+def test_domain_summary_worker_groups_only_final_atomic_derivation_stages(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    consolidated = _consolidated_belief(
+        "belief:domain-final-consolidated",
+        "Memory proposal acceptance is final after consolidation.",
+        target_domain="memory_propose",
+        derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+    )
+    tool_written = _consolidated_belief(
+        "belief:domain-final-tool",
+        "Memory proposal tools may write final memory directly.",
+        target_domain="memory_propose",
+        derivation_stage=DerivationStage.TOOL_WRITTEN,
+    )
+    human_confirmed = _consolidated_belief(
+        "belief:domain-final-human",
+        "Human-confirmed memory proposal policy is final.",
+        target_domain="memory_propose",
+        derivation_stage=DerivationStage.HUMAN_CONFIRMED,
+    )
+    extracted = _consolidated_belief(
+        "belief:domain-extracted",
+        "Extracted memory proposal policy is not final.",
+        target_domain="memory_propose",
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    summarized_stage = _consolidated_belief(
+        "belief:domain-summarized-stage",
+        "Summarized-stage policy is not an atomic summary source.",
+        target_domain="memory_propose",
+        derivation_stage=DerivationStage.BACKGROUND_SUMMARIZED,
+    )
+    for belief in (consolidated, tool_written, human_confirmed, extracted, summarized_stage):
+        service.write_atomic_belief(
+            belief,
+            source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+        )
+    provider = _RecordingLLMProvider(
+        _summary_json(
+            summary_kind=SummaryKind.DOMAIN_SUMMARY,
+            scope=BeliefScope.GLOBAL,
+            about=[],
+            content="Memory proposal summaries use final atomic sources only.",
+            structure={
+                "target_domain": "memory_propose",
+                "memory_propose": {"policy": "final_only"},
+            },
+        )
+    )
+
+    report = MemorySummaryWorker(
+        service,
+        provider,
+        initial_min_beliefs=3,
+        changed_source_min=3,
+        invalidated_source_min=1,
+    ).run_once()
+
+    assert report.emitted == 1
+    summary = service.beliefs.latest_summary(
+        summary_kind=SummaryKind.DOMAIN_SUMMARY,
+        scope=BeliefScope.GLOBAL,
+    )
+    assert summary is not None
+    assert set(summary.source_belief_ids) == {
+        consolidated.id,
+        tool_written.id,
+        human_confirmed.id,
+    }
+    window = service.ledger.list_source_windows(stage=BackgroundStage.SUMMARY)[0]
+    assert window.metadata["summary_target"]["target_domain"] == "memory_propose"
+    assert window.metadata["source_belief_ids"] == sorted(
+        [str(consolidated.id), str(tool_written.id), str(human_confirmed.id)]
+    )
+    material = str(provider.calls[0]["messages"][-1]["content"])
+    assert str(extracted.id) not in material
+    assert str(summarized_stage.id) not in material
+
+
 def test_domain_summary_worker_runs_invalidated_source_gate(tmp_path) -> None:
     store = _store(tmp_path)
     service = CognitionStateStore(store)
@@ -365,6 +447,7 @@ def _consolidated_belief(
     about: list[Reference] | None = None,
     sources: list[Reference] | None = None,
     held_since: str = "2026-01-01T00:00:00+00:00",
+    derivation_stage: DerivationStage = DerivationStage.BACKGROUND_CONSOLIDATED,
 ) -> AtomicBelief:
     return AtomicBelief(
         id=BeliefId(belief_id),
@@ -373,7 +456,7 @@ def _consolidated_belief(
         topic=f"domain guidance {target_domain}",
         content=NLStatement(content),
         memory_kind=MemoryKind.FACT,
-        derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+        derivation_stage=derivation_stage,
         scope=scope,
         authority=Authority.BACKGROUND_SYNTHESIZED,
         sources=list(sources or []),

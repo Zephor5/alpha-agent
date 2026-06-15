@@ -23,6 +23,7 @@ from alpha_agent.cognition.emitter import EventEmitter
 from alpha_agent.cognition.event_log.base import EventLog
 from alpha_agent.cognition.event_log.sqlite import SQLiteEventLog
 from alpha_agent.cognition.loops import BackgroundCognitionService
+from alpha_agent.cognition.loops.background_service import _pending_consolidation_count
 from alpha_agent.cognition.loops.scheduler import (
     WorkerCheckpoint,
     WorkerReport,
@@ -74,6 +75,7 @@ from alpha_agent.config import (
     AlphaConfig,
     BackgroundConsolidationConfig,
     BackgroundExtractionConfig,
+    BackgroundSummaryConfig,
     CognitionBackgroundConfig,
 )
 from alpha_agent.daemon.conversation_import import ConversationImportService
@@ -791,6 +793,447 @@ def test_background_service_does_not_count_blocked_consolidation_window_as_backl
     assert reports == []
     assert background.status().state == "running"
     assert background.status().last_error is None
+
+
+def test_background_service_drain_promotion_removes_consolidation_backlog(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    extracted = _atomic_belief(
+        "belief:service-promote-isolated",
+        "Alpha Agent uses uv.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    final_memory = _atomic_belief(
+        "belief:service-final-tool",
+        "Final tool-written memory is not consolidation backlog.",
+        derivation_stage=DerivationStage.TOOL_WRITTEN,
+        scope=BeliefScope.SELF,
+        about=[Reference("subject", "subject:self")],
+    )
+    service.write_atomic_belief(extracted, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_atomic_belief(final_memory, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(enabled=True),
+        state_service=service,
+    )
+
+    assert _pending_consolidation_count(service) == 1
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == ["memory_consolidation"]
+    assert reports[0].new_checkpoint.last_status == "ok"
+    assert _pending_consolidation_count(service) == 0
+    promoted = service.beliefs.get_by_id(extracted.id)
+    assert isinstance(promoted, AtomicBelief)
+    assert promoted.derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+    assert background.tick_once() == []
+
+
+def test_background_service_drain_llm_batch_removes_every_consumed_source_from_backlog(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    first = _atomic_belief(
+        "belief:service-batch-a",
+        "Alpha Agent uses uv.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    second = _atomic_belief(
+        "belief:service-batch-b",
+        "Alpha Agent runs ruff.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    provider = _RecordingLLMProvider(
+        _consolidation_batch_json(
+            _decision("skip", [str(first.id)]),
+            _decision("skip", [str(second.id)]),
+        )
+    )
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(enabled=True),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    assert _pending_consolidation_count(service) == 2
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == ["memory_consolidation"]
+    assert len(provider.calls) == 1
+    assert _pending_consolidation_count(service) == 0
+    assert not [
+        belief
+        for belief in service.beliefs.list_active()
+        if belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
+    ]
+    for source_id in (first.id, second.id):
+        assert _source_progress_status(
+            service,
+            BackgroundSourceRef("atomic_belief", str(source_id)),
+            "scope:global",
+        ) == BackgroundProgressStatus.PROCESSED
+
+
+def test_background_service_failed_consolidation_window_remains_retryable(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    target = _atomic_belief("belief:service-failed-target", "Alpha Agent uses uv.")
+    extracted = _atomic_belief(
+        "belief:service-failed-extracted",
+        "Alpha Agent uses uv for package management.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    service.write_atomic_belief(extracted, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    provider = _RecordingLLMProvider(
+        "{not-json",
+        _consolidation_batch_json(
+            _decision(
+                "strengthen",
+                [str(extracted.id)],
+                target_belief_id=str(target.id),
+            )
+        ),
+    )
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(enabled=True),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    assert _pending_consolidation_count(service) == 1
+
+    failed_reports = background.tick_once()
+
+    assert [report.worker for report in failed_reports] == ["memory_consolidation"]
+    assert failed_reports[0].new_checkpoint.last_status == "error"
+    assert _pending_consolidation_count(service) == 1
+    failed_window = service.ledger.list_source_windows(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+    )[0]
+    assert failed_window.status == BackgroundProgressStatus.FAILED
+    assert _source_progress_status(
+        service,
+        BackgroundSourceRef("atomic_belief", str(extracted.id)),
+        "scope:global",
+    ) == BackgroundProgressStatus.FAILED
+
+    retried_reports = background.tick_once()
+
+    assert [report.worker for report in retried_reports] == ["memory_consolidation"]
+    assert retried_reports[0].new_checkpoint.last_status == "ok"
+    assert _pending_consolidation_count(service) == 0
+
+
+def test_background_pipeline_imported_session_promotes_isolated_memory_and_summarizes(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    ConversationImportService(store).import_payload(
+        json.dumps(
+            {
+                "source_provider": "chatgpt",
+                "conversations": [
+                    {
+                        "external_conversation_id": "conv_pipeline_1",
+                        "messages": [
+                            {
+                                "external_message_id": "msg_1",
+                                "role": "user",
+                                "content": "Alpha Agent validates changes with focused tests.",
+                                "created_at": "2026-01-01T00:00:00Z",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        input_name="external.json",
+    )
+    imported = store.get_imported_conversation("chatgpt", "conv_pipeline_1")
+    assert imported is not None
+    service = CognitionStateStore(store)
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.SELF.value,
+                    "about": [{"kind": "subject", "id": "subject:self"}],
+                    "topic": "self validation practice",
+                    "content": "Agent validates changes with focused tests.",
+                }
+            )
+        ),
+        _llm_json(
+            operation="create_summary_belief",
+            payload={
+                "summary_belief_input": {
+                    "summary_kind": SummaryKind.SELF_MEMORY_SUMMARY.value,
+                    "scope": BeliefScope.SELF.value,
+                    "about": [{"kind": "subject", "id": "subject:self"}],
+                    "topic": "self validation summary",
+                    "content": "Agent validates changes with focused tests.",
+                }
+            },
+        ),
+    )
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            extraction=BackgroundExtractionConfig(inactivity_threshold_hours=0),
+            summary=BackgroundSummaryConfig(
+                initial_min_beliefs=1,
+                changed_source_min=1,
+                invalidated_source_min=1,
+            ),
+        ),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == [
+        "memory_extraction",
+        "memory_consolidation",
+        "memory_summary",
+    ]
+    assert [report.new_checkpoint.last_status for report in reports] == ["ok", "ok", "ok"]
+    assert len(provider.calls) == 2
+    final_memories = [
+        belief
+        for belief in service.beliefs.list_active()
+        if belief.derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+    ]
+    assert len(final_memories) == 1
+    promoted = final_memories[0]
+    assert promoted.content == "Agent validates changes with focused tests."
+    assert not [
+        belief
+        for belief in service.beliefs.list_active()
+        if belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
+    ]
+    summary = service.beliefs.latest_summary(
+        summary_kind=SummaryKind.SELF_MEMORY_SUMMARY,
+        scope=BeliefScope.SELF,
+        about=Reference("subject", "subject:self"),
+    )
+    assert summary is not None
+    assert summary.source_belief_ids == [promoted.id]
+    consolidation_window = service.ledger.list_source_windows(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:self:subject:subject:self",
+    )[0]
+    assert consolidation_window.metadata["operation"] == "promote"
+    assert consolidation_window.metadata["llm_called"] is False
+
+
+def test_background_pipeline_batches_same_bucket_extractions_in_one_llm_call(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    created_at = (datetime.now(UTC) - timedelta(hours=25)).isoformat()
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv and runs ruff.",
+        created_at=created_at,
+    )
+    service = CognitionStateStore(store)
+
+    def skip_selected_sources(messages: list[ChatMessage]) -> str:
+        prompt_text = "\n".join(str(message.get("content", "")) for message in messages)
+        source_ids = sorted(set(re.findall(r'"id": "(belief[:_][^"]+)"', prompt_text)))
+        assert len(source_ids) == 2
+        return _consolidation_batch_json(
+            *(_decision("skip", [source_id]) for source_id in source_ids)
+        )
+
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "topic": "package management",
+                    "content": "Alpha Agent uses uv.",
+                },
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "topic": "linting",
+                    "content": "Alpha Agent runs ruff.",
+                },
+            )
+        ),
+        skip_selected_sources,
+    )
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            startup_delay_seconds=0,
+            interval_seconds=1,
+            extraction=BackgroundExtractionConfig(inactivity_threshold_hours=0),
+        ),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == [
+        "memory_extraction",
+        "memory_consolidation",
+    ]
+    assert [
+        (report.new_checkpoint.last_status, report.notes)
+        for report in reports
+    ] == [("ok", []), ("ok", [])]
+    assert len(provider.calls) == 2
+    window = service.ledger.list_source_windows(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+    )[0]
+    assert len(window.source_refs) == 2
+    assert window.metadata["selection_reason"] == "batch_reconciliation_required"
+    consolidation_prompt = str(provider.calls[1]["messages"][-1]["content"])
+    for source_ref in window.source_refs:
+        assert source_ref.source_id in consolidation_prompt
+        assert _source_progress_status(service, source_ref, "scope:global") == (
+            BackgroundProgressStatus.PROCESSED
+        )
+    assert not [
+        belief
+        for belief in service.beliefs.list_active()
+        if belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
+    ]
+
+
+def test_background_pipeline_mixed_batch_closes_sources_with_decision_provenance(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    target = _atomic_belief("belief:pipeline-target", "Alpha Agent uses pytest.")
+    create_source = _atomic_belief(
+        "belief:pipeline-source-create",
+        "Alpha Agent runs ruff.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    strengthen_source = _atomic_belief(
+        "belief:pipeline-source-strengthen",
+        "Alpha Agent uses pytest for tests.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    skip_source = _atomic_belief(
+        "belief:pipeline-source-skip",
+        "A noisy source says Alpha Agent uses Nose.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
+    for belief in (create_source, strengthen_source, skip_source):
+        service.write_atomic_belief(
+            belief,
+            source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
+        )
+    provider = _RecordingLLMProvider(
+        _consolidation_batch_json(
+            _decision(
+                "create",
+                [str(create_source.id)],
+                atomic_belief_input=_atomic_input(
+                    content="Alpha Agent runs ruff during validation.",
+                    topic="validation linting",
+                ),
+            ),
+            _decision(
+                "strengthen",
+                [str(strengthen_source.id)],
+                target_belief_id=str(target.id),
+            ),
+            _decision("skip", [str(skip_source.id)]),
+        )
+    )
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(enabled=True),
+        state_service=service,
+        llm_provider=provider,
+    )
+
+    reports = background.tick_once()
+
+    assert [report.worker for report in reports] == ["memory_consolidation"]
+    assert [(report.new_checkpoint.last_status, report.notes) for report in reports] == [
+        ("ok", [])
+    ]
+    window = service.ledger.list_source_windows(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+    )[0]
+    assert window.status == BackgroundProgressStatus.PROCESSED
+    run = _stage_run_for_window(service, window.window_id)
+    source_ids = {str(create_source.id), str(strengthen_source.id), str(skip_source.id)}
+    for source_id in source_ids:
+        assert _source_progress_status(
+            service,
+            BackgroundSourceRef("atomic_belief", source_id),
+            "scope:global",
+        ) == BackgroundProgressStatus.PROCESSED
+    assert not [
+        belief
+        for belief in service.beliefs.list_active()
+        if belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
+    ]
+    created = next(
+        belief
+        for belief in service.beliefs.list_active()
+        if str(belief.content) == "Alpha Agent runs ruff during validation."
+    )
+    strengthened = service.beliefs.get_by_id(target.id)
+    assert isinstance(strengthened, AtomicBelief)
+    _assert_only_decision_source_ids(
+        created,
+        window_id=window.window_id,
+        run_id=run.run_id,
+        expected_source_ids={str(create_source.id)},
+        forbidden_source_ids={str(strengthen_source.id), str(skip_source.id)},
+    )
+    _assert_only_decision_source_ids(
+        strengthened,
+        window_id=window.window_id,
+        run_id=run.run_id,
+        expected_source_ids={str(strengthen_source.id)},
+        forbidden_source_ids={str(create_source.id), str(skip_source.id)},
+    )
 
 
 def test_background_service_failure_aborts_tick_and_next_tick_retries(tmp_path) -> None:
