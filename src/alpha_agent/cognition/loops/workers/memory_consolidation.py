@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 
 from alpha_agent.cognition.authority import CognitionSourceKind
@@ -43,6 +45,7 @@ from alpha_agent.cognition.processing_ledger import (
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
 from alpha_agent.cognition.projections.registry import ProjectionRegistry
+from alpha_agent.cognition.search_tokenizer import tokenize_mixed_text
 from alpha_agent.cognition.source_time import (
     render_source_time_line,
     resolve_belief_source_time_range,
@@ -55,38 +58,64 @@ from alpha_agent.state.store import StateStore
 from alpha_agent.utils.time import utc_now_iso
 
 _RETRYABLE_SOURCE_STATUSES = {None, BackgroundProgressStatus.FAILED}
+_BLOCKING_WINDOW_STATUSES = {
+    BackgroundProgressStatus.PENDING,
+    BackgroundProgressStatus.CLAIMED,
+}
+_FINAL_ATOMIC_DERIVATION_STAGES = {
+    DerivationStage.BACKGROUND_CONSOLIDATED,
+    DerivationStage.TOOL_WRITTEN,
+    DerivationStage.HUMAN_CONFIRMED,
+}
+_CONSOLIDATION_CONTRACT_VERSION = "consolidation-batch-reconciliation-v1"
 _CONSOLIDATION_SYSTEM_MESSAGE = (
     "You are Alpha Agent's background memory consolidation worker. "
-    "Use only the supplied extracted beliefs, active beliefs, conflict metadata, schemas, "
-    "and allowed targets; return only the requested JSON object."
+    "Use only the supplied extracted beliefs, active beliefs, schemas, and allowed "
+    "targets; return only the requested JSON object."
 )
-_CONSOLIDATION_INSTRUCTION = """Compare extracted atomic beliefs with active beliefs.
+_CONFLICT_REVIEW_SYSTEM_MESSAGE = (
+    "You are Alpha Agent's background memory conflict review worker. "
+    "Use only the supplied conflict metadata, active beliefs, schemas, and allowed "
+    "targets; return only the requested JSON object."
+)
+_CONSOLIDATION_INSTRUCTION = """Consolidation reconciles atomic memory inputs, not summaries.
+You cannot see raw source messages in this stage; use only the selected extracted
+atomic sources and selected final active atomic context supplied below.
 
 Return only one JSON object. Do not return markdown, code fences, arrays, commentary, or
-multiple decisions. The output must validate against this JSON Schema:
+extra text. The output must validate against this JSON Schema:
 {output_schema_json}
 
 Operation rules:
-- skip: write nothing when the extracted belief is uncertain, noisy, not useful, or unsafe to
-  consolidate; include a short payload.reason.
-- create: create a new consolidated active atomic belief from atomic_belief_input.
-- strengthen: reaffirm one active belief with corroborating evidence.
-- supersede: replace one active belief with a new consolidated atomic belief.
-- retract: mark one active belief retracted.
-- archive: mark one active belief archived.
+- The top-level operation is always "consolidate_atomic_beliefs" with decisions under
+  payload.decisions.
+- Every supplied extracted source must be consumed exactly once across all decisions.
+- promote: consume exactly one extracted source by preserving that source belief unchanged
+  and promoting it in place to final consolidated memory.
+- create: consume one or more extracted sources and write a rewritten or synthesized final
+  atomic belief. Create is not copying one source unchanged; use promote for that.
+- skip: archive consumed extracted sources when they are uncertain, noisy, not useful, unsafe,
+  or contract-violating.
+- strengthen: reaffirm one selected final active atomic context belief with consumed sources.
+- supersede: replace one selected final active atomic context belief with a new consolidated
+  atomic belief.
+- retract: mark one selected final active atomic context belief retracted.
+- archive: mark one selected final active atomic context belief archived.
 - Update-like operations must target one of the supplied allowed update target belief ids.
-- Do not include source ids, provenance, idempotency keys, generated ids, confidence,
-  scores, or numeric strength fields.
+- Each decision must include source_atomic_belief_ids drawn only from the supplied
+  extracted sources; these are required decision provenance.
+- Do not add LLM-provided provenance fields, generated identifiers, idempotency keys,
+  confidence, scores, or numeric strength fields.
 - New or superseding atomic_belief_input payloads will be created as active memory
   after validation and must include topic as a short
   topic phrase, not a sentence and not the full assertion in content.
 - Each atomic_belief_input content value must contain exactly one atomic assertion.
-- Use the same language as the supplied extracted belief content for new or
+- Use the same language as the supplied extracted source content for new or
   superseding topic and content; do not translate memories.
 - Do not infer source message roles, transcript provenance, or session context
   that is not present in the supplied records.
 - Do not skip based on unsupported assumptions about omitted source messages;
-  skip only when the supplied extracted belief record itself is uncertain, noisy,
+  skip only when the supplied extracted source record itself is uncertain, noisy,
   not useful, unsafe, or contract-violating.
 - Do not write scope "self" for user-subject content such as "The user prefers
   direct feedback"; use scope "counterpart" or skip it.
@@ -106,10 +135,10 @@ _CONSOLIDATION_MATERIAL_MESSAGE = """Allowed update target belief ids:
 Allowed about references for newly created or superseding atomic belief inputs:
 {allowed_about_refs_json}
 
-Extracted beliefs to consolidate:
+Selected extracted atomic sources:
 {drafts_json}
 
-Active beliefs included as valid update targets:
+Selected final active atomic context:
 {active_beliefs_json}"""
 
 _CONFLICT_REVIEW_INSTRUCTION = """Review the queued memory conflict.
@@ -168,6 +197,7 @@ class _ConsolidationCandidate:
     active_beliefs: tuple[AtomicBelief, ...]
     source_text: str
     metadata: dict[str, Any]
+    llm_required: bool
 
 
 class _NeverYieldCoordinator:
@@ -211,15 +241,6 @@ class MemoryConsolidationWorker:
     ) -> WorkerReport:
         if self.state_service is None:
             raise ValueError("MemoryConsolidationWorker.run_once requires state_service")
-        if self.llm_provider is None:
-            return _worker_report(
-                self.name,
-                checkpoint or WorkerCheckpoint(worker_name=self.name),
-                inspected=0,
-                emitted=0,
-                status="error",
-                notes=["memory consolidation failed: no LLM provider configured"],
-            )
         return self._run_with(
             state_service=self.state_service,
             llm_provider=self.llm_provider,
@@ -243,15 +264,6 @@ class MemoryConsolidationWorker:
         projection = projections.get_typed(BeliefProjection)
         state_service = self.state_service or CognitionStateStore(projection.store)
         provider = self.llm_provider or getattr(config, "llm_provider", None)
-        if provider is None:
-            return _worker_report(
-                self.name,
-                checkpoint,
-                inspected=0,
-                emitted=0,
-                status="error",
-                notes=["memory consolidation failed: no LLM provider configured"],
-            )
         return self._run_with(
             state_service=state_service,
             llm_provider=provider,
@@ -287,15 +299,18 @@ class MemoryConsolidationWorker:
         self,
         *,
         state_service: CognitionStateStore,
-        llm_provider: LLMProvider,
+        llm_provider: LLMProvider | None,
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
         max_extracted_per_batch: int,
         max_active_context: int,
         llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
-        del max_extracted_per_batch, max_active_context
-        candidate = _next_consolidation_candidate(state_service)
+        candidate = _next_consolidation_candidate(
+            state_service,
+            max_extracted_per_batch=max_extracted_per_batch,
+            max_active_context=max_active_context,
+        )
         if candidate is None:
             return _worker_report(
                 self.name,
@@ -303,6 +318,15 @@ class MemoryConsolidationWorker:
                 inspected=0,
                 emitted=0,
                 status="skipped_no_backlog",
+            )
+        if candidate.llm_required and llm_provider is None:
+            return _worker_report(
+                self.name,
+                checkpoint,
+                inspected=len(candidate.source_refs),
+                emitted=0,
+                status="error",
+                notes=["memory consolidation failed: no LLM provider configured"],
             )
         if coordinator.budget_exhausted() or coordinator.yield_to_higher_priority():
             return _worker_report(
@@ -313,18 +337,24 @@ class MemoryConsolidationWorker:
                 status="yielded",
                 yielded=True,
             )
+        idempotency_key = _candidate_idempotency_key(
+            BackgroundStage.CONSOLIDATION,
+            candidate.target_unit,
+            candidate.source_refs,
+            candidate.metadata,
+        )
         window = state_service.ledger.create_source_window(
             stage=BackgroundStage.CONSOLIDATION,
             target_unit=candidate.target_unit,
             source_refs=candidate.source_refs,
-            idempotency_key=_candidate_idempotency_key(
-                BackgroundStage.CONSOLIDATION,
-                candidate.target_unit,
-                candidate.source_refs,
-                candidate.metadata,
-            ),
+            idempotency_key=idempotency_key,
             metadata=candidate.metadata,
         )
+        if window.status == BackgroundProgressStatus.FAILED:
+            window = state_service.ledger.refresh_failed_source_window_metadata(
+                window.window_id,
+                metadata=candidate.metadata,
+            )
         if window.status == BackgroundProgressStatus.PROCESSED:
             return _worker_report(
                 self.name,
@@ -370,26 +400,31 @@ class MemoryConsolidationWorker:
             )
         try:
             context = _validation_context_for_candidate(window, candidate)
-            response = traced_llm_complete(
-                llm_provider,
-                _consolidation_messages(
-                    state_service.store,
-                    candidate,
-                    context=context,
-                ),
-                trace_logger=llm_trace_logger,
-                trace_metadata=background_llm_trace_metadata(
-                    worker_name=self.name,
-                    worker_id=self.worker_id,
-                    stage=BackgroundStage.CONSOLIDATION,
-                    window=window,
-                    run_id=run.run_id,
-                ),
-                tool_choice="none",
-                response_format=JSON_OBJECT_RESPONSE_FORMAT,
-            )
+            if candidate.llm_required:
+                if llm_provider is None:
+                    raise ValueError("memory consolidation failed: no LLM provider configured")
+                response_content = traced_llm_complete(
+                    llm_provider,
+                    _consolidation_messages(
+                        state_service.store,
+                        candidate,
+                        context=context,
+                    ),
+                    trace_logger=llm_trace_logger,
+                    trace_metadata=background_llm_trace_metadata(
+                        worker_name=self.name,
+                        worker_id=self.worker_id,
+                        stage=BackgroundStage.CONSOLIDATION,
+                        window=window,
+                        run_id=run.run_id,
+                    ),
+                    tool_choice="none",
+                    response_format=JSON_OBJECT_RESPONSE_FORMAT,
+                ).content
+            else:
+                response_content = _deterministic_promotion_output(candidate)
             written = state_service.accept_background_llm_json(
-                response.content,
+                response_content,
                 context,
                 window_id=window.window_id,
                 run_id=run.run_id,
@@ -621,16 +656,20 @@ class MemoryConflictReviewWorker:
 
 def _next_consolidation_candidate(
     state_service: CognitionStateStore,
+    *,
+    max_extracted_per_batch: int,
+    max_active_context: int,
 ) -> _ConsolidationCandidate | None:
-    active = sorted(state_service.beliefs.list_active(), key=lambda item: str(item.id))
-    drafts = [
-        belief
-        for belief in active
-        if belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
-    ]
-    for draft in drafts:
-        target_unit = _target_unit_for_belief(draft)
-        source_ref = BackgroundSourceRef("atomic_belief", str(draft.id))
+    active = sorted(
+        state_service.beliefs.list_active(),
+        key=lambda item: (str(item.held_since), str(item.id)),
+    )
+    buckets: dict[str, list[AtomicBelief]] = {}
+    for belief in active:
+        if belief.derivation_stage != DerivationStage.BACKGROUND_EXTRACTED:
+            continue
+        target_unit = _target_unit_for_belief(belief)
+        source_ref = BackgroundSourceRef("atomic_belief", str(belief.id))
         if _source_status(
             state_service,
             source_ref,
@@ -638,27 +677,179 @@ def _next_consolidation_candidate(
             target_unit=target_unit,
         ) not in _RETRYABLE_SOURCE_STATUSES:
             continue
-        selected_drafts = (draft,)
-        source_refs = (source_ref,)
-        active_beliefs = tuple(
-            item
-            for item in active
-            if item.derivation_stage != DerivationStage.BACKGROUND_EXTRACTED
-            and _same_consolidation_bucket(item, draft)
+        buckets.setdefault(target_unit, []).append(belief)
+
+    for target_unit in sorted(buckets):
+        if _has_blocking_consolidation_window(state_service, target_unit):
+            continue
+        selected_drafts = tuple(buckets[target_unit][:max(1, max_extracted_per_batch)])
+        if not selected_drafts:
+            continue
+        source_refs = tuple(
+            BackgroundSourceRef("atomic_belief", str(item.id)) for item in selected_drafts
         )
-        source_text = str(draft.content)
+        active_context = _active_context_for_sources(
+            state_service,
+            selected_drafts,
+            max_active_context=max_active_context,
+        )
+        deterministic_promote = len(buckets[target_unit]) == 1 and not active_context
+        metadata = _candidate_metadata(
+            target_unit=target_unit,
+            selected_drafts=selected_drafts,
+            active_context=active_context,
+            deterministic_promote=deterministic_promote,
+        )
         return _ConsolidationCandidate(
             target_unit=target_unit,
             source_refs=source_refs,
             drafts=selected_drafts,
-            active_beliefs=active_beliefs,
-            source_text=source_text,
-            metadata={
-                "draft_belief_ids": [str(item.id) for item in selected_drafts],
-                "active_belief_ids": [str(item.id) for item in active_beliefs],
-            },
+            active_beliefs=active_context,
+            source_text="\n".join(str(item.content) for item in selected_drafts),
+            metadata=metadata,
+            llm_required=not deterministic_promote,
         )
     return None
+
+
+def _active_context_for_sources(
+    state_service: CognitionStateStore,
+    sources: Sequence[AtomicBelief],
+    *,
+    max_active_context: int,
+) -> tuple[AtomicBelief, ...]:
+    selected_sources = tuple(sources)
+    if not selected_sources:
+        return ()
+    target_unit = _target_unit_for_belief(selected_sources[0])
+    candidates = [
+        belief
+        for belief in state_service.beliefs.list_active()
+        if _target_unit_for_belief(belief) == target_unit
+        and belief.derivation_stage in _FINAL_ATOMIC_DERIVATION_STAGES
+    ]
+    ranked = sorted(
+        candidates,
+        key=lambda item: _active_context_rank_key(item, selected_sources),
+    )
+    return tuple(ranked[: max(1, max_active_context)])
+
+
+def _active_context_rank_key(
+    belief: AtomicBelief,
+    sources: Sequence[AtomicBelief],
+) -> tuple[int, int, int, int, int, float, str]:
+    source_content = {_normalized_match_text(item.content) for item in sources}
+    source_topics = {_normalized_match_text(item.topic) for item in sources}
+    source_tokens = {
+        token
+        for source in sources
+        for token in _belief_retrieval_tokens(source)
+    }
+    source_domains = {
+        domain
+        for source in sources
+        for domain in _target_domains_for_belief(source)
+    }
+    exact_content = _normalized_match_text(belief.content) in source_content
+    topic_match = _normalized_match_text(belief.topic) in source_topics
+    token_overlap = len(set(_belief_retrieval_tokens(belief)).intersection(source_tokens))
+    memory_kind_match = any(belief.memory_kind == source.memory_kind for source in sources)
+    shared_domains = len(
+        set(_target_domains_for_belief(belief)).intersection(source_domains)
+    )
+    return (
+        -int(exact_content),
+        -int(topic_match),
+        -token_overlap,
+        -int(memory_kind_match),
+        -shared_domains,
+        -_instant_timestamp(belief.held_since),
+        str(belief.id),
+    )
+
+
+def _belief_retrieval_tokens(belief: AtomicBelief) -> tuple[str, ...]:
+    return tokenize_mixed_text(f"{belief.topic} {belief.content}")
+
+
+def _normalized_match_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value).casefold().strip())
+
+
+def _target_domains_for_belief(belief: AtomicBelief) -> tuple[str, ...]:
+    values: list[str] = []
+    update_policy = belief.update_policy if isinstance(belief.update_policy, dict) else {}
+    raw = update_policy.get("target_domain")
+    if isinstance(raw, str) and raw.strip():
+        values.append(raw.strip())
+    raw_many = update_policy.get("target_domains")
+    if isinstance(raw_many, list | tuple):
+        values.extend(
+            item.strip()
+            for item in raw_many
+            if isinstance(item, str) and item.strip()
+        )
+    return tuple(sorted(set(values)))
+
+
+def _instant_timestamp(value: object) -> float:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _has_blocking_consolidation_window(
+    state_service: CognitionStateStore,
+    target_unit: str,
+) -> bool:
+    return any(
+        state_service.ledger.list_source_windows(
+            stage=BackgroundStage.CONSOLIDATION,
+            target_unit=target_unit,
+            status=status,
+        )
+        for status in _BLOCKING_WINDOW_STATUSES
+    )
+
+
+def _candidate_metadata(
+    *,
+    target_unit: str,
+    selected_drafts: Sequence[AtomicBelief],
+    active_context: Sequence[AtomicBelief],
+    deterministic_promote: bool,
+) -> dict[str, Any]:
+    source_ids = [str(item.id) for item in selected_drafts]
+    active_context_ids = [str(item.id) for item in active_context]
+    first = selected_drafts[0]
+    owner_bucket = {
+        "scope": first.scope.value,
+        "about": [
+            ref.to_record()
+            for ref in sorted(first.about, key=lambda item: (item.kind, item.id))
+        ],
+        "target_unit": target_unit,
+    }
+    return {
+        "source_belief_ids": source_ids,
+        "draft_belief_ids": source_ids,
+        "active_context_belief_ids": active_context_ids,
+        "active_belief_ids": active_context_ids,
+        "selection_reason": (
+            "isolated_extracted_no_active_context"
+            if deterministic_promote
+            else "batch_reconciliation_required"
+        ),
+        "owner_bucket": owner_bucket,
+        "consolidation_contract_version": _CONSOLIDATION_CONTRACT_VERSION,
+        "operation": "promote" if deterministic_promote else "consolidate_atomic_beliefs",
+        "llm_called": not deterministic_promote,
+    }
 
 
 def _next_conflict_review_window(
@@ -779,6 +970,37 @@ def _allowed_about_refs(beliefs: Sequence[AtomicBelief]) -> frozenset[tuple[str,
     return frozenset(refs) if refs else frozenset()
 
 
+def _deterministic_promotion_output(candidate: _ConsolidationCandidate) -> str:
+    if len(candidate.drafts) != 1 or candidate.active_beliefs:
+        raise ValueError("deterministic promotion requires one source and no active context")
+    source_id = str(candidate.drafts[0].id)
+    return json.dumps(
+        {
+            "operation": "consolidate_atomic_beliefs",
+            "authority": "background_synthesized",
+            "rationale": (
+                "One active extracted atomic source has no final active atomic context "
+                "in the same owner bucket, so it can be promoted without reconciliation."
+            ),
+            "source_span_note": None,
+            "payload": {
+                "decisions": [
+                    {
+                        "operation": "promote",
+                        "source_atomic_belief_ids": [source_id],
+                        "rationale": (
+                            "The isolated extracted atomic source has no selected final "
+                            "active atomic context to reconcile against."
+                        ),
+                    }
+                ]
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
 def _consolidation_messages(
     store: StateStore,
     candidate: _ConsolidationCandidate,
@@ -825,7 +1047,7 @@ def _conflict_review_messages(
     context: BackgroundLLMValidationContext,
 ) -> list[ChatMessage]:
     return [
-        _consolidation_system_message(),
+        {"role": "system", "content": _CONFLICT_REVIEW_SYSTEM_MESSAGE},
         {
             "role": "user",
             "content": _CONFLICT_REVIEW_INSTRUCTION.format(
@@ -936,13 +1158,16 @@ def _candidate_idempotency_key(
     source_refs: Sequence[BackgroundSourceRef],
     metadata: dict[str, Any],
 ) -> str:
+    contract_version = str(
+        metadata.get("consolidation_contract_version") or _CONSOLIDATION_CONTRACT_VERSION
+    )
     digest = hashlib.sha256(
         stable_json(
             {
                 "stage": stage.value,
                 "target_unit": target_unit,
                 "source_refs": [ref.to_record() for ref in source_refs],
-                "metadata": metadata,
+                "consolidation_contract_version": contract_version,
             }
         ).encode("utf-8")
     ).hexdigest()

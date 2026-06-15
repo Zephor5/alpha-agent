@@ -485,6 +485,32 @@ class ProcessingLedger:
 
         return self._write(conn, op)
 
+    def refresh_failed_source_window_metadata(
+        self,
+        window_id: str,
+        *,
+        metadata: Mapping[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> BackgroundSourceWindow:
+        """Refresh retry metadata for a failed window without changing terminal successes."""
+
+        def op(db: sqlite3.Connection) -> BackgroundSourceWindow:
+            db.execute(
+                """
+                UPDATE background_source_window
+                SET metadata = ?
+                WHERE window_id = ? AND status = ?
+                """,
+                (
+                    _dumps(dict(metadata)),
+                    window_id,
+                    BackgroundProgressStatus.FAILED.value,
+                ),
+            )
+            return self._get_source_window_row(db, window_id)
+
+        return self._write(conn, op)
+
     def list_source_windows(
         self,
         *,

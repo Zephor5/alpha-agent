@@ -741,11 +741,19 @@ def _session_extraction_source_refs(
 
 def _pending_consolidation_count(state_service: CognitionStateStore) -> int:
     count = 0
+    blocked_target_units: set[str] = set()
     for belief in state_service.beliefs.list_active():
         if belief.derivation_stage != DerivationStage.BACKGROUND_EXTRACTED:
             continue
         source_ref = BackgroundSourceRef("atomic_belief", str(belief.id))
         target_unit = _target_unit_for_belief(belief)
+        if target_unit not in blocked_target_units and _has_active_consolidation_window(
+            state_service,
+            target_unit,
+        ):
+            blocked_target_units.add(target_unit)
+        if target_unit in blocked_target_units:
+            continue
         if _source_status(
             state_service,
             source_ref,
@@ -754,6 +762,20 @@ def _pending_consolidation_count(state_service: CognitionStateStore) -> int:
         ) in _RETRYABLE_SOURCE_STATUSES:
             count += 1
     return count
+
+
+def _has_active_consolidation_window(
+    state_service: CognitionStateStore,
+    target_unit: str,
+) -> bool:
+    return any(
+        state_service.ledger.list_source_windows(
+            stage=BackgroundStage.CONSOLIDATION,
+            target_unit=target_unit,
+            status=status,
+        )
+        for status in _ACTIVE_SOURCE_STATUSES
+    )
 
 
 def _pending_conflict_count(state_service: CognitionStateStore) -> int:
