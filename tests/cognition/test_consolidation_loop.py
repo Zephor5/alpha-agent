@@ -3440,7 +3440,8 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
     assert '"enum": [' in instruction
     assert '{"id": "counterpart:user-a", "kind": "counterpart"}' in instruction
     assert '{"id": "s1", "kind": "session"}' not in instruction
-    assert '{"id": "subject:self", "kind": "subject"}' in instruction
+    assert '{"id": "subject:self", "kind": "subject"}' not in instruction
+    assert '{"id": "subject:self", "kind": "self"}' not in instruction
     assert 'Do not emit scope "session"' in instruction
     assert 'For scope "session"' not in instruction
     assert "project_descriptor" in instruction
@@ -3470,6 +3471,36 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
         target_unit="session:s1",
     )
     assert "tools_schema_hash" not in window.metadata
+
+
+def test_memory_extraction_worker_allows_self_ref_only_for_main_user_counterpart(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.create_session_counterpart(
+        session_id="s1",
+        counterpart_id="counterpart:main-user",
+    )
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent should remember that it validates changes.",
+    )
+    provider = _RecordingLLMProvider(_llm_json(payload=_extraction_payload()))
+
+    MemoryExtractionWorker(
+        service,
+        provider,
+        inactive_session_ids={"s1"},
+    ).run_once()
+
+    instruction = provider.calls[0]["messages"][-1]["content"]
+    assert isinstance(instruction, str)
+    assert '{"id": "counterpart:main-user", "kind": "counterpart"}' in instruction
+    assert '{"id": "subject:self", "kind": "subject"}' in instruction
+    assert '{"id": "subject:self", "kind": "self"}' not in instruction
 
 
 def test_memory_extraction_worker_skips_reminder_only_backlog(tmp_path) -> None:

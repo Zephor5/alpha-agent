@@ -61,6 +61,7 @@ from alpha_agent.runtime.context_handover import (
     handover_prompt_prefix_hash,
     handover_tools_schema_hash,
 )
+from alpha_agent.runtime.counterpart_router import DEFAULT_COUNTERPART_ID
 from alpha_agent.runtime.prompt_builder import default_runtime_system_message
 from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
@@ -105,7 +106,8 @@ Reference rules:
   transient source session.
 - For scope "global", set about to [].
 - For scope "counterpart", use exactly one allowed reference with kind "counterpart".
-- For scope "self", use exactly one allowed reference with kind "subject" or "self".
+- For scope "self", use exactly one allowed reference with kind "subject"; if no
+  subject reference is supplied, skip self-scope extraction.
 - For scope "project", set about to [] and include project_descriptor as a resolvable
   string or object; do not invent project ids.
 - User-subject assertions, including content starting with "The user..." or
@@ -177,7 +179,8 @@ Reference rules:
   durable memory scopes.
 - For scope "global", set about to [].
 - For scope "counterpart", use exactly one allowed reference with kind "counterpart".
-- For scope "self", use exactly one allowed reference with kind "subject" or "self".
+- For scope "self", use exactly one allowed reference with kind "subject"; if no
+  subject reference is supplied, skip self-scope extraction.
 - For scope "project", set about to [] and include project_descriptor as a resolvable
   string or object; do not invent project ids.
 - User-subject assertions, including content starting with "The user..." or
@@ -946,13 +949,12 @@ def _allowed_about_refs(
     store: StateStore,
     session_id: str,
 ) -> frozenset[tuple[str, str]]:
-    refs = {
-        ("subject", "subject:self"),
-        ("self", "subject:self"),
-    }
+    refs: set[tuple[str, str]] = set()
     counterpart = store.get_session_counterpart(session_id)
     if counterpart is not None:
         refs.add(("counterpart", counterpart.counterpart_id))
+        if counterpart.counterpart_id == str(DEFAULT_COUNTERPART_ID):
+            refs.add(("subject", "subject:self"))
     return frozenset(refs)
 
 
