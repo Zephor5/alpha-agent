@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+import re
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationError,
     SourceWindowValidationContext,
     ValidatedAtomicBeliefDraft,
+    ValidatedConsolidationDecision,
     validate_background_llm_json,
 )
 from alpha_agent.cognition.emitter import EventEmitter
@@ -602,17 +604,18 @@ def test_background_service_extraction_rotates_downstream_after_session_cap(
     service = CognitionStateStore(store)
     provider = _RecordingLLMProvider(
         _llm_json(),
-        _llm_json(
-            operation="create",
-            payload={
-                "atomic_belief_input": {
+        lambda messages: _consolidation_batch_json(
+            _decision(
+                "create",
+                [_first_prompt_belief_id(messages)],
+                atomic_belief_input={
                     "memory_kind": MemoryKind.PREFERENCE.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
                     "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
-                }
-            },
+                },
+            )
         ),
         _llm_json(payload=_extraction_payload()),
     )
@@ -1303,17 +1306,315 @@ def test_background_llm_contract_rejects_invalid_output() -> None:
 def test_background_llm_contract_rejects_update_target_not_in_input_for_consolidation() -> None:
     with pytest.raises(BackgroundLLMValidationError, match="target"):
         validate_background_llm_json(
-            _llm_json(
-                payload={
-                    "belief_update": {
-                        "target_belief_id": "belief:not-in-input",
-                        "rationale": "The belief is obsolete.",
-                    }
-                },
-                operation="retract",
+            _consolidation_batch_json(
+                _decision(
+                    "retract",
+                    ["belief:source-a"],
+                    target_belief_id="belief:not-in-input",
+                )
             ),
+            _validation_context(
+                stage=BackgroundStage.CONSOLIDATION,
+                source_refs=(BackgroundSourceRef("atomic_belief", "belief:source-a"),),
+            ),
+        )
+
+
+def test_consolidation_batch_contract_accepts_valid_mixed_decisions() -> None:
+    source_refs = tuple(
+        BackgroundSourceRef("atomic_belief", f"belief:source-{index}") for index in range(1, 8)
+    )
+    source_records = {
+        source_ref.source_id: _atomic_belief(
+            source_ref.source_id,
+            f"Extracted source {index}.",
+            authority=Authority.BACKGROUND_SYNTHESIZED,
+            derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+            topic=f"source {index}",
+        ).to_record()
+        for index, source_ref in enumerate(source_refs, start=1)
+    }
+
+    validated = validate_background_llm_json(
+        _consolidation_batch_json(
+            _decision("promote", ["belief:source-1"]),
+            _decision("skip", ["belief:source-2"]),
+            _decision(
+                "create",
+                ["belief:source-3", "belief:source-4"],
+                atomic_belief_input=_atomic_input(
+                    content="Alpha Agent uses uv and ruff in project workflows.",
+                    topic="project workflow tools",
+                ),
+            ),
+            _decision("strengthen", ["belief:source-5"], target_belief_id="belief:target-a"),
+            _decision(
+                "supersede",
+                ["belief:source-6"],
+                target_belief_id="belief:target-b",
+                atomic_belief_input=_atomic_input(
+                    content="Alpha Agent uses uv for package management.",
+                    topic="package management",
+                ),
+            ),
+            _decision("archive", ["belief:source-7"], target_belief_id="belief:target-c"),
+        ),
+        _validation_context(
+            stage=BackgroundStage.CONSOLIDATION,
+            source_refs=source_refs,
+            allowed_target_belief_ids=frozenset(
+                {"belief:target-a", "belief:target-b", "belief:target-c"}
+            ),
+            source_atomic_belief_records=source_records,
+        ),
+    )
+
+    assert validated.operation == "consolidate_atomic_beliefs"
+    validated_decisions = [
+        payload
+        for payload in validated.payloads
+        if isinstance(payload, ValidatedConsolidationDecision)
+    ]
+    assert len(validated_decisions) == len(validated.payloads)
+    assert [payload.operation for payload in validated_decisions] == [
+        "promote",
+        "skip",
+        "create",
+        "strengthen",
+        "supersede",
+        "archive",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("missing_coverage", "missing source"),
+        ("duplicate_source", "duplicate source"),
+        ("unknown_source", "unknown source"),
+        ("unknown_target", "target"),
+        ("multi_target", "target_belief_ids|unknown keys"),
+        ("promote_multi_source", "promote"),
+        ("duplicate_copy_create", "promote"),
+        ("skip_with_atomic_input", "forbids atomic_belief_input"),
+        ("create_missing_atomic_input", "requires atomic_belief_input"),
+        ("strengthen_missing_target", "requires target_belief_id"),
+        ("promote_with_target", "forbids target_belief_id"),
+    ],
+)
+def test_consolidation_batch_contract_rejects_invalid_decisions(
+    case: str,
+    match: str,
+) -> None:
+    source_refs = (
+        BackgroundSourceRef("atomic_belief", "belief:source-a"),
+        BackgroundSourceRef("atomic_belief", "belief:source-b"),
+    )
+    source_records = {
+        "belief:source-a": _atomic_belief(
+            "belief:source-a",
+            "Alpha Agent uses uv.",
+            authority=Authority.BACKGROUND_SYNTHESIZED,
+            derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+            topic="package management",
+        ).to_record(),
+        "belief:source-b": _atomic_belief(
+            "belief:source-b",
+            "Alpha Agent runs ruff.",
+            authority=Authority.BACKGROUND_SYNTHESIZED,
+            derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+            topic="linting",
+        ).to_record(),
+    }
+    decisions_by_case: dict[str, list[dict[str, object]]] = {
+        "missing_coverage": [_decision("skip", ["belief:source-a"])],
+        "duplicate_source": [
+            _decision("skip", ["belief:source-a"]),
+            _decision("promote", ["belief:source-a"]),
+            _decision("skip", ["belief:source-b"]),
+        ],
+        "unknown_source": [_decision("skip", ["belief:unknown"])],
+        "unknown_target": [
+            _decision("strengthen", ["belief:source-a"], target_belief_id="belief:unknown")
+        ],
+        "multi_target": [
+            {
+                "operation": "strengthen",
+                "source_atomic_belief_ids": ["belief:source-a"],
+                "target_belief_ids": ["belief:target-a", "belief:target-b"],
+                "rationale": "Bad multi-target fixture.",
+            },
+            _decision("skip", ["belief:source-b"]),
+        ],
+        "promote_multi_source": [_decision("promote", ["belief:source-a", "belief:source-b"])],
+        "duplicate_copy_create": [
+            _decision(
+                "create",
+                ["belief:source-a"],
+                atomic_belief_input=_atomic_input(
+                    content="Alpha Agent uses uv.",
+                    topic="package management",
+                ),
+            ),
+            _decision("skip", ["belief:source-b"]),
+        ],
+        "skip_with_atomic_input": [
+            _decision(
+                "skip",
+                ["belief:source-a"],
+                atomic_belief_input=_atomic_input(),
+            ),
+            _decision("skip", ["belief:source-b"]),
+        ],
+        "create_missing_atomic_input": [
+            _decision("create", ["belief:source-a"]),
+            _decision("skip", ["belief:source-b"]),
+        ],
+        "strengthen_missing_target": [
+            _decision("strengthen", ["belief:source-a"]),
+            _decision("skip", ["belief:source-b"]),
+        ],
+        "promote_with_target": [
+            _decision("promote", ["belief:source-a"], target_belief_id="belief:target-a"),
+            _decision("skip", ["belief:source-b"]),
+        ],
+    }
+
+    with pytest.raises(BackgroundLLMValidationError, match=match):
+        validate_background_llm_json(
+            _consolidation_batch_json(*decisions_by_case[case]),
+            _validation_context(
+                stage=BackgroundStage.CONSOLIDATION,
+                source_refs=source_refs,
+                allowed_target_belief_ids=frozenset({"belief:target-a", "belief:target-b"}),
+                source_atomic_belief_records=source_records,
+            ),
+        )
+
+
+def test_consolidation_batch_contract_rejects_project_scoped_single_source_duplicate_create(
+    tmp_path,
+) -> None:
+    project_ref = CognitionStateStore(_store(tmp_path)).project_reference("Alpha Agent")
+    source = _atomic_belief(
+        "belief:source-project",
+        "Alpha Agent uses uv.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+        scope=BeliefScope.PROJECT,
+        about=[project_ref],
+        topic="package management",
+    )
+    source_ref = BackgroundSourceRef("atomic_belief", str(source.id))
+    project_draft = _atomic_input(
+        content="Alpha Agent uses uv.",
+        topic="package management",
+        scope=BeliefScope.PROJECT,
+    )
+    project_draft["project_descriptor"] = {"name": "Alpha Agent"}
+
+    with pytest.raises(BackgroundLLMValidationError, match="promote"):
+        validate_background_llm_json(
+            _consolidation_batch_json(
+                _decision(
+                    "create",
+                    [str(source.id)],
+                    atomic_belief_input=project_draft,
+                )
+            ),
+            _validation_context(
+                stage=BackgroundStage.CONSOLIDATION,
+                source_refs=(source_ref,),
+                source_atomic_belief_records={str(source.id): source.to_record()},
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "create",
+        "strengthen",
+        "supersede",
+        "retract",
+        "archive",
+        "skip",
+    ],
+)
+def test_ordinary_consolidation_rejects_legacy_single_operation_outputs(
+    operation: str,
+) -> None:
+    payloads: dict[str, dict[str, object]] = {
+        "create": {"atomic_belief_input": _atomic_input()},
+        "strengthen": {
+            "belief_update": {
+                "target_belief_id": "belief:allowed",
+                "rationale": "The source corroborates the target.",
+            }
+        },
+        "supersede": {
+            "belief_update": {
+                "target_belief_id": "belief:allowed",
+                "rationale": "The source replaces the target.",
+            },
+            "atomic_belief_input": _atomic_input(),
+        },
+        "retract": {
+            "belief_update": {
+                "target_belief_id": "belief:allowed",
+                "rationale": "The source retracts the target.",
+            }
+        },
+        "archive": {
+            "belief_update": {
+                "target_belief_id": "belief:allowed",
+                "rationale": "The source archives the target.",
+            }
+        },
+        "skip": {"reason": "No durable memory."},
+    }
+    with pytest.raises(BackgroundLLMValidationError, match="consolidate_atomic_beliefs"):
+        validate_background_llm_json(
+            _llm_json(operation=operation, payload=payloads[operation]),
             _validation_context(stage=BackgroundStage.CONSOLIDATION),
         )
+
+
+@pytest.mark.parametrize("stage", [BackgroundStage.CONSOLIDATION, BackgroundStage.CONFLICT_REVIEW])
+def test_consolidation_paths_reject_summary_operations(stage: BackgroundStage) -> None:
+    with pytest.raises(BackgroundLLMValidationError, match="summary|semantic|consolidate"):
+        validate_background_llm_json(
+            _llm_json(
+                operation="create_summary_belief",
+                payload={
+                    "summary_belief_input": {
+                        "summary_kind": SummaryKind.DOMAIN_SUMMARY.value,
+                        "scope": BeliefScope.GLOBAL.value,
+                        "about": [],
+                        "topic": "package management",
+                        "content": "Alpha Agent uses uv.",
+                    }
+                },
+            ),
+            _validation_context(stage=stage),
+        )
+
+
+def test_conflict_review_keeps_legacy_single_operation_contract() -> None:
+    validated = validate_background_llm_json(
+        _llm_json(
+            operation="strengthen",
+            payload={
+                "belief_update": {
+                    "target_belief_id": "belief:allowed",
+                    "rationale": "The conflict source corroborates the target.",
+                }
+            },
+        ),
+        _validation_context(stage=BackgroundStage.CONFLICT_REVIEW),
+    )
+
+    assert validated.operation == "strengthen"
 
 
 def test_background_llm_contract_rejects_camel_case_generated_provenance() -> None:
@@ -1595,17 +1896,18 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
     )
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="create",
-            payload={
-                "atomic_belief_input": {
+        _consolidation_batch_json(
+            _decision(
+                "create",
+                [str(extracted.id)],
+                atomic_belief_input={
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
                     "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv for package management.",
-                }
-            },
+                },
+            )
         )
     )
     processing_time = "2026-06-13T00:00:00+00:00"
@@ -1652,9 +1954,11 @@ def test_memory_consolidation_worker_accepts_skip_without_mutating_draft(
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
     )
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="skip",
-            payload={"reason": "No safe durable belief can be consolidated."},
+        _consolidation_batch_json(
+            _decision(
+                "skip",
+                [str(extracted.id)],
+            )
         )
     )
 
@@ -1662,8 +1966,10 @@ def test_memory_consolidation_worker_accepts_skip_without_mutating_draft(
 
     assert report.emitted == 0
     assert report.new_checkpoint.last_status == "ok"
-    assert service.beliefs.get_by_id(extracted.id) == extracted
-    assert service.beliefs.list_active() == [extracted]
+    archived = service.beliefs.get_by_id(extracted.id)
+    assert isinstance(archived, AtomicBelief)
+    assert archived.lifecycle == BeliefLifecycle.ARCHIVED
+    assert service.beliefs.list_active() == []
     source_ref = BackgroundSourceRef("atomic_belief", str(extracted.id))
     window = service.ledger.list_source_windows(
         stage=BackgroundStage.CONSOLIDATION,
@@ -1737,35 +2043,20 @@ def test_memory_consolidation_accepts_imported_direct_user_preference_as_active(
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
     )
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="create",
-            payload={
-                "atomic_belief_input": {
-                    "memory_kind": MemoryKind.FACT.value,
-                    "scope": BeliefScope.COUNTERPART.value,
-                    "about": [
-                        {"kind": "counterpart", "id": counterpart.counterpart_id}
-                    ],
-                    "topic": "answer style preference",
-                    "content": "User prefers concise answers.",
-                }
-            },
-        )
+        _consolidation_batch_json(_decision("promote", [str(extracted.id)]))
     )
 
     report = MemoryConsolidationWorker(service, provider).run_once()
 
     assert report.emitted == 1
-    archived = service.beliefs.get_by_id(extracted.id)
-    assert isinstance(archived, AtomicBelief)
-    assert archived.lifecycle == BeliefLifecycle.ARCHIVED
     active = service.beliefs.list_active()
     assert len(active) == 1
+    assert active[0].id == extracted.id
     assert active[0].content == "User prefers concise answers."
     assert active[0].derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
 
 
-@pytest.mark.parametrize("operation", ["create", "supersede"])
+@pytest.mark.parametrize("operation", ["promote", "supersede"])
 def test_memory_consolidation_applies_mixed_window_imported_direct_preference_as_active(
     tmp_path,
     operation: str,
@@ -1836,37 +2127,41 @@ def test_memory_consolidation_applies_mixed_window_imported_direct_preference_as
             target,
             source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT,
         )
-    draft_payload = {
+    draft_payload: dict[str, object] = {
         "memory_kind": MemoryKind.PREFERENCE.value,
         "scope": BeliefScope.COUNTERPART.value,
         "about": [{"kind": "counterpart", "id": counterpart.counterpart_id}],
         "topic": "answer style preference",
         "content": "User prefers concise answers.",
     }
-    provider_payload: dict[str, object] = {"atomic_belief_input": draft_payload}
-    if target is not None:
-        provider_payload["belief_update"] = {
-            "target_belief_id": str(target.id),
-            "rationale": "The imported preference replaces the target preference.",
-        }
-    provider = _RecordingLLMProvider(
-        _llm_json(operation=operation, payload=provider_payload)
-    )
+    if target is None:
+        decision = _decision("promote", [str(extracted.id)])
+    else:
+        decision = _decision(
+            "supersede",
+            [str(extracted.id)],
+            target_belief_id=str(target.id),
+            atomic_belief_input=draft_payload,
+        )
+    provider = _RecordingLLMProvider(_consolidation_batch_json(decision))
 
     report = MemoryConsolidationWorker(service, provider).run_once()
 
     assert report.emitted == 1
-    archived = service.beliefs.get_by_id(extracted.id)
-    assert isinstance(archived, AtomicBelief)
-    assert archived.lifecycle == BeliefLifecycle.ARCHIVED
+    consumed = service.beliefs.get_by_id(extracted.id)
+    assert isinstance(consumed, AtomicBelief)
     if target is not None:
+        assert consumed.lifecycle == BeliefLifecycle.ARCHIVED
         retained = service.beliefs.get_by_id(target.id)
         assert isinstance(retained, AtomicBelief)
         assert retained.lifecycle == BeliefLifecycle.SUPERSEDED
+    else:
+        assert consumed.lifecycle == BeliefLifecycle.ACTIVE
+        assert consumed.derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
     active = [
         belief
         for belief in service.beliefs.list_active()
-        if str(belief.id) != str(extracted.id)
+        if target is not None or str(belief.id) == str(extracted.id)
     ]
     assert len(active) == 1
     assert active[0].content == "User prefers concise answers."
@@ -1893,17 +2188,18 @@ def test_memory_consolidation_worker_processes_one_extracted_draft_per_operation
     service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
     service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="create",
-            payload={
-                "atomic_belief_input": {
+        _consolidation_batch_json(
+            _decision(
+                "create",
+                [str(first.id)],
+                atomic_belief_input={
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
                     "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv for package management.",
-                }
-            },
+                },
+            )
         )
     )
 
@@ -2101,14 +2397,12 @@ def test_memory_consolidation_worker_sends_structured_prompt_messages(
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
     )
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="strengthen",
-            payload={
-                "belief_update": {
-                    "target_belief_id": str(target.id),
-                    "rationale": "The draft corroborates the target belief.",
-                }
-            },
+        _consolidation_batch_json(
+            _decision(
+                "strengthen",
+                [str(extracted.id)],
+                target_belief_id=str(target.id),
+            )
         )
     )
 
@@ -2123,7 +2417,8 @@ def test_memory_consolidation_worker_sends_structured_prompt_messages(
     assert isinstance(instruction, str)
     assert isinstance(material, str)
     assert '"const": "skip"' in instruction
-    assert '"reason"' in instruction
+    assert '"rationale"' in instruction
+    assert '"decisions"' in instruction
     assert str(target.id) not in instruction
     assert str(extracted.id) not in instruction
     assert "Allowed update target belief ids" in material
@@ -2174,14 +2469,12 @@ def test_memory_consolidation_prompt_uses_source_time_before_held_since_for_rece
     service.write_atomic_belief(target, source_kind=CognitionSourceKind.DIRECT_USER_STATEMENT)
     service.write_atomic_belief(extracted, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="strengthen",
-            payload={
-                "belief_update": {
-                    "target_belief_id": str(target.id),
-                    "rationale": "The active belief has newer source evidence.",
-                }
-            },
+        _consolidation_batch_json(
+            _decision(
+                "strengthen",
+                [str(extracted.id)],
+                target_belief_id=str(target.id),
+            )
         )
     )
 
@@ -2235,14 +2528,12 @@ def test_memory_consolidation_worker_strengthens_target_with_program_evidence(
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
     )
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="strengthen",
-            payload={
-                "belief_update": {
-                    "target_belief_id": str(target.id),
-                    "rationale": "The draft corroborates the target belief.",
-                }
-            },
+        _consolidation_batch_json(
+            _decision(
+                "strengthen",
+                [str(extracted.id)],
+                target_belief_id=str(target.id),
+            )
         )
     )
 
@@ -2279,21 +2570,19 @@ def test_memory_consolidation_worker_accepts_direct_supersede(
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
     )
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="supersede",
-            payload={
-                "belief_update": {
-                    "target_belief_id": str(target.id),
-                    "rationale": "The extracted draft replaces the older package manager belief.",
-                },
-                "atomic_belief_input": {
+        _consolidation_batch_json(
+            _decision(
+                "supersede",
+                [str(extracted.id)],
+                target_belief_id=str(target.id),
+                atomic_belief_input={
                     "memory_kind": MemoryKind.FACT.value,
                     "scope": BeliefScope.GLOBAL.value,
                     "about": [],
                     "topic": "Alpha Agent package management",
                     "content": "Alpha Agent uses uv.",
                 },
-            },
+            )
         )
     )
 
@@ -2347,14 +2636,12 @@ def test_memory_consolidation_worker_accepts_direct_lifecycle_operation(
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
     )
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation=operation,
-            payload={
-                "belief_update": {
-                    "target_belief_id": str(target.id),
-                    "rationale": "The extracted draft makes the target obsolete.",
-                }
-            },
+        _consolidation_batch_json(
+            _decision(
+                operation,
+                [str(extracted.id)],
+                target_belief_id=str(target.id),
+            )
         )
     )
 
@@ -2386,14 +2673,12 @@ def test_memory_consolidation_rejects_invalid_target_without_processing_or_write
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
     )
     provider = _RecordingLLMProvider(
-        _llm_json(
-            operation="retract",
-            payload={
-                "belief_update": {
-                    "target_belief_id": "belief:not-in-input",
-                    "rationale": "The target is not valid.",
-                }
-            },
+        _consolidation_batch_json(
+            _decision(
+                "retract",
+                [str(extracted.id)],
+                target_belief_id="belief:not-in-input",
+            )
         )
     )
 
@@ -2452,14 +2737,12 @@ def test_consolidation_rejects_invalid_lifecycle_transition_without_partial_writ
 
     with pytest.raises(BackgroundLLMValidationError, match="lifecycle"):
         service.accept_background_llm_json(
-            _llm_json(
-                operation="retract",
-                payload={
-                    "belief_update": {
-                        "target_belief_id": str(target.id),
-                        "rationale": "The old belief should be retracted.",
-                    }
-                },
+            _consolidation_batch_json(
+                _decision(
+                    "retract",
+                    [str(extracted.id)],
+                    target_belief_id=str(target.id),
+                )
             ),
             _validation_context(
                 window_id=window.window_id,
@@ -2467,6 +2750,7 @@ def test_consolidation_rejects_invalid_lifecycle_transition_without_partial_writ
                 source_refs=(source,),
                 target_unit="scope:global",
                 allowed_target_belief_ids=frozenset({str(target.id)}),
+                source_atomic_belief_records={str(extracted.id): extracted.to_record()},
                 derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
             ),
             window_id=window.window_id,
@@ -2481,6 +2765,412 @@ def test_consolidation_rejects_invalid_lifecycle_transition_without_partial_writ
         stage=BackgroundStage.CONSOLIDATION,
         target_unit="scope:global",
     ).status == BackgroundProgressStatus.FAILED
+
+
+def test_consolidation_promotes_extracted_belief_in_place(tmp_path) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    original_source = Reference("session_message", "msg:source")
+    extracted = _atomic_belief(
+        "belief:extracted-promote",
+        "Alpha Agent uses uv.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+        sources=[original_source],
+        topic="package management",
+    )
+    service.write_atomic_belief(extracted, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    source = BackgroundSourceRef("atomic_belief", str(extracted.id))
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+        source_refs=(source,),
+        idempotency_key="consolidate:promote",
+    )
+    run = service.ledger.start_stage_run(
+        worker_id="worker-a",
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+        window_id=window.window_id,
+        input_refs=(source,),
+    )
+
+    accepted = service.accept_background_llm_json(
+        _consolidation_batch_json(_decision("promote", [str(extracted.id)])),
+        _validation_context(
+            window_id=window.window_id,
+            stage=BackgroundStage.CONSOLIDATION,
+            source_refs=(source,),
+            target_unit="scope:global",
+            source_atomic_belief_records={str(extracted.id): extracted.to_record()},
+            derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+        ),
+        window_id=window.window_id,
+        run_id=run.run_id,
+        checkpoint_id="checkpoint:promote",
+    )
+
+    assert len(accepted) == 1
+    promoted = service.beliefs.get_by_id(extracted.id)
+    assert isinstance(promoted, AtomicBelief)
+    assert accepted[0] == promoted
+    assert promoted.id == extracted.id
+    assert promoted.derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+    assert promoted.topic == extracted.topic
+    assert promoted.content == extracted.content
+    assert promoted.scope == extracted.scope
+    assert promoted.about == extracted.about
+    assert promoted.validity == extracted.validity
+    assert promoted.update_policy == extracted.update_policy
+    assert promoted.sources == [original_source]
+    with store.connect() as conn:
+        row = conn.execute(
+            "SELECT derivation_stage, record FROM atomic_beliefs WHERE id = ?",
+            (str(extracted.id),),
+        ).fetchone()
+    assert row["derivation_stage"] == DerivationStage.BACKGROUND_CONSOLIDATED.value
+    assert json.loads(row["record"])["derivation_stage"] == (
+        DerivationStage.BACKGROUND_CONSOLIDATED.value
+    )
+    assert service.beliefs.recall(BeliefRecallParams(limit=8)) == [promoted]
+    audits = service.audit_records(kind="background_consolidation_operation")
+    assert [audit.payload["operation"] for audit in audits] == ["promote"]
+    run_record = service.ledger.get_stage_run(run.run_id)
+    assert run_record.status == BackgroundStageRunStatus.SUCCEEDED
+    assert run_record.output_refs == (source,)
+
+
+@pytest.mark.parametrize(
+    ("derivation_stage", "lifecycle", "match"),
+    [
+        (DerivationStage.TOOL_WRITTEN, BeliefLifecycle.ACTIVE, "BACKGROUND_EXTRACTED"),
+        (DerivationStage.BACKGROUND_EXTRACTED, BeliefLifecycle.ARCHIVED, "active"),
+    ],
+)
+def test_consolidation_rejects_invalid_promotion_source_without_mutation(
+    tmp_path,
+    derivation_stage: DerivationStage,
+    lifecycle: BeliefLifecycle,
+    match: str,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    source_belief = _atomic_belief(
+        "belief:invalid-promote",
+        "Alpha Agent uses uv.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=derivation_stage,
+        lifecycle=lifecycle,
+    )
+    service.write_atomic_belief(source_belief, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    source = BackgroundSourceRef("atomic_belief", str(source_belief.id))
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+        source_refs=(source,),
+        idempotency_key=f"consolidate:invalid-promote:{derivation_stage.value}:{lifecycle.value}",
+    )
+    run = service.ledger.start_stage_run(
+        worker_id="worker-a",
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+        window_id=window.window_id,
+        input_refs=(source,),
+    )
+
+    with pytest.raises(BackgroundLLMValidationError, match=match):
+        service.accept_background_llm_json(
+            _consolidation_batch_json(_decision("promote", [str(source_belief.id)])),
+            _validation_context(
+                window_id=window.window_id,
+                stage=BackgroundStage.CONSOLIDATION,
+                source_refs=(source,),
+                target_unit="scope:global",
+                source_atomic_belief_records={str(source_belief.id): source_belief.to_record()},
+                derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+            ),
+            window_id=window.window_id,
+            run_id=run.run_id,
+            checkpoint_id="checkpoint:invalid-promote",
+        )
+
+    assert service.beliefs.get_by_id(source_belief.id) == source_belief
+    assert service.ledger.get_source_window(window.window_id).status == (
+        BackgroundProgressStatus.FAILED
+    )
+
+
+def test_consolidation_batch_applies_all_decisions_with_per_decision_provenance(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    sources = {
+        name: _atomic_belief(
+            f"belief:source-{name}",
+            content,
+            authority=Authority.BACKGROUND_SYNTHESIZED,
+            derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+            topic=topic,
+        )
+        for name, content, topic in [
+            ("promote", "Alpha Agent uses uv.", "package management"),
+            ("skip", "A noisy source says Alpha Agent uses Poetry.", "noisy package manager"),
+            ("create-a", "Alpha Agent runs ruff.", "linting"),
+            ("create-b", "Alpha Agent runs mypy.", "typing"),
+            ("strengthen", "Alpha Agent uses pytest.", "testing"),
+            ("supersede", "Alpha Agent now uses uv.", "package management"),
+            ("retract", "Alpha Agent no longer uses Nose.", "obsolete testing"),
+            ("archive", "Alpha Agent no longer uses legacy docs.", "legacy docs"),
+        ]
+    }
+    targets = {
+        "strengthen": _atomic_belief("belief:target-strengthen", "Alpha Agent uses pytest."),
+        "supersede": _atomic_belief("belief:target-supersede", "Alpha Agent uses Poetry."),
+        "retract": _atomic_belief("belief:target-retract", "Alpha Agent uses Nose."),
+        "archive": _atomic_belief("belief:target-archive", "Alpha Agent uses legacy docs."),
+    }
+    for belief in (*sources.values(), *targets.values()):
+        source_kind = (
+            CognitionSourceKind.BACKGROUND_SYNTHESIS
+            if belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
+            else CognitionSourceKind.DIRECT_USER_STATEMENT
+        )
+        service.write_atomic_belief(belief, source_kind=source_kind)
+    source_refs = tuple(
+        BackgroundSourceRef("atomic_belief", str(belief.id)) for belief in sources.values()
+    )
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+        source_refs=source_refs,
+        idempotency_key="consolidate:mixed-batch",
+    )
+    run = service.ledger.start_stage_run(
+        worker_id="worker-a",
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+        window_id=window.window_id,
+        input_refs=source_refs,
+    )
+
+    accepted = service.accept_background_llm_json(
+        _consolidation_batch_json(
+            _decision("promote", [str(sources["promote"].id)]),
+            _decision("skip", [str(sources["skip"].id)]),
+            _decision(
+                "create",
+                [str(sources["create-a"].id), str(sources["create-b"].id)],
+                atomic_belief_input=_atomic_input(
+                    content="Alpha Agent runs ruff and mypy during validation.",
+                    topic="validation tools",
+                ),
+            ),
+            _decision(
+                "strengthen",
+                [str(sources["strengthen"].id)],
+                target_belief_id=str(targets["strengthen"].id),
+            ),
+            _decision(
+                "supersede",
+                [str(sources["supersede"].id)],
+                target_belief_id=str(targets["supersede"].id),
+                atomic_belief_input=_atomic_input(
+                    content="Alpha Agent uses uv for package management.",
+                    topic="package management",
+                ),
+            ),
+            _decision(
+                "retract",
+                [str(sources["retract"].id)],
+                target_belief_id=str(targets["retract"].id),
+            ),
+            _decision(
+                "archive",
+                [str(sources["archive"].id)],
+                target_belief_id=str(targets["archive"].id),
+            ),
+        ),
+        _validation_context(
+            window_id=window.window_id,
+            stage=BackgroundStage.CONSOLIDATION,
+            source_refs=source_refs,
+            target_unit="scope:global",
+            allowed_target_belief_ids=frozenset(str(item.id) for item in targets.values()),
+            source_atomic_belief_records={
+                str(belief.id): belief.to_record() for belief in sources.values()
+            },
+            derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+        ),
+        window_id=window.window_id,
+        run_id=run.run_id,
+        checkpoint_id="checkpoint:mixed-batch",
+    )
+
+    assert len(accepted) == 6
+    promoted = service.beliefs.get_by_id(sources["promote"].id)
+    skipped = service.beliefs.get_by_id(sources["skip"].id)
+    created_sources = [
+        service.beliefs.get_by_id(sources["create-a"].id),
+        service.beliefs.get_by_id(sources["create-b"].id),
+    ]
+    strengthened_source = service.beliefs.get_by_id(sources["strengthen"].id)
+    supersede_source = service.beliefs.get_by_id(sources["supersede"].id)
+    retract_source = service.beliefs.get_by_id(sources["retract"].id)
+    archive_source = service.beliefs.get_by_id(sources["archive"].id)
+    assert isinstance(promoted, AtomicBelief)
+    assert promoted.derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
+    archived_consumed = [
+        skipped,
+        *created_sources,
+        strengthened_source,
+        supersede_source,
+        retract_source,
+        archive_source,
+    ]
+    assert all(isinstance(item, AtomicBelief) for item in archived_consumed)
+    assert all(
+        item.lifecycle == BeliefLifecycle.ARCHIVED
+        for item in archived_consumed
+        if isinstance(item, AtomicBelief)
+    )
+
+    strengthened = service.beliefs.get_by_id(targets["strengthen"].id)
+    superseded = service.beliefs.get_by_id(targets["supersede"].id)
+    retracted = service.beliefs.get_by_id(targets["retract"].id)
+    archived = service.beliefs.get_by_id(targets["archive"].id)
+    assert isinstance(strengthened, AtomicBelief)
+    assert isinstance(superseded, AtomicBelief)
+    assert isinstance(retracted, AtomicBelief)
+    assert isinstance(archived, AtomicBelief)
+    assert strengthened.lifecycle == BeliefLifecycle.ACTIVE
+    assert superseded.lifecycle == BeliefLifecycle.SUPERSEDED
+    assert retracted.lifecycle == BeliefLifecycle.RETRACTED
+    assert archived.lifecycle == BeliefLifecycle.ARCHIVED
+    active_non_targets = [
+        belief
+        for belief in service.beliefs.list_active()
+        if str(belief.id) not in {str(promoted.id), str(strengthened.id)}
+    ]
+    assert len(active_non_targets) == 2
+    created = next(
+        belief
+        for belief in active_non_targets
+        if str(belief.content) == "Alpha Agent runs ruff and mypy during validation."
+    )
+    replacement = next(
+        belief
+        for belief in active_non_targets
+        if str(belief.content) == "Alpha Agent uses uv for package management."
+    )
+    assert replacement.supersedes == Reference("belief", str(targets["supersede"].id))
+    _assert_only_decision_source_ids(
+        created,
+        window_id=window.window_id,
+        run_id=run.run_id,
+        expected_source_ids={str(sources["create-a"].id), str(sources["create-b"].id)},
+        forbidden_source_ids={str(sources["strengthen"].id), str(sources["supersede"].id)},
+    )
+    _assert_only_decision_source_ids(
+        strengthened,
+        window_id=window.window_id,
+        run_id=run.run_id,
+        expected_source_ids={str(sources["strengthen"].id)},
+        forbidden_source_ids={str(sources["create-a"].id), str(sources["supersede"].id)},
+    )
+    _assert_only_decision_source_ids(
+        replacement,
+        window_id=window.window_id,
+        run_id=run.run_id,
+        expected_source_ids={str(sources["supersede"].id)},
+        forbidden_source_ids={str(sources["create-a"].id), str(sources["strengthen"].id)},
+    )
+    assert not [
+        belief
+        for belief in service.beliefs.list_active()
+        if belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
+    ]
+    skip_operation_audits = [
+        audit.payload
+        for audit in service.audit_records(kind="background_consolidation_operation")
+        if audit.payload.get("operation") == "skip"
+    ]
+    assert skip_operation_audits == [
+        {
+            "operation": "skip",
+            "window_id": window.window_id,
+            "run_id": run.run_id,
+            "source_span_note": "from previous messages",
+            "rationale": "Fixture skip rationale.",
+            "source_atomic_belief_ids": [str(sources["skip"].id)],
+        }
+    ]
+
+
+def test_consolidation_batch_persistence_rolls_back_when_later_decision_fails(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    first = _atomic_belief(
+        "belief:source-valid-promote",
+        "Alpha Agent uses uv.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.BACKGROUND_EXTRACTED,
+    )
+    second = _atomic_belief(
+        "belief:source-invalid-promote",
+        "Alpha Agent uses Poetry.",
+        authority=Authority.BACKGROUND_SYNTHESIZED,
+        derivation_stage=DerivationStage.TOOL_WRITTEN,
+    )
+    service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
+    source_refs = (
+        BackgroundSourceRef("atomic_belief", str(first.id)),
+        BackgroundSourceRef("atomic_belief", str(second.id)),
+    )
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+        source_refs=source_refs,
+        idempotency_key="consolidate:rollback",
+    )
+    run = service.ledger.start_stage_run(
+        worker_id="worker-a",
+        stage=BackgroundStage.CONSOLIDATION,
+        target_unit="scope:global",
+        window_id=window.window_id,
+        input_refs=source_refs,
+    )
+
+    with pytest.raises(BackgroundLLMValidationError, match="BACKGROUND_EXTRACTED"):
+        service.accept_background_llm_json(
+            _consolidation_batch_json(
+                _decision("promote", [str(first.id)]),
+                _decision("promote", [str(second.id)]),
+            ),
+            _validation_context(
+                window_id=window.window_id,
+                stage=BackgroundStage.CONSOLIDATION,
+                source_refs=source_refs,
+                target_unit="scope:global",
+                source_atomic_belief_records={
+                    str(first.id): first.to_record(),
+                    str(second.id): second.to_record(),
+                },
+                derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+            ),
+            window_id=window.window_id,
+            run_id=run.run_id,
+            checkpoint_id="checkpoint:rollback",
+        )
+
+    assert service.beliefs.get_by_id(first.id) == first
+    assert service.beliefs.get_by_id(second.id) == second
+    assert service.ledger.get_source_window(window.window_id).status == (
+        BackgroundProgressStatus.FAILED
+    )
 
 
 def test_conflict_review_create_writes_active_candidate_without_mutating_target(
@@ -3478,7 +4168,7 @@ def test_memory_extraction_worker_prompt_includes_output_schema_and_allowed_refs
     assert 'scope "global" is only for durable non-user' in instruction
     assert "topic is required and must be a short topic phrase" in instruction
     assert "Do not use a sentence-like topic" in instruction
-    assert "Do not combine multiple claims in content" in instruction
+    assert "Each content value must contain exactly one atomic assertion" in instruction
     assert 'Do not write scope "self" for content like "The user prefers direct feedback."' in (
         instruction
     )
@@ -3713,8 +4403,8 @@ def test_memory_extraction_worker_import_prompt_excludes_runtime_context_and_ses
     assert 'Do not default to scope "global"' in instruction
     assert "assistant output is evidence about the user only when" in instruction.lower()
     assert "Imported assistant output is context" in instruction
-    assert "Single-turn inferred interests should normally be skipped" in instruction
-    assert "One-off technical Q&A" in instruction
+    assert "durable knowledge by default" in instruction
+    assert "Imported system messages are historical source messages" in instruction
     assert "topic is required and must be a short topic phrase" in instruction
     assert "Do not turn an imported assistant answer into global knowledge" in instruction
     assert "Do not turn imported assistant identity into Alpha Agent self memory" in instruction
@@ -4843,7 +5533,7 @@ class _RecordingLLMProvider:
 
     def __init__(
         self,
-        *responses: str,
+        *responses: str | Callable[[list[ChatMessage]], str],
         model: str = "test-extraction-model",
     ) -> None:
         self.responses = list(responses)
@@ -4866,7 +5556,8 @@ class _RecordingLLMProvider:
                 "response_format": response_format,
             }
         )
-        content = self.responses.pop(0) if self.responses else _llm_json()
+        response = self.responses.pop(0) if self.responses else _llm_json()
+        content = response(messages) if callable(response) else response
         return LLMResponse(content=content, model=self.model, provider=self.name)
 
 
@@ -4887,6 +5578,7 @@ def _validation_context(
     target_unit: str | None = None,
     allowed_target_belief_ids: frozenset[str] = frozenset({"belief:allowed"}),
     derivation_stage: DerivationStage = DerivationStage.BACKGROUND_EXTRACTED,
+    source_atomic_belief_records: dict[str, dict[str, object]] | None = None,
 ) -> BackgroundLLMValidationContext:
     return BackgroundLLMValidationContext(
         source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS,
@@ -4902,6 +5594,7 @@ def _validation_context(
         allowed_target_belief_ids=allowed_target_belief_ids,
         allowed_about_refs=frozenset({("counterpart", "counterpart:user-a")}),
         derivation_stage=derivation_stage,
+        source_atomic_belief_records=source_atomic_belief_records or {},
     )
 
 
@@ -4939,8 +5632,77 @@ def _stage_run_for_window(
     return service.ledger.get_stage_run(row["run_id"])
 
 
+def _assert_only_decision_source_ids(
+    belief: AtomicBelief,
+    *,
+    window_id: str,
+    run_id: str,
+    expected_source_ids: set[str],
+    forbidden_source_ids: set[str],
+) -> None:
+    source_pairs = {(source.kind, source.id) for source in belief.sources}
+    assert ("background_source_window", window_id) in source_pairs
+    assert ("background_stage_run", run_id) in source_pairs
+    assert {("atomic_belief", source_id) for source_id in expected_source_ids}.issubset(
+        source_pairs
+    )
+    assert not {("atomic_belief", source_id) for source_id in forbidden_source_ids}.intersection(
+        source_pairs
+    )
+
+
 def _extraction_payload(*drafts: dict[str, object]) -> dict[str, object]:
     return {"atomic_belief_inputs": [_draft_with_topic(draft) for draft in drafts]}
+
+
+def _atomic_input(
+    *,
+    content: str = "Alpha Agent uses uv.",
+    topic: str | None = None,
+    memory_kind: MemoryKind = MemoryKind.FACT,
+    scope: BeliefScope = BeliefScope.GLOBAL,
+    about: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "memory_kind": memory_kind.value,
+        "scope": scope.value,
+        "about": list(about or []),
+        "topic": topic or _topic_for_content(content),
+        "content": content,
+    }
+
+
+def _decision(
+    operation: str,
+    source_atomic_belief_ids: list[str],
+    *,
+    target_belief_id: str | None = None,
+    atomic_belief_input: dict[str, object] | None = None,
+) -> dict[str, object]:
+    decision: dict[str, object] = {
+        "operation": operation,
+        "source_atomic_belief_ids": source_atomic_belief_ids,
+        "rationale": f"Fixture {operation} rationale.",
+    }
+    if target_belief_id is not None:
+        decision["target_belief_id"] = target_belief_id
+    if atomic_belief_input is not None:
+        decision["atomic_belief_input"] = atomic_belief_input
+    return decision
+
+
+def _consolidation_batch_json(*decisions: dict[str, object]) -> str:
+    return _llm_json(
+        operation="consolidate_atomic_beliefs",
+        payload={"decisions": list(decisions)},
+    )
+
+
+def _first_prompt_belief_id(messages: list[ChatMessage]) -> str:
+    prompt_text = "\n".join(str(message.get("content", "")) for message in messages)
+    match = re.search(r'"id":\s*"(belief[:_][^"]+)"', prompt_text)
+    assert match is not None
+    return match.group(1)
 
 
 def _draft_with_topic(draft: dict[str, object]) -> dict[str, object]:

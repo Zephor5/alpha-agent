@@ -12,6 +12,7 @@ from alpha_agent.cognition.authority import CognitionSourceKind
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     SourceWindowValidationContext,
+    conflict_review_instruction_output_json_schema,
     consolidation_instruction_output_json_schema,
 )
 from alpha_agent.cognition.emitter import EventEmitter
@@ -723,6 +724,9 @@ def _validation_context_for_candidate(
         ),
         allowed_about_refs=_allowed_about_refs((*candidate.drafts, *candidate.active_beliefs)),
         derivation_stage=DerivationStage.BACKGROUND_CONSOLIDATED,
+        source_atomic_belief_records={
+            str(item.id): item.to_record() for item in candidate.drafts
+        },
     )
 
 
@@ -825,7 +829,7 @@ def _conflict_review_messages(
         {
             "role": "user",
             "content": _CONFLICT_REVIEW_INSTRUCTION.format(
-                output_schema_json=_consolidation_output_schema_json(),
+                output_schema_json=_conflict_review_output_schema_json(),
             ),
         },
         {
@@ -849,6 +853,10 @@ def _conflict_review_messages(
 
 def _consolidation_output_schema_json() -> str:
     return json_for_prompt(consolidation_instruction_output_json_schema())
+
+
+def _conflict_review_output_schema_json() -> str:
+    return json_for_prompt(conflict_review_instruction_output_json_schema())
 
 
 def _allowed_target_belief_ids_json(context: BackgroundLLMValidationContext) -> str:

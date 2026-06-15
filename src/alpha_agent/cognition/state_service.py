@@ -21,6 +21,7 @@ from alpha_agent.cognition.background_llm_contract import (
     ValidatedAtomicBeliefDraft,
     ValidatedBackgroundLLMOutput,
     ValidatedBeliefUpdate,
+    ValidatedConsolidationDecision,
     ValidatedSummaryBeliefDraft,
     validate_background_llm_json,
 )
@@ -128,6 +129,41 @@ class CognitionStateStore:
                 entity_refs=(Reference("belief", str(belief.id)),),
             )
             return belief
+
+        return self._write(conn, op)
+
+    def promote_extracted_atomic_belief(
+        self,
+        belief_id: BeliefId | str,
+        *,
+        source_kind: CognitionSourceKind | str,
+        audit: Mapping[str, Any] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> AtomicBelief:
+        def op(db: sqlite3.Connection) -> AtomicBelief:
+            belief = self.beliefs.get_by_id(belief_id, conn=db)
+            if not isinstance(belief, AtomicBelief):
+                raise BackgroundLLMValidationError(
+                    f"promote source id {belief_id!r} does not reference an atomic belief"
+                )
+            if belief.lifecycle != BeliefLifecycle.ACTIVE:
+                raise BackgroundLLMValidationError(
+                    "promote requires an active BACKGROUND_EXTRACTED atomic belief"
+                )
+            if belief.derivation_stage != DerivationStage.BACKGROUND_EXTRACTED:
+                raise BackgroundLLMValidationError(
+                    "promote requires a BACKGROUND_EXTRACTED atomic belief"
+                )
+            record = belief.to_record()
+            record["derivation_stage"] = DerivationStage.BACKGROUND_CONSOLIDATED.value
+            promoted = AtomicBelief.from_record(record)
+            self.write_atomic_belief(
+                promoted,
+                source_kind=source_kind,
+                audit=audit,
+                conn=db,
+            )
+            return promoted
 
         return self._write(conn, op)
 
@@ -590,6 +626,35 @@ class CognitionStateStore:
         now: str,
         conn: sqlite3.Connection,
     ) -> tuple[list[BeliefRecord], list[BackgroundSourceRef]]:
+        stage = BackgroundStage(context.source_window.stage)
+        if stage == BackgroundStage.CONSOLIDATION:
+            return self._apply_consolidation_batch_output(
+                validated,
+                context,
+                window_id=window_id,
+                run_id=run_id,
+                now=now,
+                conn=conn,
+            )
+        return self._apply_semantic_consolidation_output(
+            validated,
+            context,
+            window_id=window_id,
+            run_id=run_id,
+            now=now,
+            conn=conn,
+        )
+
+    def _apply_semantic_consolidation_output(
+        self,
+        validated: ValidatedBackgroundLLMOutput,
+        context: Any,
+        *,
+        window_id: str,
+        run_id: str | None,
+        now: str,
+        conn: sqlite3.Connection,
+    ) -> tuple[list[BeliefRecord], list[BackgroundSourceRef]]:
         operation = validated.operation
         if operation == "skip":
             return [], []
@@ -696,6 +761,176 @@ class CognitionStateStore:
         )
         return written, output_refs
 
+    def _apply_consolidation_batch_output(
+        self,
+        validated: ValidatedBackgroundLLMOutput,
+        context: Any,
+        *,
+        window_id: str,
+        run_id: str | None,
+        now: str,
+        conn: sqlite3.Connection,
+    ) -> tuple[list[BeliefRecord], list[BackgroundSourceRef]]:
+        if validated.operation != "consolidate_atomic_beliefs":
+            raise BackgroundLLMValidationError(
+                f"unsupported ordinary consolidation operation: {validated.operation}"
+            )
+        decisions = [
+            payload
+            for payload in validated.payloads
+            if isinstance(payload, ValidatedConsolidationDecision)
+        ]
+        if len(decisions) != len(validated.payloads):
+            raise BackgroundLLMValidationError(
+                "ordinary consolidation payloads must be batch decisions"
+            )
+
+        written: list[BeliefRecord] = []
+        output_refs: list[BackgroundSourceRef] = []
+        for decision in decisions:
+            decision_source_refs = tuple(
+                BackgroundSourceRef("atomic_belief", source_id)
+                for source_id in decision.source_atomic_belief_ids
+            )
+            self._require_active_extracted_sources(decision_source_refs, conn=conn)
+            target = (
+                self._require_active_atomic_target(decision.target_belief_id, conn=conn)
+                if decision.target_belief_id is not None
+                else None
+            )
+            audit = _background_operation_audit(
+                validated,
+                window_id=window_id,
+                run_id=run_id,
+                operation=decision.operation,
+                decision_source_ids=decision.source_atomic_belief_ids,
+                target_belief_id=decision.target_belief_id,
+                rationale=decision.rationale,
+            )
+
+            if decision.operation == "promote":
+                promoted = self.promote_extracted_atomic_belief(
+                    decision.source_atomic_belief_ids[0],
+                    source_kind=context.source_kind,
+                    audit=audit,
+                    conn=conn,
+                )
+                written.append(promoted)
+                output_refs.append(BackgroundSourceRef("atomic_belief", str(promoted.id)))
+                continue
+
+            if decision.operation == "skip":
+                self._write_optional_audit(
+                    conn,
+                    audit,
+                    default_kind="background_consolidation_operation",
+                    entity_refs=tuple(
+                        Reference("belief", source_id)
+                        for source_id in decision.source_atomic_belief_ids
+                    ),
+                )
+                self._archive_consumed_extracted_sources(
+                    decision_source_refs,
+                    at=now,
+                    operation=decision.operation,
+                    conn=conn,
+                )
+                continue
+
+            if decision.operation == "create":
+                if decision.atomic_belief_input is None:
+                    raise BackgroundLLMValidationError("create decision missing atomic draft")
+                belief = self._atomic_belief_from_draft(
+                    decision.atomic_belief_input,
+                    authority=validated.authority,
+                    context=context,
+                    run_id=run_id,
+                    now=now,
+                    source_refs=decision_source_refs,
+                )
+                self.write_atomic_belief(
+                    belief,
+                    source_kind=context.source_kind,
+                    audit=audit,
+                    conn=conn,
+                )
+                written.append(belief)
+                output_refs.append(BackgroundSourceRef("atomic_belief", str(belief.id)))
+            elif decision.operation == "strengthen":
+                if target is None:
+                    raise BackgroundLLMValidationError("strengthen decision missing target")
+                updated = self.reaffirm_atomic_belief(
+                    target.id,
+                    sources=_program_attached_sources(
+                        context,
+                        run_id=run_id,
+                        source_refs=decision_source_refs,
+                    ),
+                    observed_at=now,
+                    audit=audit,
+                    conn=conn,
+                )
+                if updated is not None:
+                    written.append(updated)
+                    output_refs.append(BackgroundSourceRef("atomic_belief", str(updated.id)))
+            elif decision.operation == "supersede":
+                if target is None or decision.atomic_belief_input is None:
+                    raise BackgroundLLMValidationError("supersede decision missing target or draft")
+                new_belief = self._atomic_belief_from_draft(
+                    decision.atomic_belief_input,
+                    authority=validated.authority,
+                    context=context,
+                    run_id=run_id,
+                    now=now,
+                    source_refs=decision_source_refs,
+                    supersedes=target.id,
+                )
+                self.supersede_atomic_beliefs(
+                    [target.id],
+                    new_belief,
+                    source_kind=context.source_kind,
+                    at=now,
+                    audit=audit,
+                    conn=conn,
+                )
+                written.append(new_belief)
+                output_refs.append(BackgroundSourceRef("atomic_belief", str(new_belief.id)))
+            elif decision.operation in {"retract", "archive"}:
+                if target is None:
+                    raise BackgroundLLMValidationError(
+                        f"{decision.operation} decision missing target"
+                    )
+                lifecycle = (
+                    BeliefLifecycle.RETRACTED
+                    if decision.operation == "retract"
+                    else BeliefLifecycle.ARCHIVED
+                )
+                self.mark_belief_lifecycle(
+                    target.id,
+                    lifecycle,
+                    at=now,
+                    audit=audit,
+                    conn=conn,
+                )
+                materialized = self.beliefs.get_by_id(target.id, conn=conn)
+                if isinstance(materialized, AtomicBelief):
+                    written.append(materialized)
+                output_refs.append(BackgroundSourceRef("atomic_belief", str(target.id)))
+            else:
+                raise BackgroundLLMValidationError(
+                    f"unsupported consolidation decision operation: {decision.operation}"
+                )
+
+            self._archive_consumed_extracted_sources(
+                decision_source_refs,
+                at=now,
+                operation=decision.operation,
+                conn=conn,
+            )
+
+        self._assert_no_consumed_sources_remain_extracted(decisions, conn=conn)
+        return written, output_refs
+
     def _require_active_atomic_target(
         self,
         belief_id: str,
@@ -713,6 +948,80 @@ class CognitionStateStore:
                 f"require an active target, got {target.lifecycle.value}"
             )
         return target
+
+    def _require_active_extracted_sources(
+        self,
+        source_refs: Sequence[BackgroundSourceRef],
+        *,
+        conn: sqlite3.Connection,
+    ) -> tuple[AtomicBelief, ...]:
+        beliefs: list[AtomicBelief] = []
+        for source_ref in source_refs:
+            if source_ref.source_type != "atomic_belief":
+                raise BackgroundLLMValidationError(
+                    "ordinary consolidation decisions may consume only atomic_belief sources"
+                )
+            source_belief = self.beliefs.get_by_id(source_ref.source_id, conn=conn)
+            if not isinstance(source_belief, AtomicBelief):
+                raise BackgroundLLMValidationError(
+                    f"consumed source {source_ref.source_id!r} is not an atomic belief"
+                )
+            if source_belief.lifecycle != BeliefLifecycle.ACTIVE:
+                raise BackgroundLLMValidationError(
+                    "consumed consolidation source must be active"
+                )
+            if source_belief.derivation_stage != DerivationStage.BACKGROUND_EXTRACTED:
+                raise BackgroundLLMValidationError(
+                    "consumed consolidation source must be BACKGROUND_EXTRACTED"
+                )
+            beliefs.append(source_belief)
+        return tuple(beliefs)
+
+    def _archive_consumed_extracted_sources(
+        self,
+        source_refs: Sequence[BackgroundSourceRef],
+        *,
+        at: str,
+        operation: str,
+        conn: sqlite3.Connection,
+    ) -> None:
+        self._require_active_extracted_sources(source_refs, conn=conn)
+        for source_ref in source_refs:
+            self.mark_belief_lifecycle(
+                source_ref.source_id,
+                BeliefLifecycle.ARCHIVED,
+                at=at,
+                audit={
+                    "kind": "background_consolidation_source_archive",
+                    "payload": {
+                        "operation": "archive_consumed_extracted_source",
+                        "decision_operation": operation,
+                    },
+                },
+                conn=conn,
+            )
+
+    def _assert_no_consumed_sources_remain_extracted(
+        self,
+        decisions: Sequence[ValidatedConsolidationDecision],
+        *,
+        conn: sqlite3.Connection,
+    ) -> None:
+        consumed_ids = {
+            source_id
+            for decision in decisions
+            for source_id in decision.source_atomic_belief_ids
+        }
+        for source_id in consumed_ids:
+            belief = self.beliefs.get_by_id(source_id, conn=conn)
+            if (
+                isinstance(belief, AtomicBelief)
+                and belief.lifecycle == BeliefLifecycle.ACTIVE
+                and belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
+            ):
+                raise BackgroundLLMValidationError(
+                    f"consumed source {source_id!r} remained active BACKGROUND_EXTRACTED"
+                )
 
     def _archive_consolidated_source_drafts(
         self,
@@ -754,6 +1063,7 @@ class CognitionStateStore:
         context: Any,
         run_id: str | None,
         now: str,
+        source_refs: Sequence[BackgroundSourceRef] | None = None,
         supersedes: BeliefId | str | None = None,
     ) -> AtomicBelief:
         about = self._materialized_about(draft, context)
@@ -768,7 +1078,11 @@ class CognitionStateStore:
             scope=BeliefScope(draft.scope),
             authority=authority,
             lifecycle=BeliefLifecycle.ACTIVE,
-            sources=_program_attached_sources(context, run_id=run_id),
+            sources=_program_attached_sources(
+                context,
+                run_id=run_id,
+                source_refs=source_refs,
+            ),
             validity=draft.validity or ValidityWindow(observed_at=Instant(now)),
             update_policy=draft.update_policy,
             formed_in=Reference("situation", "situation:background"),
@@ -1014,11 +1328,19 @@ def _utc_date(value: str) -> str:
     return parsed.astimezone(UTC).date().isoformat()
 
 
-def _program_attached_sources(context: Any, *, run_id: str | None) -> list[Reference]:
+def _program_attached_sources(
+    context: Any,
+    *,
+    run_id: str | None,
+    source_refs: Sequence[BackgroundSourceRef] | None = None,
+) -> list[Reference]:
     refs = [Reference("background_source_window", context.source_window.window_id)]
+    selected_source_refs = (
+        tuple(source_refs) if source_refs is not None else context.source_window.source_refs
+    )
     refs.extend(
         Reference(item.source_type, item.source_id)
-        for item in context.source_window.source_refs
+        for item in selected_source_refs
     )
     if run_id is not None:
         refs.append(Reference("background_stage_run", run_id))
@@ -1063,13 +1385,23 @@ def _background_operation_audit(
     *,
     window_id: str,
     run_id: str | None,
+    operation: str | None = None,
+    decision_source_ids: Sequence[str] = (),
+    target_belief_id: str | None = None,
+    rationale: str | None = None,
 ) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "operation": operation or validated.operation,
+        "window_id": window_id,
+        "run_id": run_id,
+        "source_span_note": validated.source_span_note,
+        "rationale": rationale if rationale is not None else validated.rationale,
+    }
+    if decision_source_ids:
+        payload["source_atomic_belief_ids"] = list(decision_source_ids)
+    if target_belief_id is not None:
+        payload["target_belief_id"] = target_belief_id
     return {
         "kind": "background_consolidation_operation",
-        "payload": {
-            "operation": validated.operation,
-            "window_id": window_id,
-            "run_id": run_id,
-            "source_span_note": validated.source_span_note,
-        },
+        "payload": payload,
     }

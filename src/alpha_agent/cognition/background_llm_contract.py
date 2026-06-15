@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
@@ -31,6 +32,7 @@ _SUPPORTED_OPERATIONS = frozenset(
         "create_summary_belief",
         "update_belief",
         "profile_summary_candidate",
+        "consolidate_atomic_beliefs",
         "create",
         "strengthen",
         "supersede",
@@ -41,10 +43,18 @@ _SUPPORTED_OPERATIONS = frozenset(
 )
 _EXTRACTION_OPERATION = "create_atomic_belief"
 _EXTRACTION_PAYLOAD_KEYS = frozenset({"atomic_belief_inputs"})
+_CONSOLIDATION_BATCH_OPERATION = "consolidate_atomic_beliefs"
+_CONSOLIDATION_BATCH_PAYLOAD_KEYS = frozenset({"decisions"})
 _SKIP_OPERATION = "skip"
 _SKIP_PAYLOAD_KEYS = frozenset({"reason"})
 _SEMANTIC_OPERATIONS = frozenset(
     {"create", "strengthen", "supersede", "retract", "archive", _SKIP_OPERATION}
+)
+_CONSOLIDATION_DECISION_OPERATIONS = frozenset(
+    {"promote", "skip", "create", "strengthen", "supersede", "retract", "archive"}
+)
+_CONSOLIDATION_DECISION_BASE_KEYS = frozenset(
+    {"operation", "source_atomic_belief_ids", "rationale"}
 )
 _FEEDBACK_ATTRIBUTION_VERDICTS = frozenset(
     {"confirmed", "contradicted", "corrected", "irrelevant"}
@@ -160,11 +170,39 @@ def extraction_output_json_schema() -> dict[str, Any]:
 
 def consolidation_output_json_schema(
     *,
+    allowed_source_atomic_belief_ids: Iterable[str] = (),
     allowed_target_belief_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """Return the LLM-facing JSON schema for consolidation-stage outputs."""
+    """Return the LLM-facing JSON schema for ordinary consolidation batches."""
+
+    source_ids = tuple(
+        sorted({item for item in allowed_source_atomic_belief_ids if item.strip()})
+    )
+    target_ids = tuple(sorted({item for item in allowed_target_belief_ids if item.strip()}))
+    return _background_output_schema(
+        operation=_CONSOLIDATION_BATCH_OPERATION,
+        payload_schema=_consolidation_batch_payload_schema(
+            allowed_source_atomic_belief_ids=source_ids,
+            allowed_target_belief_ids=target_ids,
+        ),
+    )
+
+
+def conflict_review_output_json_schema(
+    *,
+    allowed_target_belief_ids: Iterable[str] = (),
+) -> dict[str, Any]:
+    """Return the LLM-facing JSON schema for conflict-review outputs."""
 
     target_ids = tuple(sorted({item for item in allowed_target_belief_ids if item.strip()}))
+    return _semantic_consolidation_output_json_schema(allowed_target_belief_ids=target_ids)
+
+
+def _semantic_consolidation_output_json_schema(
+    *,
+    allowed_target_belief_ids: Iterable[str],
+) -> dict[str, Any]:
+    target_ids = tuple(allowed_target_belief_ids)
     atomic_payload = _payload_schema({"atomic_belief_input": _atomic_belief_input_schema()})
     return {
         "oneOf": [
@@ -206,6 +244,12 @@ def consolidation_instruction_output_json_schema() -> dict[str, Any]:
     """Return the stable prompt schema for consolidation instructions."""
 
     return consolidation_output_json_schema()
+
+
+def conflict_review_instruction_output_json_schema() -> dict[str, Any]:
+    """Return the stable prompt schema for conflict-review instructions."""
+
+    return conflict_review_output_json_schema()
 
 
 def summary_output_json_schema(
@@ -359,6 +403,116 @@ def _skip_payload_schema() -> dict[str, Any]:
             }
         }
     )
+
+
+def _consolidation_batch_payload_schema(
+    *,
+    allowed_source_atomic_belief_ids: Iterable[str],
+    allowed_target_belief_ids: Iterable[str],
+) -> dict[str, Any]:
+    source_ids = tuple(allowed_source_atomic_belief_ids)
+    target_ids = tuple(allowed_target_belief_ids)
+    return _payload_schema(
+        {
+            "decisions": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "oneOf": [
+                        _consolidation_decision_schema(
+                            operation="promote",
+                            allowed_source_atomic_belief_ids=source_ids,
+                            allowed_target_belief_ids=target_ids,
+                            source_min_items=1,
+                            source_max_items=1,
+                        ),
+                        _consolidation_decision_schema(
+                            operation="skip",
+                            allowed_source_atomic_belief_ids=source_ids,
+                            allowed_target_belief_ids=target_ids,
+                        ),
+                        _consolidation_decision_schema(
+                            operation="create",
+                            allowed_source_atomic_belief_ids=source_ids,
+                            allowed_target_belief_ids=target_ids,
+                            require_atomic_input=True,
+                        ),
+                        _consolidation_decision_schema(
+                            operation="strengthen",
+                            allowed_source_atomic_belief_ids=source_ids,
+                            allowed_target_belief_ids=target_ids,
+                            require_target=True,
+                        ),
+                        _consolidation_decision_schema(
+                            operation="supersede",
+                            allowed_source_atomic_belief_ids=source_ids,
+                            allowed_target_belief_ids=target_ids,
+                            require_target=True,
+                            require_atomic_input=True,
+                        ),
+                        _consolidation_decision_schema(
+                            operation="retract",
+                            allowed_source_atomic_belief_ids=source_ids,
+                            allowed_target_belief_ids=target_ids,
+                            require_target=True,
+                        ),
+                        _consolidation_decision_schema(
+                            operation="archive",
+                            allowed_source_atomic_belief_ids=source_ids,
+                            allowed_target_belief_ids=target_ids,
+                            require_target=True,
+                        ),
+                    ]
+                },
+            }
+        }
+    )
+
+
+def _consolidation_decision_schema(
+    *,
+    operation: str,
+    allowed_source_atomic_belief_ids: Iterable[str],
+    allowed_target_belief_ids: Iterable[str],
+    require_target: bool = False,
+    require_atomic_input: bool = False,
+    source_min_items: int = 1,
+    source_max_items: int | None = None,
+) -> dict[str, Any]:
+    source_id_schema: dict[str, Any] = {"type": "string", "minLength": 1}
+    source_ids = tuple(allowed_source_atomic_belief_ids)
+    if source_ids:
+        source_id_schema["enum"] = list(source_ids)
+    source_ids_schema: dict[str, Any] = {
+        "type": "array",
+        "minItems": source_min_items,
+        "items": source_id_schema,
+    }
+    if source_max_items is not None:
+        source_ids_schema["maxItems"] = source_max_items
+    target_id_schema: dict[str, Any] = {"type": "string", "minLength": 1}
+    target_ids = tuple(allowed_target_belief_ids)
+    if target_ids:
+        target_id_schema["enum"] = list(target_ids)
+
+    properties: dict[str, Any] = {
+        "operation": {"const": operation},
+        "source_atomic_belief_ids": source_ids_schema,
+        "rationale": {"type": "string", "minLength": 1},
+    }
+    required = ["operation", "source_atomic_belief_ids", "rationale"]
+    if require_target:
+        properties["target_belief_id"] = target_id_schema
+        required.append("target_belief_id")
+    if require_atomic_input:
+        properties["atomic_belief_input"] = _atomic_belief_input_schema()
+        required.append("atomic_belief_input")
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": required,
+        "properties": properties,
+    }
 
 
 def _atomic_belief_input_schema() -> dict[str, Any]:
@@ -561,6 +715,7 @@ class BackgroundLLMValidationContext:
     required_summary_target_domain: str | None = None
     allow_summary_scheduling_hints: bool = False
     derivation_stage: DerivationStage = DerivationStage.BACKGROUND_EXTRACTED
+    source_atomic_belief_records: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -610,6 +765,17 @@ class ValidatedBeliefUpdate:
 
 
 @dataclass(frozen=True)
+class ValidatedConsolidationDecision:
+    """One source-consuming decision inside an ordinary consolidation batch."""
+
+    operation: str
+    source_atomic_belief_ids: tuple[str, ...]
+    rationale: str
+    target_belief_id: str | None = None
+    atomic_belief_input: ValidatedAtomicBeliefDraft | None = None
+
+
+@dataclass(frozen=True)
 class ValidatedFeedbackAttributionVerdict:
     """Feedback verdict accepted from an attribution LLM output."""
 
@@ -619,7 +785,10 @@ class ValidatedFeedbackAttributionVerdict:
 
 
 ValidatedPayload = (
-    ValidatedAtomicBeliefDraft | ValidatedSummaryBeliefDraft | ValidatedBeliefUpdate
+    ValidatedAtomicBeliefDraft
+    | ValidatedSummaryBeliefDraft
+    | ValidatedBeliefUpdate
+    | ValidatedConsolidationDecision
 )
 
 
@@ -798,6 +967,8 @@ def _validate_payloads(
     payload: Mapping[str, Any],
     context: BackgroundLLMValidationContext,
 ) -> tuple[ValidatedPayload, ...]:
+    if operation == _CONSOLIDATION_BATCH_OPERATION:
+        return _validate_consolidation_decisions(payload, context)
     if operation == "create_atomic_belief":
         if BackgroundStage(context.source_window.stage) == BackgroundStage.EXTRACTION:
             return _validate_atomic_drafts(payload.get("atomic_belief_inputs"), context)
@@ -830,8 +1001,14 @@ def _validate_stage_output_shape(
     context: BackgroundLLMValidationContext,
 ) -> None:
     stage = BackgroundStage(context.source_window.stage)
-    if stage in _CONSOLIDATION_STAGES:
-        _validate_consolidation_stage_output_shape(operation=operation, payload=payload)
+    if stage == BackgroundStage.CONSOLIDATION:
+        _validate_ordinary_consolidation_stage_output_shape(
+            operation=operation,
+            payload=payload,
+        )
+        return
+    if stage == BackgroundStage.CONFLICT_REVIEW:
+        _validate_conflict_review_stage_output_shape(operation=operation, payload=payload)
         return
     if stage == BackgroundStage.SUMMARY:
         _validate_summary_stage_output_shape(operation=operation, payload=payload)
@@ -858,7 +1035,23 @@ def _validate_stage_output_shape(
         )
 
 
-def _validate_consolidation_stage_output_shape(
+def _validate_ordinary_consolidation_stage_output_shape(
+    *,
+    operation: str,
+    payload: Mapping[str, Any],
+) -> None:
+    if operation != _CONSOLIDATION_BATCH_OPERATION:
+        raise BackgroundLLMValidationError(
+            "ordinary consolidation accepts only consolidate_atomic_beliefs outputs"
+        )
+    keys = {str(key) for key in payload}
+    if keys != _CONSOLIDATION_BATCH_PAYLOAD_KEYS:
+        raise BackgroundLLMValidationError(
+            "ordinary consolidation payload must contain exactly decisions"
+        )
+
+
+def _validate_conflict_review_stage_output_shape(
     *,
     operation: str,
     payload: Mapping[str, Any],
@@ -920,6 +1113,230 @@ def _validate_skip_payload(payload: Mapping[str, Any]) -> None:
     reason = _required_str(payload, "reason")
     if len(reason) > 256:
         raise BackgroundLLMValidationError("skip reason must be at most 256 characters")
+
+
+def _validate_consolidation_decisions(
+    payload: Mapping[str, Any],
+    context: BackgroundLLMValidationContext,
+) -> tuple[ValidatedConsolidationDecision, ...]:
+    _validate_exact_keys(payload, set(_CONSOLIDATION_BATCH_PAYLOAD_KEYS), "consolidation payload")
+    raw_decisions = payload.get("decisions")
+    if not isinstance(raw_decisions, list) or not raw_decisions:
+        raise BackgroundLLMValidationError("payload.decisions must be a non-empty array")
+
+    allowed_source_ids = tuple(
+        source_ref.source_id
+        for source_ref in context.source_window.source_refs
+        if source_ref.source_type == "atomic_belief"
+    )
+    allowed_source_set = frozenset(allowed_source_ids)
+    if not allowed_source_set:
+        raise BackgroundLLMValidationError(
+            "ordinary consolidation requires atomic_belief source refs"
+        )
+    if len(allowed_source_ids) != len(allowed_source_set):
+        raise BackgroundLLMValidationError("duplicate source id in consolidation source window")
+
+    seen_source_ids: set[str] = set()
+    decisions: list[ValidatedConsolidationDecision] = []
+    for index, raw_decision in enumerate(raw_decisions):
+        decision = _validate_consolidation_decision(raw_decision, context, index=index)
+        for source_id in decision.source_atomic_belief_ids:
+            if source_id not in allowed_source_set:
+                raise BackgroundLLMValidationError(
+                    f"unknown source_atomic_belief_id {source_id!r}"
+                )
+            if source_id in seen_source_ids:
+                raise BackgroundLLMValidationError(
+                    f"duplicate source_atomic_belief_id {source_id!r}"
+                )
+            seen_source_ids.add(source_id)
+        decisions.append(decision)
+
+    missing = allowed_source_set - seen_source_ids
+    if missing:
+        raise BackgroundLLMValidationError(
+            "missing source_atomic_belief_ids: " + ", ".join(sorted(missing))
+        )
+    return tuple(decisions)
+
+
+def _validate_consolidation_decision(
+    raw: object,
+    context: BackgroundLLMValidationContext,
+    *,
+    index: int,
+) -> ValidatedConsolidationDecision:
+    label = f"payload.decisions[{index}]"
+    if not isinstance(raw, Mapping):
+        raise BackgroundLLMValidationError(f"{label} must be an object")
+    allowed_keys = _CONSOLIDATION_DECISION_BASE_KEYS.union(
+        {"target_belief_id", "atomic_belief_input"}
+    )
+    _validate_allowed_keys(raw, allowed_keys, label)
+
+    operation = _required_str(raw, "operation")
+    if operation not in _CONSOLIDATION_DECISION_OPERATIONS:
+        allowed = ", ".join(sorted(_CONSOLIDATION_DECISION_OPERATIONS))
+        raise BackgroundLLMValidationError(
+            f"unsupported consolidation decision operation {operation!r}; allowed: {allowed}"
+        )
+    source_ids = _required_source_atomic_belief_ids(
+        raw.get("source_atomic_belief_ids"),
+        label=label,
+    )
+    rationale = _required_str(raw, "rationale")
+    target_belief_id = _optional_target_belief_id(raw, context, label=label)
+    atomic_belief_input = (
+        _validate_atomic_draft(raw.get("atomic_belief_input"), context)
+        if "atomic_belief_input" in raw
+        else None
+    )
+
+    _validate_consolidation_decision_fields(
+        operation=operation,
+        source_ids=source_ids,
+        target_belief_id=target_belief_id,
+        atomic_belief_input=atomic_belief_input,
+        label=label,
+    )
+    if operation == "create" and len(source_ids) == 1:
+        assert atomic_belief_input is not None
+        _reject_single_source_duplicate_create(
+            atomic_belief_input,
+            source_id=source_ids[0],
+            context=context,
+        )
+    return ValidatedConsolidationDecision(
+        operation=operation,
+        source_atomic_belief_ids=source_ids,
+        rationale=rationale,
+        target_belief_id=target_belief_id,
+        atomic_belief_input=atomic_belief_input,
+    )
+
+
+def _required_source_atomic_belief_ids(
+    raw: object,
+    *,
+    label: str,
+) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not raw:
+        raise BackgroundLLMValidationError(
+            f"{label}.source_atomic_belief_ids must be a non-empty array"
+        )
+    source_ids: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise BackgroundLLMValidationError(
+                f"{label}.source_atomic_belief_ids entries must be non-empty strings"
+            )
+        source_ids.append(item.strip())
+    if len(source_ids) != len(set(source_ids)):
+        raise BackgroundLLMValidationError("duplicate source_atomic_belief_id in decision")
+    return tuple(source_ids)
+
+
+def _optional_target_belief_id(
+    raw: Mapping[str, Any],
+    context: BackgroundLLMValidationContext,
+    *,
+    label: str,
+) -> str | None:
+    if "target_belief_id" not in raw:
+        return None
+    target_belief_id = _required_str(raw, "target_belief_id")
+    if target_belief_id not in context.allowed_target_belief_ids:
+        raise BackgroundLLMValidationError(
+            f"{label}.target_belief_id {target_belief_id!r} was not included in LLM input"
+        )
+    return target_belief_id
+
+
+def _validate_consolidation_decision_fields(
+    *,
+    operation: str,
+    source_ids: tuple[str, ...],
+    target_belief_id: str | None,
+    atomic_belief_input: ValidatedAtomicBeliefDraft | None,
+    label: str,
+) -> None:
+    if operation == "promote" and len(source_ids) != 1:
+        raise BackgroundLLMValidationError(f"{label}.promote requires exactly one source")
+    target_required = operation in {"strengthen", "supersede", "retract", "archive"}
+    atomic_required = operation in {"create", "supersede"}
+    if target_required and target_belief_id is None:
+        raise BackgroundLLMValidationError(f"{label}.{operation} requires target_belief_id")
+    if not target_required and target_belief_id is not None:
+        raise BackgroundLLMValidationError(f"{label}.{operation} forbids target_belief_id")
+    if atomic_required and atomic_belief_input is None:
+        raise BackgroundLLMValidationError(f"{label}.{operation} requires atomic_belief_input")
+    if not atomic_required and atomic_belief_input is not None:
+        raise BackgroundLLMValidationError(f"{label}.{operation} forbids atomic_belief_input")
+
+
+def _reject_single_source_duplicate_create(
+    draft: ValidatedAtomicBeliefDraft,
+    *,
+    source_id: str,
+    context: BackgroundLLMValidationContext,
+) -> None:
+    source_record = context.source_atomic_belief_records.get(source_id)
+    if not isinstance(source_record, Mapping):
+        raise BackgroundLLMValidationError(
+            "single-source create requires source atomic belief record for duplicate-copy "
+            "validation; use promote when preserving the source unchanged"
+        )
+    if _draft_matches_source_record(draft, source_record):
+        raise BackgroundLLMValidationError(
+            "single-source create duplicates the source atomic belief; use promote"
+        )
+
+
+def _draft_matches_source_record(
+    draft: ValidatedAtomicBeliefDraft,
+    source_record: Mapping[str, Any],
+) -> bool:
+    source_update_policy = source_record.get("update_policy") or {}
+    if not isinstance(source_update_policy, Mapping):
+        source_update_policy = {}
+    source_validity = source_record.get("validity") or {}
+    if not isinstance(source_validity, Mapping):
+        source_validity = {}
+    draft_validity = draft.validity.to_record() if draft.validity is not None else None
+    validity_matches = draft_validity is None or dict(source_validity) == draft_validity
+    return (
+        source_record.get("memory_kind") == draft.memory_kind.value
+        and source_record.get("scope") == draft.scope.value
+        and _normalized_reference_records(source_record.get("about")) == (
+            _materialized_draft_about_records_for_duplicate_check(draft)
+        )
+        and str(source_record.get("topic", "")).strip() == draft.topic
+        and str(source_record.get("content", "")).strip() == draft.content
+        and dict(source_update_policy) == draft.update_policy
+        and validity_matches
+    )
+
+
+def _materialized_draft_about_records_for_duplicate_check(
+    draft: ValidatedAtomicBeliefDraft,
+) -> tuple[tuple[str, str], ...]:
+    if draft.scope == BeliefScope.PROJECT and draft.project_descriptor is not None:
+        return (("project", _project_reference_id(draft.project_descriptor)),)
+    return _normalized_reference_records([ref.to_record() for ref in draft.about])
+
+
+def _normalized_reference_records(raw: object) -> tuple[tuple[str, str], ...]:
+    if not isinstance(raw, list):
+        return ()
+    refs: list[tuple[str, str]] = []
+    for item in raw:
+        if isinstance(item, Mapping):
+            kind = item.get("kind")
+            ref_id = item.get("id")
+            if isinstance(kind, str) and isinstance(ref_id, str):
+                refs.append((kind, ref_id))
+    return tuple(sorted(refs))
 
 
 def _validate_atomic_draft(
@@ -1154,17 +1571,42 @@ def _validate_allowed_about_refs(
 
 
 def _resolvable_project_descriptor(descriptor: str | Mapping[str, Any]) -> bool:
-    if isinstance(descriptor, str):
-        return bool(descriptor.strip())
-    if not descriptor:
+    try:
+        _normalize_project_descriptor(descriptor)
+    except ValueError:
         return False
-    for value in descriptor.values():
-        if isinstance(value, str):
-            if value.strip():
-                return True
-        elif value is not None:
-            return True
-    return False
+    return True
+
+
+def _project_reference_id(descriptor: str | Mapping[str, Any]) -> str:
+    normalized = _normalize_project_descriptor(descriptor)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
+    return f"project:{digest}"
+
+
+def _normalize_project_descriptor(descriptor: str | Mapping[str, Any]) -> str:
+    if isinstance(descriptor, str):
+        normalized = _normalize_descriptor_text(descriptor)
+        if not normalized:
+            raise ValueError("project descriptor must be resolvable")
+        return normalized
+    for key in ("name", "repository", "repo"):
+        value = descriptor.get(key)
+        if isinstance(value, str) and value.strip():
+            return _normalize_descriptor_text(value)
+    normalized = _normalize_descriptor_text(
+        json.dumps(dict(descriptor), ensure_ascii=False, sort_keys=True)
+    )
+    if not normalized or normalized == "{}":
+        raise ValueError("project descriptor must be resolvable")
+    return normalized
+
+
+def _normalize_descriptor_text(value: str) -> str:
+    normalized = value.replace("\\", "/").strip().casefold()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"/+", "/", normalized)
+    return normalized.rstrip("/")
 
 
 def _normalized_generated_key(key: object) -> str:
