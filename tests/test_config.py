@@ -86,6 +86,10 @@ interval_seconds = 33
 inactivity_threshold_hours = 18
 max_sessions_per_pass = 3
 
+[cognition.background.consolidation]
+max_extracted_per_batch = 4
+max_active_context = 5
+
 [cognition.background.summary]
 initial_min_beliefs = 10
 changed_source_min = 11
@@ -173,6 +177,8 @@ api_key = "tvly-file-key"
     assert config.cognition_background.interval_seconds == 33
     assert config.cognition_background.extraction.inactivity_threshold_hours == 18
     assert config.cognition_background.extraction.max_sessions_per_pass == 3
+    assert config.cognition_background.consolidation.max_extracted_per_batch == 4
+    assert config.cognition_background.consolidation.max_active_context == 5
     assert config.cognition_background.summary.initial_min_beliefs == 10
     assert config.cognition_background.summary.changed_source_min == 11
     assert config.cognition_background.summary.invalidated_source_min == 12
@@ -189,6 +195,16 @@ def test_background_max_sessions_per_pass_default_is_ten(tmp_path: Path) -> None
     config = load_config(env_file=None, config_file=config_path)
 
     assert config.cognition_background.extraction.max_sessions_per_pass == 10
+
+
+def test_background_consolidation_config_defaults(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("", encoding="utf-8")
+
+    config = load_config(env_file=None, config_file=config_path)
+
+    assert config.cognition_background.consolidation.max_extracted_per_batch == 8
+    assert config.cognition_background.consolidation.max_active_context == 20
 
 
 def test_relative_paths_resolve_under_runtime_home_dir(
@@ -313,6 +329,11 @@ allowed_workdirs = ["."]
         "18",
     )
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_EXTRACTION_MAX_SESSIONS_PER_PASS", "7")
+    monkeypatch.setenv(
+        "ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MAX_EXTRACTED_PER_BATCH",
+        "16",
+    )
+    monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MAX_ACTIVE_CONTEXT", "24")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_SUMMARY_INITIAL_MIN_BELIEFS", "13")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_SUMMARY_CHANGED_SOURCE_MIN", "14")
     monkeypatch.setenv("ALPHA_COGNITION_BACKGROUND_SUMMARY_INVALIDATED_SOURCE_MIN", "15")
@@ -359,6 +380,8 @@ allowed_workdirs = ["."]
     assert config.cognition_background.interval_seconds == 2
     assert config.cognition_background.extraction.inactivity_threshold_hours == 18
     assert config.cognition_background.extraction.max_sessions_per_pass == 7
+    assert config.cognition_background.consolidation.max_extracted_per_batch == 16
+    assert config.cognition_background.consolidation.max_active_context == 24
     assert config.cognition_background.summary.initial_min_beliefs == 13
     assert config.cognition_background.summary.changed_source_min == 14
     assert config.cognition_background.summary.invalidated_source_min == 15
@@ -574,6 +597,19 @@ def test_config_cli_set_and_get(
         app,
         ["config", "set", "llm.providers.mimo.max_context_tokens", "1000000"],
     )
+    set_consolidation_batch = runner.invoke(
+        app,
+        [
+            "config",
+            "set",
+            "cognition.background.consolidation.max_extracted_per_batch",
+            "9",
+        ],
+    )
+    set_consolidation_context = runner.invoke(
+        app,
+        ["config", "set", "cognition.background.consolidation.max_active_context", "21"],
+    )
     get_provider = runner.invoke(app, ["config", "get", "llm.provider"])
     get_codex_model = runner.invoke(app, ["config", "get", "codex.model"])
     get_home_dir = runner.invoke(app, ["config", "get", "runtime.home_dir"])
@@ -604,6 +640,8 @@ def test_config_cli_set_and_get(
     assert set_mimo_key.exit_code == 0
     assert set_mimo_model.exit_code == 0
     assert set_mimo_provider_limit.exit_code == 0
+    assert set_consolidation_batch.exit_code == 0
+    assert set_consolidation_context.exit_code == 0
     assert get_provider.exit_code == 0
     assert get_codex_model.exit_code == 0
     assert get_home_dir.exit_code == 0
@@ -643,6 +681,8 @@ def test_config_cli_set_and_get(
     assert config.file_tool.max_glob_results == 18
     assert config.file_tool.max_read_lines == 19
     assert config.file_tool.create_parent_dirs_enabled is True
+    assert config.cognition_background.consolidation.max_extracted_per_batch == 9
+    assert config.cognition_background.consolidation.max_active_context == 21
 
 
 def test_file_patch_config_defaults_to_disabled(tmp_path: Path) -> None:
@@ -760,6 +800,8 @@ batch_size = 3
 [cognition.background.consolidation]
 batch_size = 4
 min_sources = 5
+max_extracted_per_batch = 8
+max_active_context = 20
 
 [cognition.background.conflict]
 batch_size = 6
@@ -791,11 +833,15 @@ invalidated_source_min = 12
     assert "interval_seconds = 7" in saved
     assert "tick_timeout_seconds" not in saved
     assert "[cognition.background.intake]" not in saved
-    assert "[cognition.background.consolidation]" not in saved
+    assert "[cognition.background.consolidation]" in saved
     assert "[cognition.background.conflict]" not in saved
     assert "batch_size = 3" not in saved
     assert "min_sources = 2" not in saved
     assert "batch_size = 9" not in saved
+    assert "batch_size = 4" not in saved
+    assert "min_sources = 5" not in saved
+    assert "max_extracted_per_batch = 8" in saved
+    assert "max_active_context = 20" in saved
     assert "inactivity_threshold_hours = 20" in saved
     assert "initial_min_beliefs = 10" in saved
     assert "changed_source_min = 11" in saved
@@ -1020,6 +1066,14 @@ def test_config_set_rejects_bash_default_workdir_outside_allowlist(
             "tools.files.max_glob_results must be greater than 0",
         ),
         (
+            "[cognition.background.consolidation]\nmax_extracted_per_batch = 0\n",
+            "cognition.background.consolidation.max_extracted_per_batch must be greater than 0",
+        ),
+        (
+            "[cognition.background.consolidation]\nmax_active_context = 0\n",
+            "cognition.background.consolidation.max_active_context must be greater than 0",
+        ),
+        (
             '[tools.bash]\ndefault_workdir = "~/outside-alpha-work"\nallowed_workdirs = ["."]\n',
             "tools.bash.default_workdir must be within tools.bash.allowed_workdirs",
         ),
@@ -1054,6 +1108,16 @@ def test_load_config_rejects_invalid_toml_values(
             "ALPHA_FILE_TOOL_MAX_READ_LINES",
             "0",
             "tools.files.max_read_lines must be greater than 0",
+        ),
+        (
+            "ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MAX_EXTRACTED_PER_BATCH",
+            "0",
+            "cognition.background.consolidation.max_extracted_per_batch must be greater than 0",
+        ),
+        (
+            "ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MAX_ACTIVE_CONTEXT",
+            "0",
+            "cognition.background.consolidation.max_active_context must be greater than 0",
         ),
     ],
 )

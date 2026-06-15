@@ -80,6 +80,10 @@ interval_seconds = 300
 inactivity_threshold_hours = 24
 max_sessions_per_pass = 10
 
+[cognition.background.consolidation]
+max_extracted_per_batch = 8
+max_active_context = 20
+
 [cognition.background.summary]
 initial_min_beliefs = 12
 changed_source_min = 6
@@ -153,6 +157,8 @@ CONFIG_KEY_TYPES: dict[str, type] = {
     "cognition.background.interval_seconds": int,
     "cognition.background.extraction.inactivity_threshold_hours": int,
     "cognition.background.extraction.max_sessions_per_pass": int,
+    "cognition.background.consolidation.max_extracted_per_batch": int,
+    "cognition.background.consolidation.max_active_context": int,
     "cognition.background.summary.initial_min_beliefs": int,
     "cognition.background.summary.changed_source_min": int,
     "cognition.background.summary.invalidated_source_min": int,
@@ -189,7 +195,6 @@ CONFIG_KEY_ALLOWED_VALUES: dict[str, set[str]] = {
 REMOVED_CONFIG_SECTIONS = (
     "cognition.consolidation",
     "cognition.background.intake",
-    "cognition.background.consolidation",
     "cognition.background.conflict",
 )
 
@@ -198,6 +203,8 @@ REMOVED_CONFIG_FIELDS = (
     "cognition.background.tick_timeout_seconds",
     "cognition.background.extraction.batch_size",
     "cognition.background.extraction.min_sources",
+    "cognition.background.consolidation.batch_size",
+    "cognition.background.consolidation.min_sources",
     "cognition.background.summary.batch_size",
 )
 
@@ -205,6 +212,8 @@ POSITIVE_INT_CONFIG_KEYS = {
     "cognition.background.interval_seconds",
     "cognition.background.extraction.inactivity_threshold_hours",
     "cognition.background.extraction.max_sessions_per_pass",
+    "cognition.background.consolidation.max_extracted_per_batch",
+    "cognition.background.consolidation.max_active_context",
     "cognition.background.summary.initial_min_beliefs",
     "cognition.background.summary.changed_source_min",
     "cognition.background.summary.invalidated_source_min",
@@ -307,6 +316,14 @@ class BackgroundExtractionConfig:
 
 
 @dataclass(frozen=True)
+class BackgroundConsolidationConfig:
+    """Memory consolidation size controls for daemon background cognition."""
+
+    max_extracted_per_batch: int = 8
+    max_active_context: int = 20
+
+
+@dataclass(frozen=True)
 class BackgroundSummaryConfig:
     """Summary gate placeholders for later background summary phases."""
 
@@ -323,6 +340,9 @@ class CognitionBackgroundConfig:
     startup_delay_seconds: int = 5
     interval_seconds: int = 300
     extraction: BackgroundExtractionConfig = field(default_factory=BackgroundExtractionConfig)
+    consolidation: BackgroundConsolidationConfig = field(
+        default_factory=BackgroundConsolidationConfig
+    )
     summary: BackgroundSummaryConfig = field(default_factory=BackgroundSummaryConfig)
 
 
@@ -777,6 +797,12 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         "cognition.background.extraction.max_sessions_per_pass": (
             config.cognition_background.extraction.max_sessions_per_pass
         ),
+        "cognition.background.consolidation.max_extracted_per_batch": (
+            config.cognition_background.consolidation.max_extracted_per_batch
+        ),
+        "cognition.background.consolidation.max_active_context": (
+            config.cognition_background.consolidation.max_active_context
+        ),
         "cognition.background.summary.initial_min_beliefs": (
             config.cognition_background.summary.initial_min_beliefs
         ),
@@ -822,6 +848,14 @@ def _validate_loaded_config(config: AlphaConfig) -> AlphaConfig:
         (
             "cognition.background.extraction.max_sessions_per_pass",
             config.cognition_background.extraction.max_sessions_per_pass,
+        ),
+        (
+            "cognition.background.consolidation.max_extracted_per_batch",
+            config.cognition_background.consolidation.max_extracted_per_batch,
+        ),
+        (
+            "cognition.background.consolidation.max_active_context",
+            config.cognition_background.consolidation.max_active_context,
         ),
         (
             "cognition.background.summary.initial_min_beliefs",
@@ -937,6 +971,7 @@ def _write_toml_config(path: Path, config_data: dict[str, Any]) -> None:
         "tools.files",
         "cognition.background",
         "cognition.background.extraction",
+        "cognition.background.consolidation",
         "cognition.background.summary",
         "cognition.drive",
         "deepseek",
@@ -1037,6 +1072,7 @@ def _float_value(value: Any, default: float) -> float:
 
 def _background_config(section: dict[str, Any]) -> CognitionBackgroundConfig:
     extraction = _mapping_section(section, "extraction")
+    consolidation = _mapping_section(section, "consolidation")
     summary = _mapping_section(section, "summary")
     return CognitionBackgroundConfig(
         enabled=_bool_env(
@@ -1059,6 +1095,16 @@ def _background_config(section: dict[str, Any]) -> CognitionBackgroundConfig:
             max_sessions_per_pass=_int_env(
                 "ALPHA_COGNITION_BACKGROUND_EXTRACTION_MAX_SESSIONS_PER_PASS",
                 _int_value(extraction.get("max_sessions_per_pass"), 10),
+            ),
+        ),
+        consolidation=BackgroundConsolidationConfig(
+            max_extracted_per_batch=_int_env(
+                "ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MAX_EXTRACTED_PER_BATCH",
+                _int_value(consolidation.get("max_extracted_per_batch"), 8),
+            ),
+            max_active_context=_int_env(
+                "ALPHA_COGNITION_BACKGROUND_CONSOLIDATION_MAX_ACTIVE_CONTEXT",
+                _int_value(consolidation.get("max_active_context"), 20),
             ),
         ),
         summary=BackgroundSummaryConfig(

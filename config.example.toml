@@ -73,6 +73,10 @@ interval_seconds = 300
 inactivity_threshold_hours = 24
 max_sessions_per_pass = 10
 
+[cognition.background.consolidation]
+max_extracted_per_batch = 8
+max_active_context = 20
+
 [cognition.background.summary]
 initial_min_beliefs = 12
 changed_source_min = 6

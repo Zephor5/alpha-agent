@@ -190,11 +190,15 @@ class MemoryConsolidationWorker:
         state_service: CognitionStateStore | None = None,
         llm_provider: LLMProvider | None = None,
         *,
+        max_extracted_per_batch: int = 8,
+        max_active_context: int = 20,
         worker_id: str | None = None,
         llm_trace_logger: LLMTraceLogger | None = None,
     ):
         self.state_service = state_service
         self.llm_provider = llm_provider
+        self.max_extracted_per_batch = max(1, int(max_extracted_per_batch))
+        self.max_active_context = max(1, int(max_active_context))
         self.worker_id = worker_id or self.name
         self.llm_trace_logger = llm_trace_logger
 
@@ -220,6 +224,8 @@ class MemoryConsolidationWorker:
             llm_provider=self.llm_provider,
             checkpoint=checkpoint or WorkerCheckpoint(worker_name=self.name),
             coordinator=coordinator or _NeverYieldCoordinator(),
+            max_extracted_per_batch=self.max_extracted_per_batch,
+            max_active_context=self.max_active_context,
             llm_trace_logger=self.llm_trace_logger,
         )
 
@@ -250,6 +256,26 @@ class MemoryConsolidationWorker:
             llm_provider=provider,
             checkpoint=checkpoint,
             coordinator=coordinator,
+            max_extracted_per_batch=max(
+                1,
+                int(
+                    getattr(
+                        config,
+                        "consolidation_max_extracted_per_batch",
+                        self.max_extracted_per_batch,
+                    )
+                ),
+            ),
+            max_active_context=max(
+                1,
+                int(
+                    getattr(
+                        config,
+                        "consolidation_max_active_context",
+                        self.max_active_context,
+                    )
+                ),
+            ),
             llm_trace_logger=(
                 getattr(config, "llm_trace_logger", self.llm_trace_logger)
                 or self.llm_trace_logger
@@ -263,8 +289,11 @@ class MemoryConsolidationWorker:
         llm_provider: LLMProvider,
         checkpoint: WorkerCheckpoint,
         coordinator: YieldingCoordinator,
+        max_extracted_per_batch: int,
+        max_active_context: int,
         llm_trace_logger: LLMTraceLogger | None,
     ) -> WorkerReport:
+        del max_extracted_per_batch, max_active_context
         candidate = _next_consolidation_candidate(state_service)
         if candidate is None:
             return _worker_report(

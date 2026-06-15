@@ -68,6 +68,7 @@ from alpha_agent.cognition.projections.registry import ProjectionRegistry
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
 from alpha_agent.config import (
     AlphaConfig,
+    BackgroundConsolidationConfig,
     BackgroundExtractionConfig,
     CognitionBackgroundConfig,
 )
@@ -827,6 +828,32 @@ def test_background_service_default_workers_share_service_llm_trace_logger(tmp_p
 
     assert worker_loggers
     assert all(logger is trace_logger for logger in worker_loggers)
+
+
+def test_background_service_passes_consolidation_config_to_worker(tmp_path) -> None:
+    store = _store(tmp_path)
+    background = BackgroundCognitionService(
+        store=store,
+        config=CognitionBackgroundConfig(
+            enabled=True,
+            consolidation=BackgroundConsolidationConfig(
+                max_extracted_per_batch=13,
+                max_active_context=31,
+            ),
+        ),
+    )
+
+    worker_config = background._worker_config()
+    consolidation_worker = next(
+        worker
+        for worker in background._workers
+        if isinstance(worker, MemoryConsolidationWorker)
+    )
+
+    assert worker_config.consolidation_max_extracted_per_batch == 13
+    assert worker_config.consolidation_max_active_context == 31
+    assert consolidation_worker.max_extracted_per_batch == 13
+    assert consolidation_worker.max_active_context == 31
 
 
 def test_background_service_ignores_handover_traces_as_scheduling_sources(

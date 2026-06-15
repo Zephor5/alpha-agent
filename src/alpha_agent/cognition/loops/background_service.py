@@ -557,6 +557,10 @@ class BackgroundCognitionService:
             llm_trace_logger=self.llm_trace_logger,
             tools=self.tools,
             inactive_session_ids=eligible_inactive_session_ids,
+            consolidation_max_extracted_per_batch=(
+                self.config.consolidation.max_extracted_per_batch
+            ),
+            consolidation_max_active_context=self.config.consolidation.max_active_context,
             summary_initial_min_beliefs=self.config.summary.initial_min_beliefs,
             summary_changed_source_min=self.config.summary.changed_source_min,
             summary_invalidated_source_min=self.config.summary.invalidated_source_min,
@@ -594,6 +598,8 @@ class BackgroundCognitionService:
             MemoryConsolidationWorker(
                 self.state_service,
                 self.llm_provider,
+                max_extracted_per_batch=self.config.consolidation.max_extracted_per_batch,
+                max_active_context=self.config.consolidation.max_active_context,
                 llm_trace_logger=self.llm_trace_logger,
             ),
             MemoryConflictReviewWorker(
