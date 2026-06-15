@@ -117,8 +117,7 @@ Content rules:
 - Each content value must be directly supported by the previous messages.
 - Each content value must contain exactly one atomic assertion, not multiple
   claims joined together.
-- Use the same language as the source conversation for topic and content; do not
-  translate extracted memories.
+- Use the **SAME LANGUAGE AS THE SOURCE SENTENCE** for topic and content.
 - Assistant and tool messages are context for interpreting the conversation, not
   standalone evidence about the counterpart unless a user message adopts,
   corrects, or otherwise makes that content evidence about the user.
@@ -187,8 +186,7 @@ Reference rules:
 
 Content rules:
 - Each content value must be directly supported by the previous imported messages.
-- Use the same language as the imported source conversation for topic and content;
-  do not translate extracted memories.
+- Use the **SAME LANGUAGE AS THE IMPORTED SOURCE SENTENCE** for topic and content.
 - Imported assistant output is context for interpreting the transcript, not
   durable knowledge by default.
 - Assistant output is evidence about the user only when a user message adopts,

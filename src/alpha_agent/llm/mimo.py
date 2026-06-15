@@ -15,7 +15,7 @@ from alpha_agent.llm.base import (
 from alpha_agent.llm.chat_completions import complete_chat_completions
 
 MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
-MIMO_DEFAULT_MODEL = "mimo-v2.5-pro"
+MIMO_DEFAULT_MODEL = "mimo-v2.5"
 
 
 class MiMoProvider:

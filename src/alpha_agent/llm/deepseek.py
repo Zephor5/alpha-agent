@@ -17,7 +17,7 @@ from alpha_agent.llm.base import (
 from alpha_agent.llm.chat_completions import complete_chat_completions
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
 
 
 class DeepSeekProvider:

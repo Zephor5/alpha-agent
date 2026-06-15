@@ -42,7 +42,7 @@ def test_deepseek_provider_uses_deepseek_defaults_and_api_key() -> None:
     provider = DeepSeekProvider(config)
 
     assert provider.base_url == DEEPSEEK_BASE_URL
-    assert provider.model == "deepseek-chat"
+    assert provider.model == "deepseek-v4-flash"
     assert provider.api_key == "deepseek-key"
 
 
@@ -86,7 +86,7 @@ def test_mimo_provider_uses_api_key_header_and_normalizes_response(
             200,
             {
                 "id": "chatcmpl-mimo",
-                "model": "mimo-v2.5-pro",
+                "model": "mimo-v2.5",
                 "choices": [
                     {
                         "finish_reason": "tool_calls",
@@ -117,7 +117,7 @@ def test_mimo_provider_uses_api_key_header_and_normalizes_response(
     )
 
     assert response.provider == "mimo"
-    assert response.model == "mimo-v2.5-pro"
+    assert response.model == "mimo-v2.5"
     assert response.finish_reason == "tool_calls"
     assert response.tool_calls[0].arguments == {"query": "alpha"}
     assert response.metadata["request_payload"] == captured["json"]
@@ -126,7 +126,7 @@ def test_mimo_provider_uses_api_key_header_and_normalizes_response(
     assert captured["headers"]["api-key"] == "mimo-key"
     assert "Authorization" not in captured["headers"]
     assert captured["headers"]["Content-Type"] == "application/json"
-    assert captured["json"]["model"] == "mimo-v2.5-pro"
+    assert captured["json"]["model"] == "mimo-v2.5"
     assert captured["json"]["messages"] == [{"role": "user", "content": "ping"}]
     assert captured["json"]["tools"] == [
         {
