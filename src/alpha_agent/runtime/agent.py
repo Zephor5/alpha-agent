@@ -86,7 +86,10 @@ from alpha_agent.runtime.prompt_builder import (
     build_answer_prompt_messages_from_frame,
     default_runtime_system_message,
 )
-from alpha_agent.runtime.session_context import SessionContextAssembler
+from alpha_agent.runtime.session_context import (
+    SessionContextAssembler,
+    ToolContextTruncationResult,
+)
 from alpha_agent.runtime.tools import ExecutedToolResult, ToolExecutionError, ToolExecutor
 from alpha_agent.state.models import RuntimeTrace, SessionMessage, SessionSummarySnapshot
 from alpha_agent.state.store import (
@@ -651,6 +654,15 @@ class AlphaAgent:
                 extra_source_messages=pending_source_messages,
             )
             estimate = self._estimate_context_budget(projected_messages, tools=model_tools)
+            self._record_post_tool_truncation_occupied_tokens(
+                turn_context=turn_context,
+                session_id=session_id,
+                messages=projected_messages,
+                tools=model_tools,
+                truncation=truncation,
+                stage="pre_user",
+                debug=debug,
+            )
 
         if self._needs_handover(estimate) and self.session_context.load(
             session_id
@@ -715,7 +727,7 @@ class AlphaAgent:
         debug["tool_loop_context_remaining_tokens"] = estimate.remaining_context_tokens
 
         if self._needs_tool_truncation(estimate):
-            self.session_context.truncate_tool_context_if_needed(
+            truncation = self.session_context.truncate_tool_context_if_needed(
                 session_id,
                 context_config=self.llm_context_config,
                 max_context_tokens=self.max_context_tokens,
@@ -730,6 +742,15 @@ class AlphaAgent:
                 prompt_frame=prompt_frame,
             )
             estimate = self._estimate_context_budget(llm_messages, tools=model_tools)
+            self._record_post_tool_truncation_occupied_tokens(
+                turn_context=turn_context,
+                session_id=session_id,
+                messages=llm_messages,
+                tools=model_tools,
+                truncation=truncation,
+                stage="tool_loop",
+                debug=debug,
+            )
 
         if self._needs_handover(estimate) and self.session_context.load(
             session_id
@@ -1581,6 +1602,49 @@ class AlphaAgent:
                         "compression_point_ordinal": result.compression_point_ordinal,
                         "started_trace_id": result.started_trace_id,
                         "completed_trace_id": result.completed_trace_id,
+                        "failures": [
+                            {
+                                "stage": "update_session_occupied_tokens",
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                            }
+                        ],
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+            except Exception:
+                pass
+
+    def _record_post_tool_truncation_occupied_tokens(
+        self,
+        *,
+        turn_context: AgentTurnContext,
+        session_id: str,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[LLMToolDefinitionInput] | None,
+        truncation: ToolContextTruncationResult,
+        stage: str,
+        debug: dict[str, Any],
+    ) -> None:
+        if not truncation.truncated_message_ids:
+            return
+        try:
+            estimate = self._estimate_context_budget(messages, tools=tools)
+            occupied_tokens = estimate.message_tokens + estimate.tool_schema_tokens
+            self.store.update_session_occupied_tokens(session_id, occupied_tokens)
+            debug[f"{stage}_post_tool_truncation_occupied_tokens"] = occupied_tokens
+        except Exception as exc:
+            try:
+                self.store.append_runtime_trace(
+                    session_id=session_id,
+                    event_type="tool_truncation.accounting_failed",
+                    content="Tool truncation accounting failed.",
+                    metadata={
+                        "turn_id": turn_context.turn_id,
+                        "stage": stage,
+                        "checked_message_ids": list(truncation.checked_message_ids),
+                        "truncated_message_ids": list(truncation.truncated_message_ids),
                         "failures": [
                             {
                                 "stage": "update_session_occupied_tokens",

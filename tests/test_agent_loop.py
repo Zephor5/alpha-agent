@@ -2088,6 +2088,112 @@ def test_tool_loop_compression_occupied_tokens_use_rebuilt_continuation_estimate
     assert session.occupied_tokens == expected_occupied
 
 
+def test_tool_truncation_updates_occupied_tokens_from_rebuilt_continuation_estimate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    occupied_updates: list[int] = []
+    original_update_occupied = store.update_session_occupied_tokens
+
+    def capture_update_occupied(
+        session_id: str,
+        occupied_tokens: int,
+        *,
+        conn=None,
+    ):
+        occupied_updates.append(occupied_tokens)
+        return original_update_occupied(session_id, occupied_tokens, conn=conn)
+
+    monkeypatch.setattr(store, "update_session_occupied_tokens", capture_update_occupied)
+    registry = ToolRegistry()
+    registry.register(_VerboseTool(output_text="result " * 400))
+    provider = _ToolTruncationProvider(argument_text="argument " * 400)
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        tool_registry=registry,
+        llm_context_config=_tool_truncation_context(),
+        max_context_tokens=10_000,
+    )
+
+    result = agent.respond("use tool", session_id="s1")
+
+    assert result.response == "final answer"
+    assert len(provider.calls) == 2
+    expected = estimate_context_budget(
+        provider.calls[1],
+        tools=agent.tool_registry.to_llm_tool_definitions() or None,
+        context_config=agent.llm_context_config,
+        max_context_tokens=agent.max_context_tokens,
+    )
+    expected_occupied = expected.message_tokens + expected.tool_schema_tokens
+    assert expected_occupied < result.debug["tool_loop_context_used_tokens"]
+    assert result.debug["tool_loop_post_tool_truncation_occupied_tokens"] == (
+        expected_occupied
+    )
+    assert len(occupied_updates) == 3
+    assert occupied_updates[-2:] == [expected_occupied, expected_occupied]
+
+    messages = _without_time_reminders(store.list_session_messages("s1"))
+    tool_call_message = messages[1]
+    tool_result_message = messages[2]
+    assert tool_call_message.metadata["truncate_checked"] is True
+    assert tool_result_message.metadata["truncate_checked"] is True
+    assert tool_call_message.metadata["original_lengths"]
+    assert tool_result_message.metadata["original_lengths"]
+
+    session = store.get_session_record("s1")
+    assert session is not None
+    assert session.total_tokens == 0
+    assert session.cached_tokens == 0
+    assert session.prompt_cache_miss_tokens == 0
+    assert session.reasoning_tokens == 0
+    assert session.completion_tokens == 0
+    assert session.occupied_tokens == expected_occupied
+
+
+def test_checked_only_tool_truncation_does_not_refresh_occupied_tokens(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    occupied_updates: list[int] = []
+    original_update_occupied = store.update_session_occupied_tokens
+
+    def capture_update_occupied(
+        session_id: str,
+        occupied_tokens: int,
+        *,
+        conn=None,
+    ):
+        occupied_updates.append(occupied_tokens)
+        return original_update_occupied(session_id, occupied_tokens, conn=conn)
+
+    monkeypatch.setattr(store, "update_session_occupied_tokens", capture_update_occupied)
+    registry = ToolRegistry()
+    registry.register(_VerboseTool(output_text="short"))
+    provider = _ToolTruncationProvider(argument_text="short")
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        tool_registry=registry,
+        llm_context_config=_tool_truncation_context(),
+        max_context_tokens=10_000,
+    )
+
+    result = agent.respond("use tool", session_id="s1")
+
+    assert result.response == "final answer"
+    assert "tool_loop_post_tool_truncation_occupied_tokens" not in result.debug
+    assert len(occupied_updates) == 2
+    messages = _without_time_reminders(store.list_session_messages("s1"))
+    assert messages[1].metadata["truncate_checked"] is True
+    assert messages[1].metadata["original_lengths"] == {}
+    assert messages[2].metadata["truncate_checked"] is True
+    assert messages[2].metadata["original_lengths"] == {}
+
+
 class _RecordingProvider:
     name = "recording"
 
@@ -2495,6 +2601,42 @@ class _ToolLoopCompressionProvider:
         return LLMResponse(content="final answer", model="test", provider=self.name)
 
 
+class _ToolTruncationProvider:
+    name = "tool-truncation-provider"
+
+    def __init__(self, *, argument_text: str) -> None:
+        self.argument_text = argument_text
+        self.calls: list[list[ChatMessage]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
+    ) -> LLMResponse:
+        del tools, tool_choice, response_format
+        self.calls.append([_copy_chat_message(message) for message in messages])
+        if len(self.calls) == 1:
+            arguments = {"text": self.argument_text}
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_1",
+                        name="verbose",
+                        arguments=arguments,
+                        raw_arguments=json.dumps(arguments, sort_keys=True),
+                    )
+                ],
+            )
+        return LLMResponse(content="final answer", model="test", provider=self.name)
+
+
 class _StructuredToolCallingProvider:
     name = "structured-tool-provider"
 
@@ -2692,6 +2834,34 @@ class _EchoTool(Tool):
         return {"text": "<trace-safe>"}
 
 
+class _VerboseTool(Tool):
+    def __init__(self, *, output_text: str) -> None:
+        self.output_text = output_text
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="verbose",
+            description="Return configured verbose output.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            max_result_size_chars=100_000,
+        )
+
+    def check_available(self) -> ToolAvailability:
+        return ToolAvailability()
+
+    def run(self, arguments, context: ToolExecutionContext):
+        del arguments, context
+        return ToolResult(name=self.spec.name, output=self.output_text, metadata={})
+
+
 class _StructuredTool(Tool):
     spec = ToolSpec(
         name="structured",
@@ -2799,6 +2969,17 @@ def _compression_context() -> LLMContextConfig:
         tool_truncate_threshold_ratio=1.0,
         handover_compress_threshold_ratio=0.01,
         minimum_remaining_tokens=0,
+        expected_output_reserve_tokens=0,
+        safety_margin_tokens=0,
+    )
+
+
+def _tool_truncation_context() -> LLMContextConfig:
+    return LLMContextConfig(
+        tool_truncate_threshold_ratio=0.01,
+        handover_compress_threshold_ratio=99.0,
+        minimum_remaining_tokens=0,
+        tool_string_truncate_chars=5,
         expected_output_reserve_tokens=0,
         safety_margin_tokens=0,
     )
