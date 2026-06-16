@@ -7,7 +7,12 @@ import httpx
 import pytest
 
 from alpha_agent.config import AlphaConfig
-from alpha_agent.llm.base import AssistantChatMessage, ChatMessage, LLMToolDefinition
+from alpha_agent.llm.base import (
+    AssistantChatMessage,
+    ChatMessage,
+    LLMToolDefinition,
+    LLMUsage,
+)
 from alpha_agent.llm.codex import (
     CodexResponsesProvider,
     codex_responses_payload,
@@ -147,6 +152,41 @@ def test_mimo_provider_uses_api_key_header_and_normalizes_response(
         "function": {"name": "lookup_context"},
     }
     assert captured["json"]["response_format"] == {"type": "json_object"}
+
+
+def test_mimo_provider_normalizes_usage_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    usage = {
+        "completion_tokens": 296,
+        "completion_tokens_details": {"reasoning_tokens": 34},
+        "prompt_tokens": 5104,
+        "prompt_tokens_details": {"cached_tokens": 4096},
+        "total_tokens": 5400,
+    }
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-mimo",
+                "model": "mimo-v2.5",
+                "choices": [{"message": {"content": "pong"}}],
+                "usage": usage,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(mimo_api_key="mimo-key")
+
+    response = MiMoProvider(config).complete([{"role": "user", "content": "ping"}])
+
+    assert response.usage == LLMUsage(
+        total_tokens=5400,
+        cached_tokens=4096,
+        prompt_cache_miss_tokens=1008,
+        reasoning_tokens=34,
+        completion_tokens=296,
+    )
+    assert response.metadata["response_payload"]["usage"] == usage
 
 
 def test_deepseek_provider_replays_assistant_reasoning_content(
@@ -425,6 +465,43 @@ def test_deepseek_response_without_reasoning_content_leaves_field_absent(
     assert response.reasoning_content is None
 
 
+def test_deepseek_provider_normalizes_usage_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    usage = {
+        "completion_tokens": 104,
+        "completion_tokens_details": {"reasoning_tokens": 96},
+        "prompt_cache_hit_tokens": 256,
+        "prompt_cache_miss_tokens": 106,
+        "prompt_tokens": 362,
+        "prompt_tokens_details": {"cached_tokens": 256},
+        "total_tokens": 466,
+    }
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-deepseek",
+                "model": "deepseek-chat",
+                "choices": [{"message": {"content": "pong"}}],
+                "usage": usage,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(deepseek_api_key="deepseek-key", deepseek_model="deepseek-chat")
+
+    response = DeepSeekProvider(config).complete([{"role": "user", "content": "ping"}])
+
+    assert response.usage == LLMUsage(
+        total_tokens=466,
+        cached_tokens=256,
+        prompt_cache_miss_tokens=106,
+        reasoning_tokens=96,
+        completion_tokens=104,
+    )
+    assert response.metadata["response_payload"]["usage"] == usage
+
+
 def test_deepseek_chat_omits_thinking_for_v3(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -697,6 +774,34 @@ def test_openai_compatible_provider_sends_response_format_wire_shape(
     assert captured["json"]["response_format"] == {"type": "json_object"}
 
 
+def test_openai_compatible_provider_without_usage_leaves_usage_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-compat",
+                "model": "gpt-compatible",
+                "choices": [{"message": {"content": "done"}}],
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(
+        compatible_base_url="https://compatible.example",
+        compatible_api_key="compatible-key",
+        compatible_model="gpt-compatible",
+    )
+
+    response = OpenAICompatibleProvider(config).complete(
+        [{"role": "user", "content": "finalize"}]
+    )
+
+    assert response.usage is None
+    assert "usage" not in response.metadata["response_payload"]
+
+
 def test_codex_provider_uses_explicit_oauth_access_token() -> None:
     config = _config(codex_access_token="codex-token")
 
@@ -808,3 +913,42 @@ def test_codex_response_parser_reads_output_content(monkeypatch: pytest.MonkeyPa
     response = CodexResponsesProvider(config).complete([{"role": "user", "content": "ping"}])
 
     assert response.content == "from output"
+
+
+def test_codex_provider_normalizes_compatible_responses_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    usage = {
+        "input_tokens": 5104,
+        "input_tokens_details": {"cached_tokens": 4096},
+        "output_tokens": 296,
+        "output_tokens_details": {"reasoning_tokens": 34},
+        "total_tokens": 5400,
+    }
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "resp-usage",
+                "model": "gpt-5.3-codex",
+                "output_text": "codex pong",
+                "usage": usage,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(codex_access_token="codex-token", codex_model="gpt-5.3-codex")
+
+    response = CodexResponsesProvider(config).complete(
+        [{"role": "user", "content": "ping"}]
+    )
+
+    assert response.usage == LLMUsage(
+        total_tokens=5400,
+        cached_tokens=4096,
+        prompt_cache_miss_tokens=1008,
+        reasoning_tokens=34,
+        completion_tokens=296,
+    )
+    assert response.metadata["response_payload"]["usage"] == usage

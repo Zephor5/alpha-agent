@@ -17,6 +17,7 @@ from alpha_agent.llm.base import (
     LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
+    normalize_llm_usage,
 )
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
@@ -72,6 +73,7 @@ class CodexResponsesProvider:
                 "request_payload": body,
                 "response_payload": payload,
             },
+            usage=normalize_llm_usage(payload.get("usage")),
         )
 
 
