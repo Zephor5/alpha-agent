@@ -14,6 +14,7 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinitionInput,
 )
+from alpha_agent.llm.tracing import json_safe as _llm_json_safe
 from alpha_agent.runtime.chat_messages import wrap_system_reminder
 from alpha_agent.runtime.context_budget import stable_json
 from alpha_agent.runtime.session_context import (
@@ -21,6 +22,7 @@ from alpha_agent.runtime.session_context import (
     SessionContextProjection,
 )
 from alpha_agent.state.models import RuntimeTrace, SessionMessage
+from alpha_agent.utils.ids import new_id
 
 DEFAULT_HANDOVER_COMPRESSION_VERSION = "handover-compression-v1"
 DEFAULT_MEMORY_EXTRACTION_VERSION = "memory-extraction-v1"
@@ -86,6 +88,9 @@ class HandoverCompressionResult:
     response: LLMResponse
     compression_point_ordinal: int
     extraction_job: HandoverExtractionJob
+    llm_call_id: str
+    started_trace_id: str | None
+    completed_trace_id: str | None
 
 
 def build_handover_compression_prompt(
@@ -160,6 +165,7 @@ def compress_session_context(
 ) -> HandoverCompressionResult:
     """Call the LLM for handover compression and append the returned source record."""
 
+    llm_call_id = new_id("llm")
     projection = assembler.load(session_id, before_ordinal=before_ordinal)
     if not projection.source_messages:
         raise ValueError("cannot compress session context without a compression point")
@@ -174,6 +180,7 @@ def compress_session_context(
 
     compression_trace_metadata = {
         **dict(trace_metadata or {}),
+        "llm_call_id": llm_call_id,
         "compression_point_ordinal": prompt.compression_point_ordinal,
         "compression_version": compression_version,
         "extraction_version": extraction_version,
@@ -188,7 +195,7 @@ def compress_session_context(
         "tool_choice": tool_choice,
         **_covered_source_metadata(projection, prompt.compression_point_ordinal),
     }
-    _append_compression_trace(
+    started_trace = _append_compression_trace(
         assembler,
         session_id=session_id,
         event_type="handover_compression.started",
@@ -210,6 +217,7 @@ def compress_session_context(
                 "provider": response.provider,
                 "model": response.model,
                 "finish_reason": response.finish_reason,
+                "llm_call_id": llm_call_id,
             },
             metadata={"source": "handover_compression"},
         )
@@ -234,6 +242,7 @@ def compress_session_context(
         "response_provider": response.provider,
         "response_model": response.model,
         "finish_reason": response.finish_reason,
+        "started_trace_id": started_trace.id if started_trace is not None else None,
         "compressed_message_id": compressed.id,
         "compressed_message_ordinal": compressed.ordinal,
     }
@@ -258,11 +267,23 @@ def compress_session_context(
         provider=response.provider,
         model=response.model,
     )
+    _record_successful_compression_llm_call(
+        assembler,
+        session_id=session_id,
+        llm_call_id=llm_call_id,
+        response=response,
+        started_trace_id=started_trace.id if started_trace is not None else None,
+        completed_trace_id=completed_trace.id if completed_trace is not None else None,
+        trace_metadata=completed_metadata,
+    )
     return HandoverCompressionResult(
         message=compressed,
         response=response,
         compression_point_ordinal=prompt.compression_point_ordinal,
         extraction_job=extraction_job,
+        llm_call_id=llm_call_id,
+        started_trace_id=started_trace.id if started_trace is not None else None,
+        completed_trace_id=completed_trace.id if completed_trace is not None else None,
     )
 
 
@@ -312,6 +333,77 @@ def _append_compression_trace(
         )
     except Exception:
         return None
+
+
+def _record_successful_compression_llm_call(
+    assembler: SessionContextAssembler,
+    *,
+    session_id: str,
+    llm_call_id: str,
+    response: LLMResponse,
+    started_trace_id: str | None,
+    completed_trace_id: str | None,
+    trace_metadata: Mapping[str, Any],
+) -> None:
+    failures: list[dict[str, str]] = []
+
+    def record_failure(stage: str, exc: Exception) -> None:
+        failures.append(
+            {
+                "stage": stage,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        )
+
+    try:
+        assembler.store.append_llm_call(
+            id=llm_call_id,
+            session_id=session_id,
+            provider=response.provider,
+            model=response.model,
+            usage=response.usage,
+            raw_usage=_raw_response_usage(response),
+            started_trace_id=started_trace_id,
+            completed_trace_id=completed_trace_id,
+        )
+    except Exception as exc:
+        record_failure("append_llm_call", exc)
+
+    if response.usage is not None:
+        try:
+            assembler.store.add_session_usage(session_id, response.usage)
+        except Exception as exc:
+            record_failure("add_session_usage", exc)
+
+    if failures:
+        first_failure = failures[0]
+        _append_compression_trace(
+            assembler,
+            session_id=session_id,
+            event_type="handover_compression.accounting_failed",
+            content="Handover compression accounting failed.",
+            metadata={
+                **dict(trace_metadata),
+                "llm_call_id": llm_call_id,
+                "started_trace_id": started_trace_id,
+                "completed_trace_id": completed_trace_id,
+                "failures": failures,
+                "error_type": first_failure["error_type"],
+                "error": first_failure["error"],
+            },
+        )
+
+
+def _raw_response_usage(response: LLMResponse) -> dict[str, Any]:
+    response_payload = response.metadata.get("response_payload")
+    if not isinstance(response_payload, Mapping):
+        return {}
+    raw_usage = response_payload.get("usage")
+    if not isinstance(raw_usage, Mapping):
+        return {}
+    safe_usage = _llm_json_safe(raw_usage)
+    return dict(safe_usage) if isinstance(safe_usage, Mapping) else {}
 
 
 __all__ = [

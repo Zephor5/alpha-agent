@@ -667,6 +667,16 @@ class AlphaAgent:
             )
             debug["pre_user_compressed_message_id"] = result.message.id
             debug["pre_user_compression_point_ordinal"] = result.compression_point_ordinal
+            post_compression_messages = self._source_prompt_messages(session_id=session_id)
+            self._record_post_compression_occupied_tokens(
+                turn_context=turn_context,
+                session_id=session_id,
+                messages=post_compression_messages,
+                tools=model_tools,
+                result=result,
+                stage="pre_user",
+                debug=debug,
+            )
             self._submit_compact_extraction(
                 result,
                 tools=model_tools,
@@ -744,6 +754,15 @@ class AlphaAgent:
             llm_messages = self._rebuild_runtime_llm_messages(
                 session_id=session_id,
                 prompt_frame=prompt_frame,
+            )
+            self._record_post_compression_occupied_tokens(
+                turn_context=turn_context,
+                session_id=session_id,
+                messages=llm_messages,
+                tools=model_tools,
+                result=result,
+                stage="tool_loop",
+                debug=debug,
             )
         return llm_messages
 
@@ -1525,6 +1544,52 @@ class AlphaAgent:
                         "failures": failures,
                         "error_type": first_failure["error_type"],
                         "error": first_failure["error"],
+                    },
+                )
+            except Exception:
+                pass
+
+    def _record_post_compression_occupied_tokens(
+        self,
+        *,
+        turn_context: AgentTurnContext,
+        session_id: str,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[LLMToolDefinitionInput] | None,
+        result: HandoverCompressionResult,
+        stage: str,
+        debug: dict[str, Any],
+    ) -> None:
+        try:
+            estimate = self._estimate_context_budget(messages, tools=tools)
+            occupied_tokens = estimate.message_tokens + estimate.tool_schema_tokens
+            self.store.update_session_occupied_tokens(session_id, occupied_tokens)
+            debug[f"{stage}_post_compression_occupied_tokens"] = occupied_tokens
+        except Exception as exc:
+            try:
+                self.store.append_runtime_trace(
+                    session_id=session_id,
+                    event_type="handover_compression.accounting_failed",
+                    content="Handover compression accounting failed.",
+                    metadata={
+                        "turn_id": turn_context.turn_id,
+                        "llm_call_id": result.llm_call_id,
+                        "provider": result.response.provider,
+                        "model": result.response.model,
+                        "stage": stage,
+                        "compressed_message_id": result.message.id,
+                        "compression_point_ordinal": result.compression_point_ordinal,
+                        "started_trace_id": result.started_trace_id,
+                        "completed_trace_id": result.completed_trace_id,
+                        "failures": [
+                            {
+                                "stage": "update_session_occupied_tokens",
+                                "error_type": type(exc).__name__,
+                                "error": str(exc),
+                            }
+                        ],
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
                     },
                 )
             except Exception:

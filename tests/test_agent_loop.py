@@ -1796,6 +1796,25 @@ def test_pre_user_compression_runs_before_pending_user_and_excludes_it(tmp_path)
         DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in message.raw_content
         for message in persisted
     )
+    compression_call_id = persisted[2].provider_metadata["llm_call_id"]
+    calls = store.list_llm_calls(session_id="s1")
+    assert {call.id for call in calls} == {
+        compression_call_id,
+        result.debug["llm_call_ids"][0],
+    }
+    compression_llm_call = next(call for call in calls if call.id == compression_call_id)
+    assert compression_llm_call.total_tokens == 0
+    traces = store.list_runtime_traces("s1")
+    started_trace = next(
+        trace for trace in traces if trace.event_type == "handover_compression.started"
+    )
+    completed_trace = next(
+        trace for trace in traces if trace.event_type == "handover_compression.completed"
+    )
+    assert started_trace.metadata["llm_call_id"] == compression_call_id
+    assert completed_trace.metadata["llm_call_id"] == compression_call_id
+    assert compression_llm_call.started_trace_id == started_trace.id
+    assert compression_llm_call.completed_trace_id == completed_trace.id
 
 
 def test_pre_user_compression_submits_direct_compact_extraction_job(tmp_path) -> None:
@@ -2003,6 +2022,70 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
         DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION not in message.raw_content
         for message in persisted
     )
+    compression_call_id = persisted[4].provider_metadata["llm_call_id"]
+    calls = store.list_llm_calls(session_id="s1")
+    assert {call.id for call in calls} == {
+        result.debug["llm_call_ids"][0],
+        compression_call_id,
+        result.debug["llm_call_ids"][1],
+    }
+    compression_llm_call = next(call for call in calls if call.id == compression_call_id)
+    assert compression_llm_call.total_tokens == 0
+
+
+def test_tool_loop_compression_occupied_tokens_use_rebuilt_continuation_estimate(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    occupied_updates: list[int] = []
+    original_update_occupied = store.update_session_occupied_tokens
+
+    def capture_update_occupied(
+        session_id: str,
+        occupied_tokens: int,
+        *,
+        conn=None,
+    ):
+        occupied_updates.append(occupied_tokens)
+        return original_update_occupied(session_id, occupied_tokens, conn=conn)
+
+    monkeypatch.setattr(store, "update_session_occupied_tokens", capture_update_occupied)
+    registry = build_tool_registry()
+    registry.register(_EchoTool())
+    compression_usage = LLMUsage(
+        total_tokens=10_000,
+        cached_tokens=4_000,
+        prompt_cache_miss_tokens=5_500,
+        reasoning_tokens=100,
+        completion_tokens=400,
+    )
+    provider = _ToolLoopCompressionProvider(compression_usage=compression_usage)
+    agent = AlphaAgent(
+        store=store,
+        llm_provider=provider,
+        tool_registry=registry,
+        llm_context_config=_compression_context(),
+        max_context_tokens=620,
+    )
+
+    result = agent.respond("use tool", session_id="s1")
+
+    assert result.response == "final answer"
+    assert len(provider.calls) == 3
+    expected = estimate_context_budget(
+        provider.calls[2],
+        tools=agent.tool_registry.to_llm_tool_definitions() or None,
+        context_config=agent.llm_context_config,
+        max_context_tokens=agent.max_context_tokens,
+    )
+    expected_occupied = expected.message_tokens + expected.tool_schema_tokens
+    assert expected_occupied < compression_usage.total_tokens
+    assert occupied_updates[-2:] == [expected_occupied, expected_occupied]
+    session = store.get_session_record("s1")
+    assert session is not None
+    assert session.total_tokens == compression_usage.total_tokens
+    assert session.occupied_tokens == expected_occupied
 
 
 class _RecordingProvider:
@@ -2350,8 +2433,9 @@ class _UsageToolCallingProvider:
 class _ToolLoopCompressionProvider:
     name = "tool-compression-provider"
 
-    def __init__(self):
+    def __init__(self, *, compression_usage: LLMUsage | None = None):
         self.calls: list[list[ChatMessage]] = []
+        self.compression_usage = compression_usage
 
     def complete(
         self,
@@ -2379,7 +2463,35 @@ class _ToolLoopCompressionProvider:
                 ],
             )
         if DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION in str(messages[-1].get("content")):
-            return LLMResponse(content="tool-loop handover", model="test", provider=self.name)
+            metadata = (
+                {
+                    "response_payload": {
+                        "usage": {
+                            "total_tokens": self.compression_usage.total_tokens,
+                            "prompt_tokens": (
+                                self.compression_usage.cached_tokens
+                                + self.compression_usage.prompt_cache_miss_tokens
+                            ),
+                            "completion_tokens": self.compression_usage.completion_tokens,
+                            "completion_tokens_details": {
+                                "reasoning_tokens": self.compression_usage.reasoning_tokens
+                            },
+                            "prompt_tokens_details": {
+                                "cached_tokens": self.compression_usage.cached_tokens
+                            },
+                        }
+                    }
+                }
+                if self.compression_usage is not None
+                else {}
+            )
+            return LLMResponse(
+                content="tool-loop handover",
+                model="test",
+                provider=self.name,
+                metadata=metadata,
+                usage=self.compression_usage,
+            )
         return LLMResponse(content="final answer", model="test", provider=self.name)
 
 
