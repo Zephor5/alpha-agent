@@ -237,6 +237,35 @@ def test_background_non_domain_summary_draft_rejects_structure() -> None:
         )
 
 
+def test_background_non_domain_summary_draft_ignores_null_target_domain_structure() -> None:
+    output = _llm_json(
+        operation="create_summary_belief",
+        payload={
+            "summary_belief_input": {
+                "summary_kind": SummaryKind.SELF_MEMORY_SUMMARY.value,
+                "scope": BeliefScope.SELF.value,
+                "about": [{"kind": "subject", "id": SUBJECT_SELF}],
+                "topic": "answer style",
+                "content": "Alpha should answer concisely.",
+                "structure": {"target_domain": None},
+            }
+        },
+    )
+
+    validated = validate_background_llm_json(
+        output,
+        _context(
+            stage=BackgroundStage.SUMMARY,
+            allowed_summary_kinds=frozenset({SummaryKind.SELF_MEMORY_SUMMARY}),
+            required_summary_scope=BeliefScope.SELF,
+        ),
+    )
+
+    payload = validated.payloads[0]
+    assert isinstance(payload, ValidatedSummaryBeliefDraft)
+    assert payload.structure is None
+
+
 def test_background_output_rejects_update_policy_summary_targets_by_default() -> None:
     draft = {
         "memory_kind": MemoryKind.FACT.value,

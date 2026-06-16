@@ -13,7 +13,7 @@ from alpha_agent.cognition.authority import CognitionSourceKind
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
     SourceWindowValidationContext,
-    summary_instruction_output_json_schema,
+    summary_output_json_schema,
 )
 from alpha_agent.cognition.domain_guidance import active_domain_guidance, summary_target_domain
 from alpha_agent.cognition.emitter import EventEmitter
@@ -85,7 +85,7 @@ confidence, scores, or numeric strength fields. Preserve the selected summary ta
 If emitting create_summary_belief, use payload.summary_belief_input; it will be created
 as active summary memory after validation.
 For domain summaries, structure.target_domain is required and must match the supplied
-selected summary target.
+selected summary target. For non-domain summaries, omit structure completely.
 topic is required and must be a short topic phrase, not a sentence and not the
 full assertion in content.
 Use the same language as the selected source memory records for summary topic and
@@ -660,7 +660,7 @@ def _summary_messages(
         {
             "role": "user",
             "content": _SUMMARY_INSTRUCTION.format(
-                output_schema_json=_summary_output_schema_json(),
+                output_schema_json=_summary_output_schema_json(target),
             ),
         },
         {
@@ -700,8 +700,15 @@ def _summary_system_message() -> ChatMessage:
     return {"role": "system", "content": _SUMMARY_SYSTEM_MESSAGE}
 
 
-def _summary_output_schema_json() -> str:
-    return json_for_prompt(summary_instruction_output_json_schema())
+def _summary_output_schema_json(target: _SummaryTarget) -> str:
+    return json_for_prompt(
+        summary_output_json_schema(
+            summary_kind=target.summary_kind,
+            scope=target.scope,
+            about_refs=((ref.kind, ref.id) for ref in target.about),
+            target_domain=target.target_domain,
+        )
+    )
 
 
 def _validation_context(

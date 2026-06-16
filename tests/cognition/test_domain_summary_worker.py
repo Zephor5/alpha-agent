@@ -357,12 +357,12 @@ def test_domain_summary_worker_prompt_includes_target_domain_schema(tmp_path) ->
     assert isinstance(instruction, str)
     assert isinstance(material, str)
     assert '"summary_kind": {' in instruction
-    assert '"enum": [' in instruction
-    assert '"const": "domain_summary"' not in instruction
+    assert '"enum": [' not in instruction
+    assert '"const": "domain_summary"' in instruction
     assert '"scope": {' in instruction
-    assert '"const": "global"' not in instruction
+    assert '"const": "global"' in instruction
     assert '"target_domain": {' in instruction
-    assert '"const": "memory_propose"' not in instruction
+    assert '"const": "memory_propose"' in instruction
     assert '"summary_kind": "domain_summary"' in material
     assert '"scope": "global"' in material
     assert '"target_domain": "memory_propose"' in material
@@ -428,7 +428,7 @@ def test_domain_summary_worker_uses_scope_owner_refs_for_target_identity(
     material = messages[2]["content"]
     assert isinstance(instruction, str)
     assert isinstance(material, str)
-    assert '"const": []' not in instruction
+    assert '"const": []' in instruction
     assert '"about": []' in material
 
 

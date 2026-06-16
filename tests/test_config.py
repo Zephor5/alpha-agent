@@ -513,11 +513,18 @@ def test_config_cli_init_and_show(
     assert init_result.exit_code == 0
     assert show_result.exit_code == 0
     assert config_path.exists()
-    assert str(config_path) in show_result.output
+    assert "config_path" in show_result.output
     assert "llm_provider" in show_result.output
-    assert "llm_context_handover_compress_threshold_ratio" in show_result.output
-    assert "llm_provider_max_context_tokens" in show_result.output
     assert "compatible_base_url" not in show_result.output
+    assert "config_path=" not in show_result.output
+
+    plain_result = runner.invoke(app, ["config", "show", "--plain"])
+
+    assert plain_result.exit_code == 0
+    assert f"config_path={config_path}" in plain_result.output
+    assert "llm_provider=mock" in plain_result.output
+    assert "llm_context_handover_compress_threshold_ratio=0.9" in plain_result.output
+    assert "llm_provider_max_context_tokens=" in plain_result.output
 
 
 def test_config_show_includes_base_url_only_for_compatible_provider(

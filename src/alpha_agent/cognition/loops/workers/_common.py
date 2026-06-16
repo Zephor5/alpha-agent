@@ -48,7 +48,7 @@ def after_cursor_wrap[T](items: list[T], cursor: str, key: Any) -> list[T]:
 def json_for_prompt(value: Any) -> str:
     """Return stable, readable JSON for LLM prompt inserts."""
 
-    return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
 def background_llm_trace_metadata(

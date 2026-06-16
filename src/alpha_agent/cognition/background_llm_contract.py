@@ -1415,9 +1415,10 @@ def _validate_summary_draft(
     topic = _required_topic(raw, content)
     if context.required_summary_target_domain is None:
         if "structure" in raw:
-            raise BackgroundLLMValidationError(
-                "summary structure is only allowed for selected domain summary targets"
-            )
+            if not _is_null_target_domain_structure(raw.get("structure")):
+                raise BackgroundLLMValidationError(
+                    "summary structure is only allowed for selected domain summary targets"
+                )
         structure = None
     else:
         structure = _optional_dict(raw.get("structure"))
@@ -1437,6 +1438,14 @@ def _validate_summary_draft(
         validity=_validity(raw.get("validity")),
         update_policy=_update_policy(raw.get("update_policy"), context),
         project_descriptor=project_descriptor,
+    )
+
+
+def _is_null_target_domain_structure(value: object) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"target_domain"}
+        and value.get("target_domain") is None
     )
 
 

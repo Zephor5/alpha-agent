@@ -677,7 +677,12 @@ def config_init(
 
 
 @config_app.command("show")
-def config_show() -> None:
+def config_show(
+    plain: Annotated[
+        bool,
+        typer.Option("--plain", help="Print key=value lines instead of a table."),
+    ] = False,
+) -> None:
     """Show the effective configuration without printing secret values."""
 
     config = load_config()
@@ -717,12 +722,13 @@ def config_show() -> None:
     }
     if config.llm_provider in {"openai-compatible", "openai", "compatible"}:
         rows["compatible_base_url"] = config.compatible_base_url or ""
+    if plain:
+        for key, value in rows.items():
+            typer.echo(f"{key}={value}")
+        return
     for key, value in rows.items():
         table.add_row(key, value)
     console.print(table)
-    for key, value in rows.items():
-        typer.echo(f"{key}={value}")
-    typer.echo(f"Config path: {default_config_path()}")
 
 
 @config_app.command("get")
