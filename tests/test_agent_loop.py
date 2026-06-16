@@ -51,6 +51,7 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinition,
     LLMToolDefinitionInput,
+    LLMUsage,
     ToolChatMessage,
 )
 from alpha_agent.llm.mock import MockLLMProvider
@@ -62,6 +63,7 @@ from alpha_agent.runtime.agent import (
     ContextWindowExceededError,
     ImportSessionChatError,
 )
+from alpha_agent.runtime.context_budget import estimate_context_budget
 from alpha_agent.runtime.context_handover import (
     DEFAULT_HANDOVER_COMPRESSION_INSTRUCTION,
     HandoverExtractionJob,
@@ -313,6 +315,178 @@ def test_agent_responds_and_persists_session_messages(tmp_path) -> None:
         "llm.started",
         "llm.completed",
     ]
+
+
+def test_agent_records_successful_foreground_llm_usage(tmp_path) -> None:
+    store = _store(tmp_path)
+    usage = LLMUsage(
+        total_tokens=123,
+        cached_tokens=40,
+        prompt_cache_miss_tokens=60,
+        reasoning_tokens=3,
+        completion_tokens=20,
+    )
+    raw_usage = {
+        "total_tokens": 123,
+        "prompt_tokens": 100,
+        "prompt_tokens_details": {"cached_tokens": 40},
+        "completion_tokens": 20,
+        "completion_tokens_details": {"reasoning_tokens": 3},
+    }
+    provider = _UsageRecordingProvider("usage answer", usage=usage, raw_usage=raw_usage)
+    agent = AlphaAgent(store=store, llm_provider=provider)
+
+    result = agent.respond("hello", session_id="s1")
+
+    assert result.response == "usage answer"
+    calls = store.list_llm_calls(session_id="s1")
+    assert len(calls) == 1
+    call = calls[0]
+    assert call.id == result.debug["llm_call_ids"][0]
+    assert call.provider == "usage-provider"
+    assert call.model == "test"
+    assert call.total_tokens == 123
+    assert call.cached_tokens == 40
+    assert call.prompt_cache_miss_tokens == 60
+    assert call.reasoning_tokens == 3
+    assert call.completion_tokens == 20
+    assert call.raw_usage == raw_usage
+    traces = store.list_runtime_traces("s1")
+    assert call.started_trace_id == traces[0].id
+    assert call.completed_trace_id == traces[1].id
+
+    session = store.get_session_record("s1")
+    assert session is not None
+    assert session.total_tokens == 123
+    assert session.cached_tokens == 40
+    assert session.prompt_cache_miss_tokens == 60
+    assert session.reasoning_tokens == 3
+    assert session.completion_tokens == 20
+    assert session.occupied_tokens == 123
+
+    assistant = store.list_session_messages("s1")[-1]
+    assert assistant.provider_metadata["llm_call_id"] == call.id
+    assert "total_tokens" not in assistant.provider_metadata
+
+
+def test_agent_records_one_llm_call_per_successful_tool_loop_round(tmp_path) -> None:
+    store = _store(tmp_path)
+    registry = build_tool_registry()
+    registry.register(_EchoTool())
+    first_usage = LLMUsage(
+        total_tokens=50,
+        cached_tokens=10,
+        prompt_cache_miss_tokens=20,
+        reasoning_tokens=4,
+        completion_tokens=16,
+    )
+    second_usage = LLMUsage(
+        total_tokens=70,
+        cached_tokens=15,
+        prompt_cache_miss_tokens=30,
+        reasoning_tokens=5,
+        completion_tokens=20,
+    )
+    provider = _UsageToolCallingProvider(
+        usages=[first_usage, second_usage],
+        raw_usages=[
+            {"total_tokens": 50, "prompt_tokens": 30, "completion_tokens": 16},
+            {"total_tokens": 70, "prompt_tokens": 45, "completion_tokens": 20},
+        ],
+    )
+    agent = AlphaAgent(store=store, llm_provider=provider, tool_registry=registry)
+
+    result = agent.respond("use tool", session_id="s1")
+
+    assert result.response == "final answer"
+    calls = store.list_llm_calls(session_id="s1")
+    assert [call.id for call in calls] == result.debug["llm_call_ids"]
+    assert [call.total_tokens for call in calls] == [50, 70]
+    session = store.get_session_record("s1")
+    assert session is not None
+    assert session.total_tokens == 120
+    assert session.cached_tokens == 25
+    assert session.prompt_cache_miss_tokens == 50
+    assert session.reasoning_tokens == 9
+    assert session.completion_tokens == 36
+    assert session.occupied_tokens == 70
+
+    messages = _without_time_reminders(store.list_session_messages("s1"))
+    tool_call_assistant = messages[1]
+    final_assistant = messages[-1]
+    assert tool_call_assistant.provider_metadata["llm_call_id"] == calls[0].id
+    assert final_assistant.provider_metadata["llm_call_id"] == calls[1].id
+
+
+def test_agent_records_no_usage_llm_call_and_estimates_occupied_tokens(tmp_path) -> None:
+    store = _store(tmp_path)
+    provider = _RecordingProvider("no usage answer")
+    agent = AlphaAgent(store=store, llm_provider=provider)
+
+    result = agent.respond("hello", session_id="s1")
+
+    assert result.response == "no usage answer"
+    calls = store.list_llm_calls(session_id="s1")
+    assert len(calls) == 1
+    assert calls[0].total_tokens == 0
+    assert calls[0].cached_tokens == 0
+    assert calls[0].prompt_cache_miss_tokens == 0
+    assert calls[0].reasoning_tokens == 0
+    assert calls[0].completion_tokens == 0
+    assert calls[0].raw_usage == {}
+
+    estimate = estimate_context_budget(
+        provider.calls[0],
+        tools=agent.tool_registry.to_llm_tool_definitions() or None,
+        context_config=agent.llm_context_config,
+        max_context_tokens=agent.max_context_tokens,
+    )
+    session = store.get_session_record("s1")
+    assert session is not None
+    assert session.total_tokens == 0
+    assert session.cached_tokens == 0
+    assert session.prompt_cache_miss_tokens == 0
+    assert session.reasoning_tokens == 0
+    assert session.completion_tokens == 0
+    assert session.occupied_tokens == estimate.message_tokens + estimate.tool_schema_tokens
+
+
+def test_agent_accounting_failure_does_not_fail_successful_response(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    provider = _UsageRecordingProvider(
+        "answer despite accounting failure",
+        usage=LLMUsage(
+            total_tokens=10,
+            cached_tokens=1,
+            prompt_cache_miss_tokens=7,
+            reasoning_tokens=0,
+            completion_tokens=2,
+        ),
+        raw_usage={"total_tokens": 10, "prompt_tokens": 8, "completion_tokens": 2},
+    )
+
+    def fail_append_llm_call(**_: object) -> None:
+        raise RuntimeError("ledger unavailable")
+
+    monkeypatch.setattr(store, "append_llm_call", fail_append_llm_call)
+    agent = AlphaAgent(store=store, llm_provider=provider)
+
+    result = agent.respond("hello", session_id="s1")
+
+    assert result.response == "answer despite accounting failure"
+    traces = store.list_runtime_traces("s1")
+    assert [trace.event_type for trace in traces] == [
+        "llm.started",
+        "llm.completed",
+        "llm.accounting_failed",
+    ]
+    failure_trace = traces[-1]
+    assert failure_trace.metadata["llm_call_id"] == result.debug["llm_call_ids"][0]
+    assert failure_trace.metadata["error_type"] == "RuntimeError"
+    assert failure_trace.metadata["error"] == "ledger unavailable"
 
 
 def test_agent_rejects_direct_respond_for_import_session(tmp_path) -> None:
@@ -1851,6 +2025,40 @@ class _RecordingProvider:
         return LLMResponse(content=self.response, model="test", provider=self.name)
 
 
+class _UsageRecordingProvider:
+    name = "usage-provider"
+
+    def __init__(
+        self,
+        response: str,
+        *,
+        usage: LLMUsage,
+        raw_usage: dict[str, object],
+    ) -> None:
+        self.response = response
+        self.usage = usage
+        self.raw_usage = raw_usage
+        self.calls: list[list[ChatMessage]] = []
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
+    ) -> LLMResponse:
+        del tools, tool_choice, response_format
+        self.calls.append(messages)
+        return LLMResponse(
+            content=self.response,
+            model="test",
+            provider=self.name,
+            metadata={"response_payload": {"usage": self.raw_usage}},
+            usage=self.usage,
+        )
+
+
 def _seed_active_digest(
     store: StateStore,
     log: SQLiteEventLog,
@@ -2086,6 +2294,57 @@ class _ToolCallingProvider:
                 ],
             )
         return LLMResponse(content="final answer", model="test", provider=self.name)
+
+
+class _UsageToolCallingProvider:
+    name = "usage-tool-provider"
+
+    def __init__(
+        self,
+        *,
+        usages: Sequence[LLMUsage],
+        raw_usages: Sequence[dict[str, object]],
+    ) -> None:
+        self.usages = list(usages)
+        self.raw_usages = list(raw_usages)
+        self.calls = 0
+
+    def complete(
+        self,
+        messages: list[ChatMessage],
+        *,
+        tools: Sequence[LLMToolDefinitionInput] | None = None,
+        tool_choice: LLMToolChoice | None = None,
+        response_format: object | None = None,
+    ) -> LLMResponse:
+        del messages, tools, tool_choice, response_format
+        index = self.calls
+        self.calls += 1
+        metadata = {"response_payload": {"usage": self.raw_usages[index]}}
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                model="test",
+                provider=self.name,
+                finish_reason="tool_calls",
+                metadata=metadata,
+                usage=self.usages[index],
+                tool_calls=[
+                    LLMToolCall(
+                        id="call_1",
+                        name="echo",
+                        arguments={"text": "hello"},
+                        raw_arguments='{"text":"hello"}',
+                    )
+                ],
+            )
+        return LLMResponse(
+            content="final answer",
+            model="test",
+            provider=self.name,
+            metadata=metadata,
+            usage=self.usages[index],
+        )
 
 
 class _ToolLoopCompressionProvider:

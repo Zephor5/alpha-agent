@@ -61,6 +61,7 @@ from alpha_agent.llm.base import (
     LLMToolDefinitionInput,
 )
 from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
+from alpha_agent.llm.tracing import json_safe as _llm_json_safe
 from alpha_agent.llm.tracing import llm_metadata_summary as _llm_metadata_summary
 from alpha_agent.llm.tracing import llm_request_summary as _llm_request_summary
 from alpha_agent.runtime.chat_messages import (
@@ -548,6 +549,7 @@ class AlphaAgent:
                 session_id,
                 llm_response,
                 turn_context=agent_turn,
+                llm_call_id=loop_result.llm_call_ids[-1],
             )
             debug["assistant_message_id"] = assistant_record.id
             debug["assistant_message_ordinal"] = assistant_record.ordinal
@@ -1295,6 +1297,7 @@ class AlphaAgent:
                 turn_context=turn_context,
                 calls=provider_tool_calls,
                 llm_response=response,
+                llm_call_id=completion.llm_call_id,
             )
             provider_tool_messages.append(provider_tool_call_message)
             llm_messages.append(source_message_to_chat(provider_tool_call_message))
@@ -1425,6 +1428,17 @@ class AlphaAgent:
                 "response_metadata": _llm_metadata_summary(completion.response.metadata),
             },
         )
+        self._record_successful_foreground_llm_call(
+            turn_context=turn_context,
+            session_id=session_id,
+            messages=messages,
+            tools=tools,
+            round_name=round_name,
+            llm_call_id=llm_call_id,
+            response=completion.response,
+            started_trace_id=started_trace.id,
+            completed_trace_id=completed_trace.id,
+        )
         return RetriedLLMCompletion(
             response=completion.response,
             retry_count=completion.retry_count,
@@ -1433,12 +1447,96 @@ class AlphaAgent:
             completed_trace_id=completed_trace.id,
         )
 
+    def _record_successful_foreground_llm_call(
+        self,
+        *,
+        turn_context: AgentTurnContext,
+        session_id: str,
+        messages: Sequence[ChatMessage],
+        tools: Sequence[LLMToolDefinitionInput] | None,
+        round_name: str,
+        llm_call_id: str,
+        response: LLMResponse,
+        started_trace_id: str,
+        completed_trace_id: str,
+    ) -> None:
+        failures: list[dict[str, str]] = []
+
+        def record_failure(stage: str, exc: Exception) -> None:
+            failures.append(
+                {
+                    "stage": stage,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+
+        try:
+            self.store.append_llm_call(
+                id=llm_call_id,
+                session_id=session_id,
+                provider=response.provider,
+                model=response.model,
+                usage=response.usage,
+                raw_usage=_raw_response_usage(response),
+                started_trace_id=started_trace_id,
+                completed_trace_id=completed_trace_id,
+            )
+        except Exception as exc:
+            record_failure("append_llm_call", exc)
+
+        if response.usage is not None:
+            try:
+                self.store.add_session_usage(session_id, response.usage)
+            except Exception as exc:
+                record_failure("add_session_usage", exc)
+            try:
+                self.store.update_session_occupied_tokens(
+                    session_id,
+                    response.usage.total_tokens,
+                )
+            except Exception as exc:
+                record_failure("update_session_occupied_tokens", exc)
+        else:
+            try:
+                estimate = self._estimate_context_budget(messages, tools=tools)
+                self.store.update_session_occupied_tokens(
+                    session_id,
+                    estimate.message_tokens + estimate.tool_schema_tokens,
+                )
+            except Exception as exc:
+                record_failure("estimate_or_update_session_occupied_tokens", exc)
+
+        if failures:
+            first_failure = failures[0]
+            try:
+                self.store.append_runtime_trace(
+                    session_id=session_id,
+                    event_type="llm.accounting_failed",
+                    content="LLM accounting failed.",
+                    metadata={
+                        "turn_id": turn_context.turn_id,
+                        "llm_call_id": llm_call_id,
+                        "provider": response.provider,
+                        "model": response.model,
+                        "round": round_name,
+                        "started_trace_id": started_trace_id,
+                        "completed_trace_id": completed_trace_id,
+                        "failures": failures,
+                        "error_type": first_failure["error_type"],
+                        "error": first_failure["error"],
+                    },
+                )
+            except Exception:
+                pass
+
     def _write_assistant_message(
         self,
         session_id: str,
         llm_response: LLMResponse,
         *,
         turn_context: AgentTurnContext,
+        llm_call_id: str,
     ) -> SessionMessage:
         return self.store.append_session_message(
             session_id=session_id,
@@ -1450,6 +1548,7 @@ class AlphaAgent:
                 "provider": llm_response.provider,
                 "model": llm_response.model,
                 "finish_reason": llm_response.finish_reason,
+                "llm_call_id": llm_call_id,
                 "metadata": _llm_metadata_summary(llm_response.metadata),
             },
             metadata=_turn_metadata(turn_context),
@@ -1462,6 +1561,7 @@ class AlphaAgent:
         turn_context: AgentTurnContext,
         calls: list[ToolCall],
         llm_response: LLMResponse,
+        llm_call_id: str,
     ) -> SessionMessage:
         return self.store.append_session_message(
             session_id=session_id,
@@ -1474,6 +1574,7 @@ class AlphaAgent:
                 "provider": llm_response.provider,
                 "model": llm_response.model,
                 "finish_reason": llm_response.finish_reason,
+                "llm_call_id": llm_call_id,
                 "metadata": _llm_metadata_summary(llm_response.metadata),
             },
             metadata={
@@ -1786,6 +1887,17 @@ def _default_alpha_config(store: StateStore) -> AlphaConfig:
 
 def _turn_metadata(turn_context: AgentTurnContext) -> dict[str, Any]:
     return {"turn_id": turn_context.turn_id}
+
+
+def _raw_response_usage(response: LLMResponse) -> dict[str, Any]:
+    response_payload = response.metadata.get("response_payload")
+    if not isinstance(response_payload, Mapping):
+        return {}
+    raw_usage = response_payload.get("usage")
+    if not isinstance(raw_usage, Mapping):
+        return {}
+    safe_usage = _llm_json_safe(raw_usage)
+    return dict(safe_usage) if isinstance(safe_usage, Mapping) else {}
 
 
 def _content_digest(value: str) -> str:
