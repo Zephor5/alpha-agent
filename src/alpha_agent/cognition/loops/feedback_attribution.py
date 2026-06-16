@@ -302,6 +302,8 @@ class RealtimeFeedbackAttributionService:
                     "recall_tool_message_ids": list(job.recall_tool_message_ids),
                 }
             },
+            accounting_store=self.store,
+            accounting_failure_handler=self._write_accounting_failure_audit,
             tools=(),
             tool_choice="none",
             response_format=JSON_OBJECT_RESPONSE_FORMAT,
@@ -321,6 +323,9 @@ class RealtimeFeedbackAttributionService:
             CognitionStateStore(self.store).write_audit_record(kind, payload=payload)
         except Exception:
             return
+
+    def _write_accounting_failure_audit(self, payload: Mapping[str, Any]) -> None:
+        self._write_audit("feedback_attribution_llm_accounting_failed", dict(payload))
 
 
 def recalled_beliefs_for_previous_turn(

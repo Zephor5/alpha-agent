@@ -23,6 +23,7 @@ from alpha_agent.cognition.loops.scheduler import (
     YieldingCoordinator,
 )
 from alpha_agent.cognition.loops.workers._common import (
+    background_llm_accounting_failure_handler,
     background_llm_trace_metadata,
     json_for_prompt,
 )
@@ -553,6 +554,15 @@ def _run_candidate(
                 window=window,
                 run_id=run.run_id,
                 session_id=candidate.session_id,
+            ),
+            accounting_store=state_service.store,
+            accounting_failure_handler=background_llm_accounting_failure_handler(
+                state_service,
+                worker_name=worker_name,
+                worker_id=worker_id,
+                stage=BackgroundStage.EXTRACTION,
+                window=window,
+                run_id=run.run_id,
             ),
             tools=list(llm_tools) if llm_tools else None,
             tool_choice=_tool_choice_for_extraction(llm_tools),

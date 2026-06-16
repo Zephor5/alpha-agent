@@ -26,6 +26,7 @@ from alpha_agent.cognition.loops.scheduler import (
     YieldingCoordinator,
 )
 from alpha_agent.cognition.loops.workers._common import (
+    background_llm_accounting_failure_handler,
     background_llm_trace_metadata,
     json_for_prompt,
 )
@@ -418,6 +419,15 @@ class MemoryConsolidationWorker:
                         window=window,
                         run_id=run.run_id,
                     ),
+                    accounting_store=state_service.store,
+                    accounting_failure_handler=background_llm_accounting_failure_handler(
+                        state_service,
+                        worker_name=self.name,
+                        worker_id=self.worker_id,
+                        stage=BackgroundStage.CONSOLIDATION,
+                        window=window,
+                        run_id=run.run_id,
+                    ),
                     tool_choice="none",
                     response_format=JSON_OBJECT_RESPONSE_FORMAT,
                 ).content
@@ -611,6 +621,15 @@ class MemoryConflictReviewWorker:
                 ),
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
+                    worker_name=self.name,
+                    worker_id=self.worker_id,
+                    stage=BackgroundStage.CONFLICT_REVIEW,
+                    window=window,
+                    run_id=run.run_id,
+                ),
+                accounting_store=state_service.store,
+                accounting_failure_handler=background_llm_accounting_failure_handler(
+                    state_service,
                     worker_name=self.name,
                     worker_id=self.worker_id,
                     stage=BackgroundStage.CONFLICT_REVIEW,

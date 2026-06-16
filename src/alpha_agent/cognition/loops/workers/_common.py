@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from alpha_agent.cognition.loops.scheduler import WorkerCheckpoint, WorkerReport
 from alpha_agent.cognition.processing_ledger import BackgroundSourceWindow, BackgroundStage
+from alpha_agent.cognition.state_service import CognitionStateStore
 
 
 def report(
@@ -75,6 +76,41 @@ def background_llm_trace_metadata(
     if resolved_session_id is not None:
         worker["session_id"] = resolved_session_id
     return {"worker": {**worker, **dict(extra or {})}}
+
+
+def background_llm_accounting_failure_handler(
+    state_service: CognitionStateStore,
+    *,
+    worker_name: str,
+    worker_id: str,
+    stage: BackgroundStage,
+    window: BackgroundSourceWindow | None = None,
+    run_id: str | None = None,
+) -> Callable[[Mapping[str, Any]], None]:
+    """Return a non-raising audit hook for background LLM ledger failures."""
+
+    def handle(payload: Mapping[str, Any]) -> None:
+        audit_payload: dict[str, Any] = {
+            "worker_name": worker_name,
+            "worker_id": worker_id,
+            "stage": stage.value,
+            **dict(payload),
+        }
+        if window is not None:
+            audit_payload.update(
+                {
+                    "target_unit": window.target_unit,
+                    "window_id": window.window_id,
+                }
+            )
+        if run_id is not None:
+            audit_payload["run_id"] = run_id
+        state_service.write_audit_record(
+            "background_llm_accounting_failed",
+            payload=audit_payload,
+        )
+
+    return handle
 
 
 def _session_id_from_target_unit(target_unit: str) -> str | None:

@@ -26,7 +26,13 @@ from alpha_agent.cognition.processing_ledger import (
     BackgroundStage,
 )
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
-from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolChoice, LLMToolDefinitionInput
+from alpha_agent.llm.base import (
+    ChatMessage,
+    LLMResponse,
+    LLMToolChoice,
+    LLMToolDefinitionInput,
+    LLMUsage,
+)
 from alpha_agent.state.store import StateStore
 
 
@@ -47,7 +53,9 @@ def test_self_memory_summary_worker_writes_validated_summary_with_program_source
     service.write_atomic_belief(first, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
     service.write_atomic_belief(second, source_kind=CognitionSourceKind.BACKGROUND_SYNTHESIS)
     provider = _RecordingLLMProvider(
-        _summary_json("Agent solves root causes and validates changes with tests.")
+        _summary_json("Agent solves root causes and validates changes with tests."),
+        usage=_llm_usage(),
+        raw_usage=_raw_llm_usage(),
     )
     processing_time = "2026-06-13T00:00:00+00:00"
     monkeypatch.setattr(state_service_module, "utc_now_iso", lambda: processing_time)
@@ -76,6 +84,13 @@ def test_self_memory_summary_worker_writes_validated_summary_with_program_source
     assert any(kind == "background_source_window" for kind, _ in evidence)
     assert ("atomic_belief", str(first.id)) in evidence
     assert ("atomic_belief", str(second.id)) in evidence
+    calls = store.list_llm_calls(worker_name="memory_summary")
+    assert len(calls) == 1
+    assert calls[0].session_id is None
+    assert calls[0].provider == provider.name
+    assert calls[0].model == "test-summary"
+    assert calls[0].total_tokens == 29
+    assert calls[0].raw_usage == _raw_llm_usage()
 
 
 def test_self_memory_summary_worker_uses_only_final_atomic_derivation_stages(
@@ -318,8 +333,16 @@ def _self_consolidated_belief(
 class _RecordingLLMProvider:
     name = "recording-self-summary"
 
-    def __init__(self, response: str) -> None:
+    def __init__(
+        self,
+        response: str,
+        *,
+        usage: LLMUsage | None = None,
+        raw_usage: dict[str, object] | None = None,
+    ) -> None:
         self.response = response
+        self.usage = usage
+        self.raw_usage = raw_usage
         self.calls: list[dict[str, Any]] = []
 
     def complete(
@@ -338,7 +361,38 @@ class _RecordingLLMProvider:
                 "response_format": response_format,
             }
         )
-        return LLMResponse(content=self.response, model="test-summary", provider=self.name)
+        metadata = (
+            {"response_payload": {"usage": self.raw_usage}}
+            if self.raw_usage is not None
+            else {}
+        )
+        return LLMResponse(
+            content=self.response,
+            model="test-summary",
+            provider=self.name,
+            metadata=metadata,
+            usage=self.usage,
+        )
+
+
+def _llm_usage() -> LLMUsage:
+    return LLMUsage(
+        total_tokens=29,
+        cached_tokens=5,
+        prompt_cache_miss_tokens=17,
+        reasoning_tokens=2,
+        completion_tokens=7,
+    )
+
+
+def _raw_llm_usage() -> dict[str, object]:
+    return {
+        "total_tokens": 29,
+        "prompt_tokens": 22,
+        "prompt_tokens_details": {"cached_tokens": 5},
+        "completion_tokens": 7,
+        "completion_tokens_details": {"reasoning_tokens": 2},
+    }
 
 
 def _summary_json(content: str) -> str:

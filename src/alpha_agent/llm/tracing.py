@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -125,6 +125,10 @@ def traced_llm_complete(
     *,
     trace_logger: LLMTraceLogger | None = None,
     trace_metadata: Mapping[str, Any] | None = None,
+    accounting_store: Any | None = None,
+    accounting_session_id: str | None = None,
+    accounting_worker_name: str | None = None,
+    accounting_failure_handler: Callable[[Mapping[str, Any]], None] | None = None,
     tools: Sequence[LLMToolDefinitionInput] | None = None,
     tool_choice: LLMToolChoice | None = None,
     response_format: LLMResponseFormat | None = None,
@@ -158,7 +162,30 @@ def traced_llm_complete(
 
     if trace_logger is not None:
         trace_logger.append_response(metadata=base_metadata, response=response)
+    if accounting_store is not None:
+        _append_llm_call_non_blocking(
+            store=accounting_store,
+            llm_call_id=str(base_metadata["llm_call_id"]),
+            response=response,
+            trace_metadata=base_metadata,
+            session_id=accounting_session_id,
+            worker_name=accounting_worker_name,
+            failure_handler=accounting_failure_handler,
+        )
     return response
+
+
+def raw_response_usage(response: LLMResponse) -> dict[str, Any]:
+    """Return only the provider raw usage sub-object from a response payload."""
+
+    response_payload = response.metadata.get("response_payload")
+    if not isinstance(response_payload, Mapping):
+        return {}
+    raw_usage = response_payload.get("usage")
+    if not isinstance(raw_usage, Mapping):
+        return {}
+    safe_usage = json_safe(raw_usage)
+    return dict(safe_usage) if isinstance(safe_usage, Mapping) else {}
 
 
 def llm_request_log(
@@ -247,3 +274,87 @@ def _llm_tool_name(tool: LLMToolDefinitionInput) -> str:
             return str(function["name"])
         return str(tool.get("name", ""))
     return str(getattr(tool, "name", ""))
+
+
+def _append_llm_call_non_blocking(
+    *,
+    store: Any,
+    llm_call_id: str,
+    response: LLMResponse,
+    trace_metadata: Mapping[str, Any],
+    session_id: str | None,
+    worker_name: str | None,
+    failure_handler: Callable[[Mapping[str, Any]], None] | None,
+) -> None:
+    resolved_session_id = session_id or _trace_worker_str(trace_metadata, "session_id")
+    resolved_worker_name = worker_name or _trace_worker_str(trace_metadata, "name")
+    started_trace_id = _trace_str(trace_metadata, "started_trace_id")
+    completed_trace_id = _trace_str(trace_metadata, "completed_trace_id")
+    try:
+        store.append_llm_call(
+            id=llm_call_id,
+            session_id=resolved_session_id,
+            worker_name=resolved_worker_name,
+            provider=response.provider,
+            model=response.model,
+            usage=response.usage,
+            raw_usage=raw_response_usage(response),
+            started_trace_id=started_trace_id,
+            completed_trace_id=completed_trace_id,
+        )
+    except Exception as exc:
+        failure_payload = {
+            "stage": "append_llm_call",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "llm_call_id": llm_call_id,
+            "session_id": resolved_session_id,
+            "worker_name": resolved_worker_name,
+            "provider": response.provider,
+            "model": response.model,
+        }
+        _report_llm_accounting_failure(
+            store=store,
+            session_id=resolved_session_id,
+            payload=failure_payload,
+            failure_handler=failure_handler,
+        )
+
+
+def _report_llm_accounting_failure(
+    *,
+    store: Any,
+    session_id: str | None,
+    payload: Mapping[str, Any],
+    failure_handler: Callable[[Mapping[str, Any]], None] | None,
+) -> None:
+    if failure_handler is not None:
+        try:
+            failure_handler(payload)
+            return
+        except Exception:
+            pass
+    if session_id is None:
+        return
+    try:
+        store.append_runtime_trace(
+            session_id=session_id,
+            event_type="llm.accounting_failed",
+            content="LLM call ledger accounting failed.",
+            metadata=dict(payload),
+        )
+    except Exception:
+        return
+
+
+def _trace_worker_str(metadata: Mapping[str, Any], key: str) -> str | None:
+    worker = metadata.get("worker")
+    if not isinstance(worker, Mapping):
+        return None
+    value = worker.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _trace_str(metadata: Mapping[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    return value if isinstance(value, str) and value else None

@@ -54,6 +54,7 @@ from alpha_agent.llm.base import (
     LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
+    LLMUsage,
 )
 from alpha_agent.state.store import StateStore
 
@@ -663,6 +664,9 @@ def test_realtime_feedback_attribution_success_emits_events_and_consequences(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
+    store.create_session_record("s1", created_at="2026-06-01T00:00:00+00:00")
+    store.add_session_usage("s1", _llm_usage(total_tokens=80, completion_tokens=12))
+    store.update_session_occupied_tokens("s1", 64)
     state = CognitionStateStore(store)
     state.write_atomic_belief(
         _atomic_belief("belief:python", "User prefers Python examples."),
@@ -684,7 +688,9 @@ def test_realtime_feedback_attribution_success_emits_events_and_consequences(
                 "verdict": "contradicted",
                 "evidence_quote": "use pnpm instead of uv",
             },
-        )
+        ),
+        usage=_llm_usage(total_tokens=44),
+        raw_usage=_raw_llm_usage(total_tokens=44),
     )
     service = RealtimeFeedbackAttributionService(
         store=store,
@@ -754,6 +760,18 @@ def test_realtime_feedback_attribution_success_emits_events_and_consequences(
     assert windows[0].metadata["belief_content"] == "Alpha Agent uses uv."
     assert windows[0].metadata["feedback_event_id"] == str(events[1].id)
     assert windows[0].metadata["user_message_created_at"] == feedback_time
+    calls = store.list_llm_calls(worker_name="feedback_attribution")
+    assert len(calls) == 1
+    assert calls[0].session_id == "s1"
+    assert calls[0].provider == provider.name
+    assert calls[0].model == "test-feedback-model"
+    assert calls[0].total_tokens == 44
+    assert calls[0].raw_usage == _raw_llm_usage(total_tokens=44)
+    session = store.get_session_record("s1")
+    assert session is not None
+    assert session.total_tokens == 80
+    assert session.completion_tokens == 12
+    assert session.occupied_tokens == 64
 
 
 def test_realtime_feedback_attribution_uses_message_time_when_processing_is_delayed(
@@ -1290,9 +1308,17 @@ def _summary_belief(belief_id: str, content: str) -> SummaryBelief:
 class _RecordingFeedbackProvider:
     name = "recording-feedback"
 
-    def __init__(self, *responses: str, block_until: Event | None = None) -> None:
+    def __init__(
+        self,
+        *responses: str,
+        block_until: Event | None = None,
+        usage: LLMUsage | None = None,
+        raw_usage: dict[str, object] | None = None,
+    ) -> None:
         self.responses = list(responses)
         self.block_until = block_until
+        self.usage = usage
+        self.raw_usage = raw_usage
         self.started = Event()
         self.calls: list[_FeedbackProviderCall] = []
 
@@ -1316,7 +1342,52 @@ class _RecordingFeedbackProvider:
         if self.block_until is not None:
             self.block_until.wait(timeout=2.0)
         content = self.responses.pop(0) if self.responses else _feedback_json()
-        return LLMResponse(content=content, model="test-feedback-model", provider=self.name)
+        metadata = (
+            {"response_payload": {"usage": self.raw_usage}}
+            if self.raw_usage is not None
+            else {}
+        )
+        return LLMResponse(
+            content=content,
+            model="test-feedback-model",
+            provider=self.name,
+            metadata=metadata,
+            usage=self.usage,
+        )
+
+
+def _llm_usage(
+    *,
+    total_tokens: int = 23,
+    cached_tokens: int = 6,
+    prompt_cache_miss_tokens: int = 10,
+    reasoning_tokens: int = 2,
+    completion_tokens: int = 5,
+) -> LLMUsage:
+    return LLMUsage(
+        total_tokens=total_tokens,
+        cached_tokens=cached_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        reasoning_tokens=reasoning_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
+def _raw_llm_usage(
+    *,
+    total_tokens: int = 23,
+    cached_tokens: int = 6,
+    prompt_cache_miss_tokens: int = 10,
+    reasoning_tokens: int = 2,
+    completion_tokens: int = 5,
+) -> dict[str, object]:
+    return {
+        "total_tokens": total_tokens,
+        "prompt_tokens": cached_tokens + prompt_cache_miss_tokens,
+        "prompt_tokens_details": {"cached_tokens": cached_tokens},
+        "completion_tokens": completion_tokens,
+        "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
+    }
 
 
 class _FeedbackProviderCall(TypedDict):

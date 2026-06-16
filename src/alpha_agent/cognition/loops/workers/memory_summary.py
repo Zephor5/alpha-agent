@@ -25,6 +25,7 @@ from alpha_agent.cognition.loops.scheduler import (
     YieldingCoordinator,
 )
 from alpha_agent.cognition.loops.workers._common import (
+    background_llm_accounting_failure_handler,
     background_llm_trace_metadata,
     json_for_prompt,
 )
@@ -335,6 +336,15 @@ class MemorySummaryWorker:
                 _summary_messages(state_service, target),
                 trace_logger=llm_trace_logger,
                 trace_metadata=background_llm_trace_metadata(
+                    worker_name=self.name,
+                    worker_id=self.worker_id,
+                    stage=BackgroundStage.SUMMARY,
+                    window=window,
+                    run_id=run.run_id,
+                ),
+                accounting_store=state_service.store,
+                accounting_failure_handler=background_llm_accounting_failure_handler(
+                    state_service,
                     worker_name=self.name,
                     worker_id=self.worker_id,
                     stage=BackgroundStage.SUMMARY,

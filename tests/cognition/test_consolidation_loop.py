@@ -86,6 +86,7 @@ from alpha_agent.llm.base import (
     LLMToolChoice,
     LLMToolDefinition,
     LLMToolDefinitionInput,
+    LLMUsage,
 )
 from alpha_agent.llm.tracing import LLMTraceLogger
 from alpha_agent.runtime.context_handover import (
@@ -2571,7 +2572,9 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
                     "content": "Alpha Agent uses uv for package management.",
                 },
             )
-        )
+        ),
+        usage=_llm_usage(),
+        raw_usage=_raw_llm_usage(),
     )
     processing_time = "2026-06-13T00:00:00+00:00"
     monkeypatch.setattr(state_service_module, "utc_now_iso", lambda: processing_time)
@@ -2599,6 +2602,18 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
         target_unit="scope:global",
     )
     assert progress.status == BackgroundProgressStatus.PROCESSED
+    calls = store.list_llm_calls(worker_name="memory_consolidation")
+    assert len(calls) == 1
+    assert calls[0].id.startswith("llm_")
+    assert calls[0].session_id is None
+    assert calls[0].provider == provider.name
+    assert calls[0].model == provider.model
+    assert calls[0].total_tokens == 25
+    assert calls[0].cached_tokens == 7
+    assert calls[0].prompt_cache_miss_tokens == 11
+    assert calls[0].reasoning_tokens == 3
+    assert calls[0].completion_tokens == 7
+    assert calls[0].raw_usage == _raw_llm_usage()
 
 
 def test_memory_consolidation_worker_accepts_skip_without_mutating_draft(
@@ -4217,7 +4232,9 @@ def test_conflict_review_create_writes_active_candidate_without_mutating_target(
                     "content": "User now prefers Rust examples instead of Python examples.",
                 }
             },
-        )
+        ),
+        usage=_llm_usage(total_tokens=31),
+        raw_usage=_raw_llm_usage(total_tokens=31),
     )
 
     report = MemoryConflictReviewWorker(service, provider).run_once()
@@ -4241,6 +4258,13 @@ def test_conflict_review_create_writes_active_candidate_without_mutating_target(
         stage=BackgroundStage.CONFLICT_REVIEW,
         target_unit="scope:global",
     ).status == BackgroundProgressStatus.PROCESSED
+    calls = store.list_llm_calls(worker_name="memory_conflict_review")
+    assert len(calls) == 1
+    assert calls[0].session_id is None
+    assert calls[0].provider == provider.name
+    assert calls[0].model == provider.model
+    assert calls[0].total_tokens == 31
+    assert calls[0].raw_usage == _raw_llm_usage(total_tokens=31)
 
 
 def test_conflict_review_worker_accepts_skip_without_mutating_target(
@@ -4730,6 +4754,8 @@ def test_memory_extraction_worker_processes_direct_compact_job_with_program_prov
             )
         ),
         model="extract-model",
+        usage=_llm_usage(total_tokens=53),
+        raw_usage=_raw_llm_usage(total_tokens=53),
     )
     processing_time = "2026-06-13T00:00:00+00:00"
     monkeypatch.setattr(state_service_module, "utc_now_iso", lambda: processing_time)
@@ -4789,6 +4815,15 @@ def test_memory_extraction_worker_processes_direct_compact_job_with_program_prov
     assert ("session_message", prior_compressed.id) not in evidence
     assert ("session_message", compressed.id) not in evidence
     assert ("runtime_trace", completed_trace.id) not in evidence
+    calls = store.list_llm_calls(worker_name="memory_extraction")
+    assert [call.model for call in calls] == ["extract-model"]
+    assert calls[0].session_id == "s1"
+    assert calls[0].total_tokens == 53
+    assert calls[0].raw_usage == _raw_llm_usage(total_tokens=53)
+    session = store.get_session_record("s1")
+    assert session is not None
+    assert session.total_tokens == 0
+    assert session.occupied_tokens == 0
 
 
 def test_memory_extraction_worker_processes_direct_compact_job_without_trace_queue(
@@ -5867,6 +5902,53 @@ def test_memory_extraction_worker_rejects_session_scope_for_ordinary_backlog(
     assert "not included in llm input" in " ".join(report.notes).lower()
 
 
+def test_memory_extraction_records_llm_call_without_session_usage_mutation(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    store.create_session_record("s1", created_at="2026-06-01T00:00:00+00:00")
+    store.add_session_usage("s1", _llm_usage(total_tokens=100, completion_tokens=20))
+    store.update_session_occupied_tokens("s1", 73)
+    service = CognitionStateStore(store)
+    store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+    )
+    provider = _RecordingLLMProvider(
+        _llm_json(
+            payload=_extraction_payload(
+                {
+                    "memory_kind": MemoryKind.FACT.value,
+                    "scope": BeliefScope.GLOBAL.value,
+                    "about": [],
+                    "topic": "Alpha Agent package management",
+                    "content": "Alpha Agent uses uv.",
+                }
+            )
+        ),
+        usage=_llm_usage(total_tokens=41),
+        raw_usage=_raw_llm_usage(total_tokens=41),
+    )
+
+    report = MemoryExtractionWorker(service, provider).run_session_once("s1")
+
+    assert report.emitted == 1
+    calls = store.list_llm_calls(worker_name="memory_extraction")
+    assert len(calls) == 1
+    assert calls[0].session_id == "s1"
+    assert calls[0].provider == provider.name
+    assert calls[0].model == provider.model
+    assert calls[0].total_tokens == 41
+    assert calls[0].raw_usage == _raw_llm_usage(total_tokens=41)
+    session = store.get_session_record("s1")
+    assert session is not None
+    assert session.total_tokens == 100
+    assert session.completion_tokens == 20
+    assert session.occupied_tokens == 73
+
+
 def test_memory_extraction_worker_rejects_session_scope_for_direct_compact_extraction(
     tmp_path,
 ) -> None:
@@ -6551,9 +6633,13 @@ class _RecordingLLMProvider:
         self,
         *responses: str | Callable[[list[ChatMessage]], str],
         model: str = "test-extraction-model",
+        usage: LLMUsage | None = None,
+        raw_usage: dict[str, object] | None = None,
     ) -> None:
         self.responses = list(responses)
         self.model = model
+        self.usage = usage
+        self.raw_usage = raw_usage
         self.calls: list[_ProviderCall] = []
 
     def complete(
@@ -6574,7 +6660,52 @@ class _RecordingLLMProvider:
         )
         response = self.responses.pop(0) if self.responses else _llm_json()
         content = response(messages) if callable(response) else response
-        return LLMResponse(content=content, model=self.model, provider=self.name)
+        metadata = (
+            {"response_payload": {"usage": self.raw_usage}}
+            if self.raw_usage is not None
+            else {}
+        )
+        return LLMResponse(
+            content=content,
+            model=self.model,
+            provider=self.name,
+            metadata=metadata,
+            usage=self.usage,
+        )
+
+
+def _llm_usage(
+    *,
+    total_tokens: int = 25,
+    cached_tokens: int = 7,
+    prompt_cache_miss_tokens: int = 11,
+    reasoning_tokens: int = 3,
+    completion_tokens: int = 7,
+) -> LLMUsage:
+    return LLMUsage(
+        total_tokens=total_tokens,
+        cached_tokens=cached_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        reasoning_tokens=reasoning_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
+def _raw_llm_usage(
+    *,
+    total_tokens: int = 25,
+    cached_tokens: int = 7,
+    prompt_cache_miss_tokens: int = 11,
+    reasoning_tokens: int = 3,
+    completion_tokens: int = 7,
+) -> dict[str, object]:
+    return {
+        "total_tokens": total_tokens,
+        "prompt_tokens": cached_tokens + prompt_cache_miss_tokens,
+        "prompt_tokens_details": {"cached_tokens": cached_tokens},
+        "completion_tokens": completion_tokens,
+        "completion_tokens_details": {"reasoning_tokens": reasoning_tokens},
+    }
 
 
 def _runtime_prefix(store: StateStore, session_id: str) -> list[ChatMessage]:

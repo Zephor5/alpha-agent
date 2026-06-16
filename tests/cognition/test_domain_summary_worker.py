@@ -26,7 +26,13 @@ from alpha_agent.cognition.processing_ledger import (
     BackgroundStage,
 )
 from alpha_agent.cognition.state_service import CognitionSourceKind, CognitionStateStore
-from alpha_agent.llm.base import ChatMessage, LLMResponse, LLMToolChoice, LLMToolDefinitionInput
+from alpha_agent.llm.base import (
+    ChatMessage,
+    LLMResponse,
+    LLMToolChoice,
+    LLMToolDefinitionInput,
+    LLMUsage,
+)
 from alpha_agent.state.store import StateStore
 
 
@@ -57,7 +63,9 @@ def test_domain_summary_worker_writes_llm_synthesized_summary_with_target_identi
                 "target_domain": "memory_propose",
                 "memory_propose": {"policy": "direct_accept"},
             },
-        )
+        ),
+        usage=_llm_usage(),
+        raw_usage=_raw_llm_usage(),
     )
 
     report = MemorySummaryWorker(
@@ -92,6 +100,13 @@ def test_domain_summary_worker_writes_llm_synthesized_summary_with_target_identi
         "summary_kind": "domain_summary",
         "target_domain": "memory_propose",
     }
+    calls = store.list_llm_calls(worker_name="memory_summary")
+    assert len(calls) == 1
+    assert calls[0].session_id is None
+    assert calls[0].provider == provider.name
+    assert calls[0].model == "test-summary"
+    assert calls[0].total_tokens == 37
+    assert calls[0].raw_usage == _raw_llm_usage()
 
 
 def test_domain_summary_worker_groups_only_final_atomic_derivation_stages(
@@ -494,8 +509,16 @@ def _domain_summary_belief(
 class _RecordingLLMProvider:
     name = "recording-domain-summary"
 
-    def __init__(self, response: str) -> None:
+    def __init__(
+        self,
+        response: str,
+        *,
+        usage: LLMUsage | None = None,
+        raw_usage: dict[str, object] | None = None,
+    ) -> None:
         self.response = response
+        self.usage = usage
+        self.raw_usage = raw_usage
         self.calls: list[dict[str, Any]] = []
 
     def complete(
@@ -514,7 +537,38 @@ class _RecordingLLMProvider:
                 "response_format": response_format,
             }
         )
-        return LLMResponse(content=self.response, model="test-summary", provider=self.name)
+        metadata = (
+            {"response_payload": {"usage": self.raw_usage}}
+            if self.raw_usage is not None
+            else {}
+        )
+        return LLMResponse(
+            content=self.response,
+            model="test-summary",
+            provider=self.name,
+            metadata=metadata,
+            usage=self.usage,
+        )
+
+
+def _llm_usage() -> LLMUsage:
+    return LLMUsage(
+        total_tokens=37,
+        cached_tokens=9,
+        prompt_cache_miss_tokens=19,
+        reasoning_tokens=4,
+        completion_tokens=9,
+    )
+
+
+def _raw_llm_usage() -> dict[str, object]:
+    return {
+        "total_tokens": 37,
+        "prompt_tokens": 28,
+        "prompt_tokens_details": {"cached_tokens": 9},
+        "completion_tokens": 9,
+        "completion_tokens_details": {"reasoning_tokens": 4},
+    }
 
 
 def _summary_json(
