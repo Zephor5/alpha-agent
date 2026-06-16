@@ -193,6 +193,24 @@ mode. Tool specs do not use a `group` field.
 - **Pluggable providers.** `mock`, `openai-compatible`, `deepseek`, `mimo`, and
   `codex` share one interface; the rest of the runtime doesn't care which you
   use.
+- **LLM usage accounting.** Successful provider calls can return
+  `LLMResponse.usage`, a normalized token summary with `total_tokens`,
+  `cached_tokens`, `prompt_cache_miss_tokens`, `reasoning_tokens`, and
+  `completion_tokens`. `prompt_tokens` is derived as
+  `cached_tokens + prompt_cache_miss_tokens`.
+
+  Usage is persisted on two separate surfaces. `llm_calls` is the global ledger
+  of successful LLM calls, including background cognition calls; its
+  `session_id` is optional context and must not be treated as session billing.
+  The `sessions` token counters summarize only successful calls directly used to
+  continue that session, such as foreground answer/tool-loop calls and
+  compression. `sessions.occupied_tokens` is the current estimated occupancy of
+  the next continuation prompt, not lifetime cost; compression and tool replay
+  truncation may lower it.
+
+  SQLite stores only normalized counters and the provider's raw `usage`
+  sub-object. Full raw LLM request/response payloads remain available only
+  through the existing opt-in debug JSONL logging path.
 
 ## External conversation import
 

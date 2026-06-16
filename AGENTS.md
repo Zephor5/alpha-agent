@@ -92,8 +92,8 @@ src/
         event_count.py Event count projection by cognitive event kind.
         goal.py       Goal lifecycle projection and active-goal queries.
         subject.py    Subject projection from subject/situation events.
-    state/            SQLite-backed state store/schema/models for session messages, runtime traces, gateway mappings/dedup, cognitive events, and projection tables.
-    llm/              LLM provider interface, chat-completion adapters, tracing, and concrete mock, OpenAI-compatible, DeepSeek, MiMo, and Codex providers.
+    state/            SQLite-backed state store/schema/models for sessions, session messages, LLM usage ledger, runtime traces, gateway mappings/dedup, cognitive events, and projection tables.
+    llm/              LLM provider interface, normalized usage contract, chat-completion adapters, tracing, and concrete mock, OpenAI-compatible, DeepSeek, MiMo, and Codex providers.
     tools/            Tool abstractions, default registry, bash/web tools, URL safety, memory recall/propose tools, and file tools.
       files/          Sandboxed file glob/read/search/patch/write tools plus path validation, atomic IO, and patch planning.
       shell/          Structured local shell execution backend, output capture, policy, and command semantics.
