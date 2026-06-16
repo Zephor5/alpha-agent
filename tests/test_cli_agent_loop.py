@@ -55,6 +55,7 @@ def test_init_creates_state_database_without_loading_long_term_records(tmp_path:
         }
         assert tables == {
             "sessions",
+            "llm_calls",
             "session_messages",
             "session_counterparts",
             "import_batches",

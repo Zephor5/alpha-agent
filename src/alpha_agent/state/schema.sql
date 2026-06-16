@@ -1,8 +1,31 @@
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     timezone TEXT NOT NULL,
+    total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens >= 0),
+    cached_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cached_tokens >= 0),
+    prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0 CHECK (prompt_cache_miss_tokens >= 0),
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_tokens >= 0),
+    completion_tokens INTEGER NOT NULL DEFAULT 0 CHECK (completion_tokens >= 0),
+    occupied_tokens INTEGER NOT NULL DEFAULT 0 CHECK (occupied_tokens >= 0),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    worker_name TEXT,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    total_tokens INTEGER NOT NULL DEFAULT 0 CHECK (total_tokens >= 0),
+    cached_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cached_tokens >= 0),
+    prompt_cache_miss_tokens INTEGER NOT NULL DEFAULT 0 CHECK (prompt_cache_miss_tokens >= 0),
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_tokens >= 0),
+    completion_tokens INTEGER NOT NULL DEFAULT 0 CHECK (completion_tokens >= 0),
+    raw_usage TEXT NOT NULL DEFAULT '{}',
+    started_trace_id TEXT,
+    completed_trace_id TEXT,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS session_messages (
@@ -76,6 +99,12 @@ CREATE TABLE IF NOT EXISTS gateway_dedup (
 
 CREATE INDEX IF NOT EXISTS idx_session_messages_session_ordinal
     ON session_messages(session_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_created_at
+    ON llm_calls(created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_session_created
+    ON llm_calls(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_worker_created
+    ON llm_calls(worker_name, created_at);
 CREATE INDEX IF NOT EXISTS idx_session_messages_kind_ordinal
     ON session_messages(session_id, kind, ordinal);
 CREATE INDEX IF NOT EXISTS idx_session_messages_created_at

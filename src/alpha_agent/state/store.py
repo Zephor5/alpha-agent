@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -16,7 +16,9 @@ from alpha_agent.state.models import (
     ImportedConversationRecord,
     ImportedMessageRecord,
     ImportStatusSummary,
+    LLMCallRecord,
     LLMRole,
+    LLMUsageRecord,
     RuntimeTrace,
     SessionCounterpart,
     SessionMessage,
@@ -45,6 +47,13 @@ KNOWN_REMINDER_TYPES = frozenset(
         *STABLE_CONTEXT_REMINDER_TYPES,
     }
 )
+LLM_USAGE_FIELDS = (
+    "total_tokens",
+    "cached_tokens",
+    "prompt_cache_miss_tokens",
+    "reasoning_tokens",
+    "completion_tokens",
+)
 
 
 def _dumps(value: Any) -> str:
@@ -65,6 +74,20 @@ def _loads_dict_list(value: str | None) -> list[dict[str, Any]]:
     if not isinstance(loaded, list):
         return []
     return [item for item in loaded if isinstance(item, dict)]
+
+
+def _coerce_llm_usage_record(usage: object | None) -> LLMUsageRecord:
+    if usage is None:
+        return LLMUsageRecord()
+    if isinstance(usage, LLMUsageRecord):
+        return usage
+    values: dict[str, Any] = {}
+    for field in LLM_USAGE_FIELDS:
+        if isinstance(usage, Mapping):
+            values[field] = usage.get(field, 0)
+        else:
+            values[field] = getattr(usage, field)
+    return LLMUsageRecord(**values)
 
 
 def _system_reminder(content: str) -> str:
@@ -319,6 +342,204 @@ class StateStore:
             return op(conn)
         with self.immediate_transaction() as local:
             return op(local)
+
+    def add_session_usage(
+        self,
+        session_id: str,
+        usage: object,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionRecord:
+        """Atomically increment cumulative direct-session LLM usage counters."""
+
+        usage_record = _coerce_llm_usage_record(usage)
+
+        def op(db: sqlite3.Connection) -> SessionRecord:
+            cursor = db.execute(
+                """
+                UPDATE sessions
+                SET total_tokens = total_tokens + ?,
+                    cached_tokens = cached_tokens + ?,
+                    prompt_cache_miss_tokens = prompt_cache_miss_tokens + ?,
+                    reasoning_tokens = reasoning_tokens + ?,
+                    completion_tokens = completion_tokens + ?
+                WHERE session_id = ?
+                """,
+                (
+                    usage_record.total_tokens,
+                    usage_record.cached_tokens,
+                    usage_record.prompt_cache_miss_tokens,
+                    usage_record.reasoning_tokens,
+                    usage_record.completion_tokens,
+                    session_id,
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"session record {session_id!r} not found")
+            updated = self.get_session_record(session_id, conn=db)
+            if updated is None:
+                raise RuntimeError(f"failed to update session usage for {session_id!r}")
+            return updated
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
+    def update_session_occupied_tokens(
+        self,
+        session_id: str,
+        occupied_tokens: int,
+        *,
+        conn: sqlite3.Connection | None = None,
+    ) -> SessionRecord:
+        """Set current continuation token occupancy without changing cumulative usage."""
+
+        if isinstance(occupied_tokens, bool) or not isinstance(occupied_tokens, int):
+            raise TypeError("occupied_tokens must be an int")
+        if occupied_tokens < 0:
+            raise ValueError("occupied_tokens must be greater than or equal to 0")
+
+        def op(db: sqlite3.Connection) -> SessionRecord:
+            cursor = db.execute(
+                """
+                UPDATE sessions
+                SET occupied_tokens = ?
+                WHERE session_id = ?
+                """,
+                (occupied_tokens, session_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"session record {session_id!r} not found")
+            updated = self.get_session_record(session_id, conn=db)
+            if updated is None:
+                raise RuntimeError(
+                    f"failed to update session occupied tokens for {session_id!r}"
+                )
+            return updated
+
+        if conn is not None:
+            return op(conn)
+        with self.immediate_transaction() as local:
+            return op(local)
+
+    def append_llm_call(
+        self,
+        *,
+        id: str,
+        provider: str,
+        model: str,
+        session_id: str | None = None,
+        worker_name: str | None = None,
+        usage: object | None = None,
+        raw_usage: dict[str, Any] | None = None,
+        started_trace_id: str | None = None,
+        completed_trace_id: str | None = None,
+        created_at: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> LLMCallRecord:
+        """Append one successful LLM call ledger row."""
+
+        usage_record = _coerce_llm_usage_record(usage)
+        timestamp = _normalize_timestamp(created_at or utc_now_iso(), "created_at")
+
+        def op(db: sqlite3.Connection) -> LLMCallRecord:
+            db.execute(
+                """
+                INSERT INTO llm_calls
+                    (
+                        id,
+                        session_id,
+                        worker_name,
+                        provider,
+                        model,
+                        total_tokens,
+                        cached_tokens,
+                        prompt_cache_miss_tokens,
+                        reasoning_tokens,
+                        completion_tokens,
+                        raw_usage,
+                        started_trace_id,
+                        completed_trace_id,
+                        created_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    id,
+                    session_id,
+                    worker_name,
+                    provider,
+                    model,
+                    usage_record.total_tokens,
+                    usage_record.cached_tokens,
+                    usage_record.prompt_cache_miss_tokens,
+                    usage_record.reasoning_tokens,
+                    usage_record.completion_tokens,
+                    _dumps(raw_usage or {}),
+                    started_trace_id,
+                    completed_trace_id,
+                    timestamp,
+                ),
+            )
+            row = db.execute(
+                """
+                SELECT *
+                FROM llm_calls
+                WHERE id = ?
+                """,
+                (id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(f"failed to append LLM call {id!r}")
+            return self._llm_call_from_row(row)
+
+        return self._with_conn(conn, op)
+
+    def list_llm_calls(
+        self,
+        *,
+        session_id: str | None = None,
+        worker_name: str | None = None,
+        session_id_is_null: bool = False,
+        limit: int | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[LLMCallRecord]:
+        """List LLM call ledger rows in stable chronological order."""
+
+        if session_id is not None and session_id_is_null:
+            raise ValueError("session_id and session_id_is_null cannot both be set")
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int):
+                raise TypeError("limit must be an int")
+            if limit < 0:
+                raise ValueError("limit must be greater than or equal to 0")
+
+        def op(db: sqlite3.Connection) -> list[LLMCallRecord]:
+            conditions: list[str] = []
+            params: list[Any] = []
+            if session_id is not None:
+                conditions.append("session_id = ?")
+                params.append(session_id)
+            if session_id_is_null:
+                conditions.append("session_id IS NULL")
+            if worker_name is not None:
+                conditions.append("worker_name = ?")
+                params.append(worker_name)
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            query = f"""
+                SELECT *
+                FROM llm_calls
+                {where}
+                ORDER BY created_at ASC, id ASC
+            """
+            if limit is not None:
+                query += " LIMIT ?"
+                params.append(limit)
+            rows = db.execute(query, params).fetchall()
+            return [self._llm_call_from_row(row) for row in rows]
+
+        return self._with_conn(conn, op)
 
     def append_session_message(
         self,
@@ -1501,6 +1722,30 @@ class StateStore:
             timezone=row["timezone"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            total_tokens=int(row["total_tokens"]),
+            cached_tokens=int(row["cached_tokens"]),
+            prompt_cache_miss_tokens=int(row["prompt_cache_miss_tokens"]),
+            reasoning_tokens=int(row["reasoning_tokens"]),
+            completion_tokens=int(row["completion_tokens"]),
+            occupied_tokens=int(row["occupied_tokens"]),
+        )
+
+    def _llm_call_from_row(self, row: sqlite3.Row) -> LLMCallRecord:
+        return LLMCallRecord(
+            id=row["id"],
+            session_id=row["session_id"],
+            worker_name=row["worker_name"],
+            provider=row["provider"],
+            model=row["model"],
+            total_tokens=int(row["total_tokens"]),
+            cached_tokens=int(row["cached_tokens"]),
+            prompt_cache_miss_tokens=int(row["prompt_cache_miss_tokens"]),
+            reasoning_tokens=int(row["reasoning_tokens"]),
+            completion_tokens=int(row["completion_tokens"]),
+            raw_usage=_loads_dict(row["raw_usage"]),
+            started_trace_id=row["started_trace_id"],
+            completed_trace_id=row["completed_trace_id"],
+            created_at=row["created_at"],
         )
 
     def _session_message_from_row(self, row: sqlite3.Row) -> SessionMessage:

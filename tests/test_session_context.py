@@ -45,6 +45,12 @@ def test_append_session_message_creates_default_session_record(tmp_path, monkeyp
     assert record.timezone == "Asia/Shanghai"
     assert datetime.fromisoformat(record.created_at).tzinfo == UTC
     assert datetime.fromisoformat(record.updated_at).tzinfo == UTC
+    assert record.total_tokens == 0
+    assert record.cached_tokens == 0
+    assert record.prompt_cache_miss_tokens == 0
+    assert record.reasoning_tokens == 0
+    assert record.completion_tokens == 0
+    assert record.occupied_tokens == 0
     assert datetime.fromisoformat(message.created_at).tzinfo == UTC
 
 

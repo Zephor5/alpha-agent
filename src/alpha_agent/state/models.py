@@ -24,6 +24,57 @@ class SessionRecord:
     timezone: str
     created_at: str
     updated_at: str
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    prompt_cache_miss_tokens: int = 0
+    reasoning_tokens: int = 0
+    completion_tokens: int = 0
+    occupied_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class LLMUsageRecord:
+    """Persisted provider-neutral token usage counters."""
+
+    total_tokens: int = 0
+    cached_tokens: int = 0
+    prompt_cache_miss_tokens: int = 0
+    reasoning_tokens: int = 0
+    completion_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "total_tokens",
+            "cached_tokens",
+            "prompt_cache_miss_tokens",
+            "reasoning_tokens",
+            "completion_tokens",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an int")
+            if value < 0:
+                raise ValueError(f"{name} must be greater than or equal to 0")
+
+
+@dataclass(frozen=True)
+class LLMCallRecord:
+    """Successful LLM call usage ledger row."""
+
+    id: str
+    session_id: str | None
+    worker_name: str | None
+    provider: str
+    model: str
+    total_tokens: int
+    cached_tokens: int
+    prompt_cache_miss_tokens: int
+    reasoning_tokens: int
+    completion_tokens: int
+    raw_usage: dict[str, Any]
+    started_trace_id: str | None
+    completed_trace_id: str | None
+    created_at: str
 
 
 @dataclass(frozen=True)
