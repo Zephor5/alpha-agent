@@ -1,213 +1,72 @@
 # Alpha Agent TODO
 
-This document turns the Hermes implementation review into Alpha Agent's own
-near-term roadmap. The goal is practical usability parity where it matters:
-messaging access, reliable agent turns, observability, and operations. It is
-not a plan to copy Hermes internals. Alpha Agent's core direction remains its
-own cognition runtime, rebuilt after the Phase 00 state baseline.
+This is Alpha Agent's near-term roadmap, originally derived from a Hermes
+implementation review. The gateway shell, the agent turn loop, and the
+event-sourced cognition runtime have all landed (see README "Status & roadmap"
+and the archived build plans under `docs/develop_record/`). What remains is
+real platform reach, a user-facing cognition surface, channel control commands,
+and operations/deployment. The goal is still practical single-operator
+usability, not copying Hermes internals.
+
+Already in place (do not re-plan; kept here only as the baseline these items
+build on):
+
+- Gateway foundation: platform-neutral models, a `PlatformAdapter` interface,
+  platform-aware session keys with SQLite mappings, inbound dedup, a
+  daemon-owned active-turn guard, JSONL runtime logs, and `alpha daemon
+  start/run/restart/status/stop` + `alpha gateway status/doctor`.
+- Agent turn loop: explicit pipeline, structured runtime traces, bounded tool
+  subsystem with `ToolSpec` governance, cooperative cancellation, bounded
+  provider retry, and `alpha debug prompt`.
+- Cognition runtime: event log + projections (belief, counterpart, goal,
+  subject), background extraction / consolidation / conflict review / summary /
+  archival workers, counterpart routing, the synchronous Drive Loop with goals,
+  and the `memory_recall` / `memory_propose` tools.
 
 ## Guiding Decisions
 
-- Memory-as-records has been removed by Phase 00. Long-term cognition is being
-  rebuilt as an event-sourced cognition runtime; see
-  `docs/todo/cognition-runtime/`.
-- Add messaging through a thin gateway layer, not by merging platform logic into
-  the core agent runtime.
-- Normalize all platforms into one small internal message model before invoking
-  the agent.
+- Long-term cognition is an event-sourced runtime, not memory-as-records. The
+  original phase-by-phase build plan is archived at
+  `docs/develop_record/cognition-runtime/`; treat it as history, not as current
+  spec. Active design plans still live in `docs/todo/` (e.g.
+  `governed_tool_run_contract_plan.md`).
+- Add messaging through a thin gateway adapter layer, not by merging platform
+  logic into the core agent runtime.
+- Normalize every platform into the one internal message model
+  (`gateway/models.py`) before invoking the agent.
 - Prefer simple, inspectable sync/async boundaries. Platform adapters may need
-  async I/O, but the state baseline and agent core should remain understandable.
-- Build for one human operator first. Avoid a broad plugin marketplace, massive
-  slash-command surface, or multi-agent orchestration until the single-user path
-  is useful.
+  async I/O, but the daemon-owned runtime and state baseline stay synchronous
+  and understandable.
+- Build for one human operator first. Avoid a plugin marketplace, a broad
+  slash-command surface, or multi-agent orchestration until the single-user
+  path is genuinely useful.
 
-## Hermes Review Notes
+## Platform Adapter Guidance (from Hermes review)
 
-Useful Hermes reference points:
+Because the gateway foundation already exists, new platform work is an
+adapter + config + wiring + tests on top of it, not new core plumbing. The
+daemon owns the runtime turn and the single-active-turn guard per session id.
 
-- Hermes `gateway/platforms/base.py`
-- Hermes `gateway/platforms/weixin.py`
-- Hermes `gateway/platforms/feishu.py`
-- Hermes `gateway/session.py`
-- Hermes `gateway/run.py`
-- Hermes `agent/conversation_loop.py`
-- Hermes `agent/tool_executor.py`
-- Hermes `gateway/config.py`
-- Hermes `gateway/status.py`
+Still-relevant Hermes reference points when implementing an adapter:
+`gateway/platforms/base.py`, `weixin.py`, `feishu.py`, `gateway/session.py`,
+`gateway/run.py`, `gateway/config.py`, `gateway/status.py`.
 
-What to borrow conceptually:
+Guardrails — do not copy from Hermes:
 
-- Platform adapters convert raw platform events into a common message event.
-- A gateway owns auth, deduplication, session routing, command handling, typing
-  indicators, queueing, and outbound delivery.
-- Session identity must be platform-aware: DM, group, thread, and per-user
-  isolation are different decisions.
-- Long-running turns need visible progress and recoverable state.
-- Platform integrations need tests around auth, dedup, message normalization,
-  routing, and delivery failures.
+- its broad memory-provider/plugin system,
+- its very large gateway runner shape,
+- its large slash-command surface as an initial target,
+- its Weixin iLink assumption as a generic "WeChat bot" answer,
+- its context-compression and tool-loop details beyond Alpha's current scale.
 
-What not to copy:
-
-- Hermes' broad memory-provider/plugin system.
-- Hermes' very large gateway runner shape.
-- Hermes' large slash-command surface as an initial target.
-- Hermes' specific Weixin iLink assumption as a generic "WeChat bot" answer.
-- Hermes' context compression and tool loop details unless Alpha Agent reaches
-  the same scale pressures.
-
-## P0: Usability Foundation
-
-These are prerequisites for making Alpha Agent usable outside `alpha chat`.
-
-- [x] Add `gateway/` package with clear layers:
-  - `gateway/models.py`
-  - `gateway/session.py`
-  - `gateway/adapters/base.py`
-  - `gateway/runner.py`
-  - `gateway/config.py`
-  - `gateway/status.py`
-- [x] Define platform-neutral models:
-  - `ConversationSource`: platform, chat_id, chat_type, user_id, user_name,
-    platform_thread_id, message_id, metadata.
-  - `InboundMessage`: source, text, message_type, attachments, received_at,
-    platform_message_id, raw metadata.
-  - `OutboundMessage`: text, attachments, reply_to, thread metadata, visibility.
-  - `DeliveryResult`: success, message_id, error, retryable.
-- [x] Define a small `PlatformAdapter` interface:
-  - `connect(handler)`
-  - `disconnect()`
-  - `send(source, outbound)`
-  - `send_typing(source)`
-  - optional `on_processing_start(source)` / `on_processing_complete(source)`.
-- [x] Implement platform-aware session key generation:
-  - DM session.
-  - Group shared session.
-  - Group per-user session.
-  - Thread session.
-  - Thread per-user session.
-- [x] Store gateway session mappings in SQLite instead of ad hoc files.
-- [x] Preserve external platform identity metadata for the current state
-  baseline:
-  - platform user, chat, and thread fields remain source metadata.
-  - long-term cognition routing is deferred to `docs/todo/cognition-runtime/`.
-- [x] Add inbound message deduplication:
-  - platform update/message id.
-  - fallback text fingerprint with short TTL.
-  - persisted dedup state for webhook platforms.
-- [x] Add per-session active-turn guard:
-  - one running turn per session by default.
-  - busy-turn queue admission signal; durable queue storage/draining is
-    deferred to the real adapter runner.
-  - `/stop`, `/reset`, `/status` bypass normal busy guard.
-- [x] Add gateway runtime logs:
-  - `~/.alpha-agent/logs/agent.log`
-  - `~/.alpha-agent/logs/gateway.log`
-  - `~/.alpha-agent/logs/errors.log`
-  - include session_id, platform, chat_id hash, user_id hash.
-- [x] Add `alpha gateway` CLI group:
-  - `alpha daemon start` owns local and gateway runtime turns in the background.
-  - `alpha daemon run` runs the same owner in the foreground.
-  - `alpha daemon status`
-  - `alpha daemon restart`
-  - `alpha daemon stop`
-  - `alpha gateway status`
-  - `alpha gateway doctor`
-
-P0 implementation notes:
-
-- Gateway session mappings and dedup state are persisted in SQLite.
-- Active-turn guarding is daemon-owned and shared by local CLI turns and gateway
-  turns for the same session id.
-- Runtime logging uses JSONL helpers that include `session_id`, `platform`, and
-  hashed external chat/user identifiers when message context is available.
-- `alpha gateway run` no longer starts an independent runtime; it points users
-  to `alpha daemon start`.
-
-## P1: Agent Loop Improvements
-
-Current `AlphaAgent.respond()` is a clean MVP. The next step is to keep it
-explicit while making it useful for real channels and longer tasks.
-
-- [x] Split the turn pipeline into named services without hiding flow:
-  - append session source message.
-  - session context projection/compression.
-  - recent session state loading.
-  - prompt build.
-  - model call.
-  - assistant message write.
-  - runtime diagnostic traces.
-- [x] Add structured runtime traces:
-  - `llm.started`
-  - `llm.completed`
-  - `turn.failed`
-- [x] Add tool execution as an explicit subsystem:
-  - keep tool registry small.
-  - no hidden agent framework.
-  - include `tool.started`, `tool.completed`, `tool.failed`.
-  - keep provider-visible tool schemas free of ToolSpec governance fields.
-  - return bounded tool output in transcript tool messages; keep tool name,
-    ToolSpec governance fields, availability, and diagnostic metadata in runtime
-    traces or session metadata wrappers.
-- [x] Add interrupt/cancel support:
-  - cancellation flag by session_id.
-  - gateway `/stop` command.
-  - safe cleanup of in-flight provider/tool call where possible.
-- [x] Add bounded retry policy:
-  - provider HTTP retry for transient errors.
-  - no infinite agent loops.
-  - record retry count in turn debug metadata.
-- [x] Add prompt/debug inspection for channel turns:
-  - `alpha debug prompt --session ...`
-  - include gateway source context.
-  - include the recent conversation state used to build the prompt.
-
-P1 Agent Loop implementation notes:
-
-- The turn pipeline is split into explicit runtime methods while keeping
-  `AlphaAgent.respond()` as the visible orchestration path.
-- User, assistant, and tool transcript content is stored in
-  `session_messages`; operational diagnostics are stored as
-  `runtime_traces`.
-- Tool execution remains bounded and explicit. Caller-supplied tool calls are
-  local one-shot executions. Provider-returned OpenAI-compatible tool calls run
-  through one bounded agent loop controlled by `max_tool_iterations` and
-  `max_llm_rounds`: the initial model call, tool-result follow-up calls, and
-  finalization call share one loop state. Each assistant `tool_calls` message is
-  followed immediately by matching `role=tool` results before the next model
-  call. When the bound is reached, the runtime makes one `finalize` request for
-  a best-effort answer with the same tool schema and `tool_choice="none"` so
-  provider prefix caches are not invalidated by dropping tool definitions; if
-  that still requests tools, the turn fails observably.
-- The tool registry reads each tool's single `ToolSpec` plus dynamic
-  `check_available()` result before exposing available tools to the model.
-  Provider-visible schemas are projected only from `name`, `description`,
-  `parameters`, and `strict`; governance fields stay in runtime introspection
-  and traces under `tool_spec`. `ToolResult.metadata` remains owned by the tool
-  implementation, and tool specs do not use a `group` field.
-- DeepSeek and OpenAI-compatible providers share the same tool-call wire model:
-  `tools`, `tool_choice`, assistant `tool_calls`, and `role=tool` messages with
-  `tool_call_id`. Missing provider tool ids and `finish_reason=tool_calls`
-  without normalized calls fail before execution. Recoverable provider tool
-  execution failures are recorded as `tool.failed` traces and returned to the
-  model as plain tool-output text so the next LLM round can correct.
-- Cancellation is synchronous and cooperative. The runtime checks session
-  cancellation flags at safe boundaries before/after user message persistence,
-  state loading, LLM, and tool stages. It cannot preempt a blocking provider or
-  tool call that does not return control.
-- Retry is bounded around transient provider HTTP failures only; retry counts
-  are recorded in turn debug metadata and runtime traces.
-- `alpha debug prompt MESSAGE` remains supported. `alpha debug prompt
-  --session ...` can include gateway source fields and prints the built prompt
-  from the current state baseline without writing runtime access rows.
-- Prompt construction keeps only the stable identity as a `system` message,
-  followed by source stream messages after the latest compressed handover and
-  the current user message. There is no long-term recall, extraction, candidate
-  lifecycle, retrieval ranking, or consolidation in the Phase 00 baseline.
+Every adapter still needs tests around auth, dedup, message normalization,
+routing, and delivery failures.
 
 ## P1: Feishu Integration
 
-Feishu should likely be the first serious platform integration because Hermes'
-implementation shows a mature and official-ish integration path.
+Feishu is the likely first serious platform integration. The gateway base,
+session keys, dedup, active-turn guard, and logging are already shared, so the
+work is the adapter, its config, and its tests.
 
 - [ ] Decide first transport:
   - Webhook is easier to deploy behind a public callback.
@@ -215,15 +74,12 @@ implementation shows a mature and official-ish integration path.
 - [ ] Add dependencies behind an optional extra:
   - `alpha-agent[feishu]`
   - likely `lark-oapi`, plus `aiohttp` or equivalent if webhook mode is chosen.
-- [ ] Add config:
-  - `ALPHA_FEISHU_ENABLED`
-  - `ALPHA_FEISHU_CONNECTION_MODE`
-  - `ALPHA_FEISHU_APP_ID`
-  - `ALPHA_FEISHU_APP_SECRET`
-  - `ALPHA_FEISHU_VERIFICATION_TOKEN`
-  - `ALPHA_FEISHU_ENCRYPT_KEY`
-  - `ALPHA_FEISHU_ALLOWED_USERS`
-  - `ALPHA_FEISHU_REQUIRE_MENTION`
+- [ ] Add config (none of these exist yet; `gateway/config.py` currently ships
+  no real adapters):
+  - `ALPHA_FEISHU_ENABLED`, `ALPHA_FEISHU_CONNECTION_MODE`
+  - `ALPHA_FEISHU_APP_ID`, `ALPHA_FEISHU_APP_SECRET`
+  - `ALPHA_FEISHU_VERIFICATION_TOKEN`, `ALPHA_FEISHU_ENCRYPT_KEY`
+  - `ALPHA_FEISHU_ALLOWED_USERS`, `ALPHA_FEISHU_REQUIRE_MENTION`
 - [ ] Implement text MVP:
   - receive DM text.
   - receive group text only when bot is mentioned.
@@ -232,35 +88,26 @@ implementation shows a mature and official-ish integration path.
   - apply allowlist before invoking agent.
 - [ ] Normalize identity carefully:
   - preserve `open_id`, `user_id`, and `union_id` in source metadata.
-  - preserve stable identity fields for future cognition counterpart routing.
-  - do not leak raw IDs into prompt unless needed.
+  - route stable identity into cognition counterpart identity; the existing
+    `counterpart_router` maps source metadata to a `CounterpartRef`.
+  - do not leak raw IDs into the prompt unless needed.
 - [ ] Add webhook security if webhook mode is implemented:
-  - content-type check.
-  - max body size.
-  - verification token.
-  - signature validation with timing-safe compare.
+  - content-type check, max body size.
+  - verification token, signature validation with timing-safe compare.
   - basic per-IP/app rate limit.
 - [ ] Add per-chat serial processing:
-  - one active turn per Feishu chat/thread.
-  - queue follow-up bursts.
+  - the daemon active-turn guard already enforces one active turn per session;
+    the remaining adapter work is queueing/draining follow-up bursts.
   - debounce rapid text bursts only after the simple path works.
 - [ ] Add processing state:
   - typing indicator or reaction while processing.
   - failure reaction/message on exception.
 - [ ] Add second-stage Feishu features:
   - reply/thread context.
-  - image/file receive.
-  - file/image send.
-  - cognition review controls after the cognition runtime defines review
-    objects and decisions.
+  - image/file receive, file/image send.
   - reaction events as command inputs only if genuinely useful.
-- [ ] Add tests:
-  - webhook token/signature validation.
-  - group mention gating.
-  - allowlist.
-  - identity normalization.
-  - dedup.
-  - outbound send payload.
+- [ ] Add tests: webhook token/signature validation, group mention gating,
+  allowlist, identity normalization, dedup, outbound send payload.
 
 ## P1: WeChat / Weixin Integration
 
@@ -275,125 +122,115 @@ before writing code.
 - [ ] If choosing iLink, document constraints first:
   - availability and account requirements.
   - whether ordinary group chat is supported for this bot identity.
-  - QR login lifecycle.
-  - token refresh/expiration behavior.
+  - QR login lifecycle; token refresh/expiration behavior.
   - compliance and operational risk.
-- [ ] Add config for chosen transport only after target is decided.
-- [ ] For iLink-style implementation, treat these as core requirements:
-  - long-poll receive loop.
-  - persisted account token.
+- [ ] Add config for the chosen transport only after the target is decided.
+- [ ] For an iLink-style implementation, treat these as core requirements:
+  - long-poll receive loop; persisted account token.
   - per-peer `context_token` cache.
   - send with context token, then retry without it on stale session.
-  - message id and fingerprint dedup.
-  - text chunking for long replies.
-  - basic typing status if supported.
-  - cognition review command/buttons after the cognition review flow exists.
-  - conservative media support later.
+  - message id and fingerprint dedup; text chunking for long replies.
+  - basic typing status if supported; conservative media support later.
 - [ ] Keep Alpha's internal source model platform-neutral:
-  - platform=`weixin`.
-  - chat_id from peer/group id.
-  - user_id from sender id.
-  - context_token stays adapter metadata, not cognition state.
-- [ ] Add WeChat tests:
-  - update normalization.
-  - context token cache behavior.
-  - stale context token fallback.
-  - dedup.
-  - text chunking.
-  - auth/allowlist.
+  - `platform=weixin`, `chat_id` from peer/group id, `user_id` from sender id.
+  - `context_token` stays adapter metadata, not cognition state.
+- [ ] Add tests: update normalization, context token cache behavior, stale
+  context token fallback, dedup, text chunking, auth/allowlist.
 
 ## P1: Cognition Product Usability
 
-These items make Alpha Agent feel different from a generic chat bot after the
-cognition runtime phases define the underlying objects.
+The cognition runtime now provides the objects these features need — belief and
+summary projections (with FTS recall ranking), counterpart projection,
+background consolidation/conflict review, the Drive Loop/goals, and the
+`memory_recall`/`memory_propose` tools. The work below is the missing
+user-facing surface on top of that runtime.
 
-- [ ] Add cognition review commands once Phase 02+ defines durable review
-  records and decisions.
-- [ ] Add confidence/source display to cognition inspection, prompt debug, and
-  diagnostics after belief projection exists.
-- [ ] Add "what do you know about me?" inspection on top of projected beliefs.
-- [ ] Add correction/forget semantics on top of cognition events and belief
+- [ ] Add a "what do you know about me?" inspection built on projected beliefs
+  and the existing recall ranking (CLI today exposes goals and import status
+  but no belief inspection).
+- [ ] Surface provenance in cognition inspection and `alpha debug prompt`:
+  belief `authority`, `validity` window, `sources`/evidence, and lifecycle
+  (there is no scalar "confidence" field — present authority + validity +
+  sources instead).
+- [ ] Add user-facing correction / forget semantics. Consolidation already
+  supports supersede/retract/archive decisions internally; expose an explicit
+  user path that emits the corresponding cognitive events and reflects in the
   projection.
-- [ ] Add per-channel cognition policy:
+- [ ] Add cognition review commands once the review surface (above) settles —
+  approve/reject/edit pending or low-authority beliefs.
+- [ ] Add per-channel cognition write policy:
   - DM can create trusted observations under explicit rules.
-  - group chats require clear routing and write policy.
-  - platform/system messages should never become durable user facts.
-- [ ] Add consolidation/reporting only after the cognition event log and
-  reflection phases are in place.
+  - group chats require clear routing and a write policy.
+  - platform/system messages must never become durable user facts.
+- [ ] Add user-facing consolidation reporting/digests (the background
+  consolidation itself already runs).
 
 ## P2: Engineering And Operations
 
-- [ ] Add config validation:
-  - `alpha doctor`
-  - `alpha gateway doctor`
-  - check DB path, provider config, platform credentials, optional deps.
-- [ ] Add structured logging with secret redaction:
-  - API keys.
-  - platform tokens.
-  - webhook signatures.
-  - raw platform user IDs when privacy mode is enabled.
-- [ ] Add runtime status:
-  - PID file.
-  - gateway lock.
-  - status JSON with started_at, connected platforms, last error, active sessions.
-- [ ] Add clean shutdown:
-  - disconnect adapters.
-  - flush logs.
-  - mark active turns interrupted.
+- [ ] Add a top-level `alpha doctor` for provider/DB/config validation.
+  `alpha gateway doctor` already checks DB path, log dir, LLM provider, gateway
+  tables, and configured adapters; extend the credential/optional-dep checks
+  once real adapters exist.
+- [ ] Extend log redaction to a privacy mode. Config secret masking
+  (`config show/get`) and bash-output secret redaction already exist, and
+  gateway JSONL logs already hash external chat/user ids; still missing is a
+  privacy-mode toggle plus redaction of platform tokens and webhook signatures
+  once adapters land.
+- [ ] Add clean shutdown for adapters: disconnect connected platforms and mark
+  in-flight turns interrupted. Daemon socket/lock teardown already exists; this
+  becomes real work once an adapter holds a live connection.
 - [ ] Add service templates:
   - Docker Compose for local/private deployment.
   - systemd user service for Linux.
   - launchd plist later if macOS background operation matters.
-- [ ] Add hermetic test script:
-  - fixed `TZ=UTC`.
-  - fixed `PYTHONHASHSEED`.
+- [ ] Add a hermetic test script (CI currently runs the three commands directly):
+  - fixed `TZ=UTC` and `PYTHONHASHSEED`.
   - credentials cleared unless a test explicitly sets them.
   - runs ruff, mypy, pytest.
-- [ ] Add gateway-specific tests:
-  - session key rules.
-  - adapter contract tests.
-  - dedup store.
-  - busy session queue.
-  - command bypass behavior.
-  - status file behavior.
-- [ ] Add release checklist:
-  - migrations compatible.
-  - `.env.example` updated.
+- [ ] Add a release checklist:
+  - migrations/schema rebuild verified.
+  - `.env.example` and `config.example.toml` updated.
   - README command examples checked.
-  - mock provider path still works without API key.
+  - mock provider path still works without an API key.
+
+Note: runtime status (PID file, lock, status JSON with `started_at`, adapters,
+background state/last-error) and gateway-specific tests (session keys, dedup,
+busy guard, command bypass, status file) are already implemented and are no
+longer tracked here.
 
 ## P2: Channel Commands
 
-Keep channel commands small and operational.
+The active-turn guard already lets `/stop`, `/reset`, `/status` bypass the busy
+check, but no handler dispatches them — they currently fall through to the model
+as plain text. Runtime cancellation exists (`AgentManager.cancel` /
+`_check_canceled`); these commands need to be wired to it.
 
-- [ ] `/status`: current session id, provider, cognition status, active turn
-  state.
+- [ ] `/status`: current session id, provider, cognition status, active-turn state.
 - [ ] `/reset`: reset session context for this channel.
-- [ ] `/stop`: cancel active turn.
-- [ ] `/remember <text>`: explicit cognition observation/review request after
-  the cognition review model exists.
-- [ ] `/forget <id>`: apply correction/forget semantics after belief projection
-  supports them.
-- [ ] `/debug prompt`: admin-only prompt inspection.
+- [ ] `/stop`: cancel the active turn (wire to existing runtime cancellation).
+- [ ] `/remember <text>`: explicit cognition observation/review request, built on
+  `memory_propose`.
+- [ ] `/forget <id>`: apply correction/forget semantics once the cognition
+  surface above supports them.
+- [ ] `/debug prompt`: admin-only prompt inspection (the `alpha debug prompt`
+  CLI already exists; this exposes it as a channel command).
 
-Avoid adding broad model switching, plugin management, update commands, kanban
-commands, or multi-agent controls until Alpha Agent has stable messaging and
-cognition review.
+Avoid broad model switching, plugin management, update commands, kanban
+commands, or multi-agent controls until messaging and the cognition review
+surface are stable.
 
 ## Suggested Build Order
 
-1. Add gateway models, session key logic, adapter interface, and tests.
-2. Add gateway runner for local in-process adapter tests.
-3. Add the minimum reliable turn lifecycle:
-   - structured runtime traces.
-   - active-turn guard.
-   - `/stop` cancellation path.
-   - bounded provider retry.
-   - prompt/state debug metadata for channel turns.
-4. Wire CLI `alpha daemon start/status/stop` and `alpha gateway status/doctor`.
-5. Add Feishu text MVP with allowlist, mention gating, and tests.
-6. Add channel commands `/status`, `/reset`, `/stop`, `/remember`.
-7. Add cognition review flow after the cognition runtime phases define it.
-8. Decide WeChat target after confirming the real account/channel constraints.
-9. Add chosen WeChat adapter.
-10. Add service/runtime status and deployment templates.
+1. Add the Feishu text MVP adapter (allowlist, mention gating, identity
+   normalization, tests) on top of the existing gateway foundation.
+2. Wire channel command handlers (`/status`, `/reset`, `/stop`) into gateway
+   dispatch, reusing the existing cancellation path.
+3. Build the cognition product surface: "what do you know about me?",
+   provenance display, and correction/forget, on top of belief projection and
+   the memory tools.
+4. Add `/remember` and `/forget` once the cognition surface supports them.
+5. Add operations polish: top-level `alpha doctor`, hermetic test script, and a
+   privacy-mode log redaction toggle.
+6. Decide the WeChat target after confirming real account/channel constraints,
+   then add the chosen adapter.
+7. Add deployment templates (Docker Compose, systemd) and the release checklist.
