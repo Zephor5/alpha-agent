@@ -13,8 +13,10 @@ from alpha_agent.llm.base import (
     LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
+    LLMUsage,
 )
 from alpha_agent.llm.chat_completions import complete_chat_completions
+from alpha_agent.llm.usage import build_llm_usage, usage_int, usage_mapping
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
@@ -62,6 +64,7 @@ class DeepSeekProvider:
                 enabled=self.reasoning_enabled,
                 effort=self.reasoning_effort,
             ),
+            usage_normalizer=normalize_deepseek_usage,
         )
         return replace(
             normalized,
@@ -94,6 +97,49 @@ def deepseek_reasoning_parameters(
     elif normalized_effort in {"low", "medium", "high"}:
         params["reasoning_effort"] = normalized_effort
     return params
+
+
+def normalize_deepseek_usage(raw_usage: Any) -> LLMUsage | None:
+    """Normalize DeepSeek's chat-completions usage payload."""
+
+    usage = usage_mapping(raw_usage)
+    if usage is None:
+        return None
+
+    completion_details = usage_mapping(usage.get("completion_tokens_details"))
+    prompt_details = usage_mapping(usage.get("prompt_tokens_details"))
+    cached_tokens = (
+        usage_int(prompt_details.get("cached_tokens"))
+        if prompt_details is not None
+        else None
+    )
+    if cached_tokens is None:
+        cached_tokens = usage_int(usage.get("prompt_cache_hit_tokens"))
+    if cached_tokens is None:
+        cached_tokens = 0
+
+    prompt_cache_miss_tokens = usage_int(usage.get("prompt_cache_miss_tokens"))
+    if prompt_cache_miss_tokens is None:
+        prompt_tokens = usage_int(usage.get("prompt_tokens"))
+        prompt_cache_miss_tokens = (
+            prompt_tokens - cached_tokens if prompt_tokens is not None else None
+        )
+
+    reasoning_tokens = (
+        usage_int(completion_details.get("reasoning_tokens"))
+        if completion_details is not None
+        else 0
+    )
+    if reasoning_tokens is None:
+        reasoning_tokens = 0
+
+    return build_llm_usage(
+        total_tokens=usage_int(usage.get("total_tokens")),
+        cached_tokens=cached_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        reasoning_tokens=reasoning_tokens,
+        completion_tokens=usage_int(usage.get("completion_tokens")),
+    )
 
 
 def _model_supports_thinking(model: str | None) -> bool:

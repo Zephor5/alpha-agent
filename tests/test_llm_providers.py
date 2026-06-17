@@ -802,6 +802,43 @@ def test_openai_compatible_provider_without_usage_leaves_usage_none(
     assert "usage" not in response.metadata["response_payload"]
 
 
+def test_openai_compatible_provider_does_not_apply_provider_specific_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_usage = {
+        "completion_tokens": 296,
+        "completion_tokens_details": {"reasoning_tokens": 34},
+        "prompt_tokens": 5104,
+        "prompt_tokens_details": {"cached_tokens": 4096},
+        "total_tokens": 5400,
+    }
+
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return _response(
+            200,
+            {
+                "id": "chatcmpl-compat",
+                "model": "gpt-compatible",
+                "choices": [{"message": {"content": "done"}}],
+                "usage": raw_usage,
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    config = _config(
+        compatible_base_url="https://compatible.example",
+        compatible_api_key="compatible-key",
+        compatible_model="gpt-compatible",
+    )
+
+    response = OpenAICompatibleProvider(config).complete(
+        [{"role": "user", "content": "finalize"}]
+    )
+
+    assert response.usage is None
+    assert response.metadata["response_payload"]["usage"] == raw_usage
+
+
 def test_codex_provider_uses_explicit_oauth_access_token() -> None:
     config = _config(codex_access_token="codex-token")
 

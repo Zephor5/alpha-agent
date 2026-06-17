@@ -17,8 +17,9 @@ from alpha_agent.llm.base import (
     LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
-    normalize_llm_usage,
+    LLMUsage,
 )
+from alpha_agent.llm.usage import build_llm_usage, usage_int, usage_mapping
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_DEFAULT_MODEL = "gpt-5.3-codex"
@@ -73,7 +74,7 @@ class CodexResponsesProvider:
                 "request_payload": body,
                 "response_payload": payload,
             },
-            usage=normalize_llm_usage(payload.get("usage")),
+            usage=normalize_codex_usage(payload.get("usage")),
         )
 
 
@@ -129,6 +130,44 @@ def codex_responses_payload(*, model: str, messages: list[ChatMessage]) -> dict[
     if instructions:
         payload["instructions"] = instructions
     return payload
+
+
+def normalize_codex_usage(raw_usage: Any) -> LLMUsage | None:
+    """Normalize Codex Responses API usage payloads."""
+
+    usage = usage_mapping(raw_usage)
+    if usage is None:
+        return None
+
+    output_details = usage_mapping(usage.get("output_tokens_details"))
+    input_details = usage_mapping(usage.get("input_tokens_details"))
+    cached_tokens = (
+        usage_int(input_details.get("cached_tokens"))
+        if input_details is not None
+        else None
+    )
+    if cached_tokens is None:
+        cached_tokens = 0
+
+    input_tokens = usage_int(usage.get("input_tokens"))
+    prompt_cache_miss_tokens = (
+        input_tokens - cached_tokens if input_tokens is not None else None
+    )
+    reasoning_tokens = (
+        usage_int(output_details.get("reasoning_tokens"))
+        if output_details is not None
+        else 0
+    )
+    if reasoning_tokens is None:
+        reasoning_tokens = 0
+
+    return build_llm_usage(
+        total_tokens=usage_int(usage.get("total_tokens")),
+        cached_tokens=cached_tokens,
+        prompt_cache_miss_tokens=prompt_cache_miss_tokens,
+        reasoning_tokens=reasoning_tokens,
+        completion_tokens=usage_int(usage.get("output_tokens")),
+    )
 
 
 def _message_to_input_item(message: ChatMessage) -> dict[str, Any]:

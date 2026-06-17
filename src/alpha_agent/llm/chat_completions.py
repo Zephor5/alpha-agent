@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -14,6 +14,7 @@ from alpha_agent.llm.base import (
     LLMResponseFormat,
     LLMToolChoice,
     LLMToolDefinitionInput,
+    LLMUsage,
     chat_completion_messages_payload,
     openai_compatible_response,
     openai_compatible_response_format_payload,
@@ -35,6 +36,7 @@ def complete_chat_completions(
     response_format: LLMResponseFormat | None = None,
     include_reasoning_content: bool = False,
     extra_body: Mapping[str, Any] | None = None,
+    usage_normalizer: Callable[[Any], LLMUsage | None] | None = None,
 ) -> LLMResponse:
     """Call an OpenAI-compatible chat-completions endpoint and normalize it."""
 
@@ -72,8 +74,10 @@ def complete_chat_completions(
         fallback_model=model,
         provider=provider,
     )
+    usage = usage_normalizer(payload.get("usage")) if usage_normalizer else None
     return replace(
         normalized,
+        usage=usage,
         metadata={
             **normalized.metadata,
             "request_payload": body,
