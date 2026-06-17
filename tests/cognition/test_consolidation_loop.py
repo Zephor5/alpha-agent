@@ -2234,6 +2234,8 @@ def test_failed_background_llm_validation_logs_raw_output_preview(
 
     stderr = capsys.readouterr().err
     assert "background_llm_validation_failed" in stderr
+    payload = json.loads(stderr.split("background_llm_validation_failed ", 1)[1])
+    assert datetime.fromisoformat(payload["logged_at"]).tzinfo == UTC
     assert f'"run_id":"{run.run_id}"' in stderr
     assert f'"window_id":"{window.window_id}"' in stderr
     assert '"stage":"extraction"' in stderr

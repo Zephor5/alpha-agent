@@ -1362,6 +1362,7 @@ def _log_background_llm_validation_failed(
         raw_output_preview = raw_output[:_BACKGROUND_LLM_RAW_OUTPUT_PREVIEW_CHARS]
         payload = {
             "error": error,
+            "logged_at": utc_now_iso(),
             "run_id": run_id,
             "window_id": window_id,
             "stage": str(stage_value) if stage_value is not None else None,
