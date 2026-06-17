@@ -815,6 +815,8 @@ def validate_background_llm_json(
         raise BackgroundLLMValidationError(f"malformed background LLM JSON: {exc}") from exc
     if not isinstance(decoded, dict):
         raise BackgroundLLMValidationError("malformed background LLM output must be an object")
+    if not decoded and BackgroundStage(context.source_window.stage) == BackgroundStage.EXTRACTION:
+        decoded = _empty_extraction_output()
     return validate_background_llm_output(decoded, context)
 
 
@@ -835,6 +837,16 @@ def validate_feedback_attribution_json(
             "malformed feedback attribution output must be an object"
         )
     return validate_feedback_attribution_output(decoded, context)
+
+
+def _empty_extraction_output() -> dict[str, Any]:
+    return {
+        "operation": _EXTRACTION_OPERATION,
+        "authority": Authority.BACKGROUND_SYNTHESIZED.value,
+        "rationale": "No durable memory extracted.",
+        "source_span_note": None,
+        "payload": {"atomic_belief_inputs": []},
+    }
 
 
 def validate_feedback_attribution_output(

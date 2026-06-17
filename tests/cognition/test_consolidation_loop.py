@@ -1663,6 +1663,57 @@ def test_background_llm_acceptance_allows_empty_extraction_and_marks_window_proc
     assert run_record.output_refs == ()
 
 
+def test_background_llm_acceptance_treats_empty_object_as_empty_extraction(
+    tmp_path,
+) -> None:
+    store = _store(tmp_path)
+    service = CognitionStateStore(store)
+    message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="No durable memory here.",
+    )
+    source = BackgroundSourceRef("session_message", message.id)
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        source_refs=(source,),
+        idempotency_key="extract:s1:empty-object",
+    )
+    run = service.ledger.start_stage_run(
+        worker_id="worker-a",
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+        window_id=window.window_id,
+        input_refs=(source,),
+    )
+
+    accepted = service.accept_background_llm_json(
+        "{}",
+        _validation_context(window_id=window.window_id, source_refs=(source,)),
+        window_id=window.window_id,
+        run_id=run.run_id,
+        checkpoint_id="checkpoint:extract:empty-object",
+    )
+
+    assert accepted == []
+    assert service.beliefs.list_active() == []
+    progress = service.ledger.get_source_progress(
+        source,
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:s1",
+    )
+    assert progress.status == BackgroundProgressStatus.PROCESSED
+    assert progress.checkpoint_id == "checkpoint:extract:empty-object"
+    assert service.ledger.get_source_window(window.window_id).status == (
+        BackgroundProgressStatus.PROCESSED
+    )
+    run_record = service.ledger.get_stage_run(run.run_id)
+    assert run_record.status == BackgroundStageRunStatus.SUCCEEDED
+    assert run_record.output_refs == ()
+
+
 def test_extraction_stage_rejects_singular_atomic_draft_payload() -> None:
     with pytest.raises(BackgroundLLMValidationError, match="atomic_belief_inputs"):
         validate_background_llm_json(
