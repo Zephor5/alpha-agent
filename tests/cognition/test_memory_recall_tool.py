@@ -56,6 +56,20 @@ def test_memory_recall_schema_is_strict_and_exposes_new_memory_kinds_only() -> N
     ]
 
 
+def test_memory_recall_schema_requests_bilingual_keywords() -> None:
+    definition = next(
+        tool
+        for tool in build_tool_registry().to_llm_tool_definitions()
+        if tool.name == MEMORY_RECALL_TOOL_NAME
+    )
+
+    keywords_description = definition.parameters["properties"]["keywords"]["description"]
+    assert "Chinese" in keywords_description
+    assert "English" in keywords_description
+    assert "Chinese" in definition.description
+    assert "English" in definition.description
+
+
 def test_memory_recall_queries_counterpart_and_global_atomic_beliefs(tmp_path: Path) -> None:
     projection = _projection_with_beliefs(
         tmp_path,

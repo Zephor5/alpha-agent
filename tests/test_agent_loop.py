@@ -1960,7 +1960,9 @@ def test_tool_loop_compression_waits_for_tool_result_and_rebuilds_next_prompt(
         llm_provider=provider,
         tool_registry=registry,
         llm_context_config=_compression_context(),
-        max_context_tokens=620,
+        # Just above the ~701-token first system+user+tools turn so the turn fits but
+        # the post-tool context still triggers handover compression.
+        max_context_tokens=730,
     )
 
     result = agent.respond("use tool", session_id="s1")
@@ -2066,7 +2068,9 @@ def test_tool_loop_compression_occupied_tokens_use_rebuilt_continuation_estimate
         llm_provider=provider,
         tool_registry=registry,
         llm_context_config=_compression_context(),
-        max_context_tokens=620,
+        # Just above the ~701-token first system+user+tools turn so the turn fits but
+        # the post-tool context still triggers handover compression.
+        max_context_tokens=730,
     )
 
     result = agent.respond("use tool", session_id="s1")

@@ -101,8 +101,11 @@ class MemoryRecallTool:
         description=(
             "Search stable long-term atomic beliefs when explicit memory lookup would help "
             "answer the current turn. Returns compact belief handles with id, content, "
-            "memory_kind, scope, lifecycle, and held_since. Does not write memory; use "
-            "memory_propose for explicit long-term memory write proposals."
+            "memory_kind, scope, lifecycle, and held_since. Beliefs keep the language they "
+            "were stored in and are matched lexically, so supply keywords and entities in "
+            "both Chinese and English for each key concept to recall memory regardless of "
+            "the language it was stored in. Does not write memory; use memory_propose for "
+            "explicit long-term memory write proposals."
         ),
         parameters={
             "type": "object",
@@ -111,10 +114,20 @@ class MemoryRecallTool:
                 "query": {
                     "type": "string",
                     "maxLength": 300,
+                    "description": (
+                        "Natural-language description of what to recall, phrased in the "
+                        "language of the current conversation."
+                    ),
                 },
                 "keywords": {
                     "type": "array",
                     "maxItems": 12,
+                    "description": (
+                        "Salient terms to match. Beliefs are stored in their original "
+                        "language and matched lexically, so include BOTH the Chinese and "
+                        "English form of each key concept (for example 'dark theme' and "
+                        "'深色主题') so recall hits whichever language was stored."
+                    ),
                     "items": {
                         "type": "string",
                         "maxLength": 80,
@@ -123,6 +136,11 @@ class MemoryRecallTool:
                 "entities": {
                     "type": "array",
                     "maxItems": 8,
+                    "description": (
+                        "Named entities such as people, projects, products, or tools. "
+                        "Include both the Chinese and English name when an entity is "
+                        "referred to in both languages."
+                    ),
                     "items": {
                         "type": "string",
                         "maxLength": 120,
