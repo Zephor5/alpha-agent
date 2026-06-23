@@ -544,6 +544,7 @@ class AlphaAgent:
                 user_record=user_record,
                 user_message=user_message,
                 prompt_messages=messages,
+                model_tools=model_tools or None,
                 loop_result=loop_result,
                 debug=debug,
             )
@@ -827,6 +828,7 @@ class AlphaAgent:
         user_record: SessionMessage,
         user_message: str,
         prompt_messages: Sequence[ChatMessage],
+        model_tools: Sequence[LLMToolDefinitionInput] | None,
         loop_result: AgentLoopResult,
         debug: dict[str, Any],
     ) -> None:
@@ -852,6 +854,9 @@ class AlphaAgent:
             recall_tool_message_ids
         )
         debug["feedback_attribution_prompt_message_count"] = len(prompt_messages)
+        debug["feedback_attribution_tool_count"] = (
+            len(model_tools) if model_tools is not None else 0
+        )
         if any(
             call.name == MEMORY_PROPOSE_TOOL_NAME
             for call in loop_result.provider_tool_calls
@@ -876,6 +881,7 @@ class AlphaAgent:
             prompt_messages=prompt_messages,
             recalled_beliefs=tuple(recalled_beliefs),
             recall_tool_message_ids=recall_tool_message_ids,
+            tools=tuple(model_tools or ()),
         )
         debug["feedback_attribution_submitter_configured"] = True
         try:

@@ -33,7 +33,12 @@ from alpha_agent.cognition.processing_ledger import (
     ProcessingLedger,
 )
 from alpha_agent.cognition.state_service import CognitionStateStore
-from alpha_agent.llm.base import JSON_OBJECT_RESPONSE_FORMAT, ChatMessage, LLMProvider
+from alpha_agent.llm.base import (
+    JSON_OBJECT_RESPONSE_FORMAT,
+    ChatMessage,
+    LLMProvider,
+    LLMToolDefinitionInput,
+)
 from alpha_agent.llm.tracing import LLMTraceLogger, traced_llm_complete
 from alpha_agent.state.models import SessionMessage
 from alpha_agent.state.store import StateStore
@@ -98,6 +103,7 @@ class FeedbackAttributionJob:
     prompt_messages: Sequence[ChatMessage]
     recalled_beliefs: Sequence[RecalledBeliefHandle]
     recall_tool_message_ids: Sequence[str]
+    tools: Sequence[LLMToolDefinitionInput] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -112,6 +118,7 @@ class FeedbackAttributionJob:
             for message_id in handle.source_tool_message_ids
         )
         object.__setattr__(self, "recall_tool_message_ids", _stable_unique(recall_ids))
+        object.__setattr__(self, "tools", tuple(self.tools))
 
 
 class RealtimeFeedbackAttributionService:
@@ -287,6 +294,7 @@ class RealtimeFeedbackAttributionService:
             *tuple(job.prompt_messages),
             _attribution_instruction_message(job),
         )
+        tools = tuple(job.tools)
         response = traced_llm_complete(
             self.llm_provider,
             messages,
@@ -304,8 +312,8 @@ class RealtimeFeedbackAttributionService:
             },
             accounting_store=self.store,
             accounting_failure_handler=self._write_accounting_failure_audit,
-            tools=(),
-            tool_choice="none",
+            tools=tools or None,
+            tool_choice="none" if tools else None,
             response_format=JSON_OBJECT_RESPONSE_FORMAT,
         )
         return validate_feedback_attribution_json(

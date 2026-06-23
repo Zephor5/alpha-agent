@@ -1561,6 +1561,7 @@ def test_feedback_attribution_submits_after_recall_bearing_turn(tmp_path) -> Non
             source_tool_message_ids=(tool_messages[0].id,),
         ),
     )
+    assert tuple(job.tools) == tuple(agent.tool_registry.to_llm_tool_definitions())
     assert list(job.prompt_messages) == provider.calls[2]
     assert job.prompt_messages[-1] == {
         "role": "user",

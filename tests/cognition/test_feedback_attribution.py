@@ -53,6 +53,7 @@ from alpha_agent.llm.base import (
     LLMResponse,
     LLMResponseFormat,
     LLMToolChoice,
+    LLMToolDefinition,
     LLMToolDefinitionInput,
     LLMUsage,
 )
@@ -715,8 +716,8 @@ def test_realtime_feedback_attribution_success_emits_events_and_consequences(
     service.shutdown(wait=True)
 
     assert len(provider.calls) == 1
-    assert provider.calls[0]["tools"] == ()
-    assert provider.calls[0]["tool_choice"] == "none"
+    assert provider.calls[0]["tools"] is None
+    assert provider.calls[0]["tool_choice"] is None
     assert provider.calls[0]["response_format"] == {"type": "json_object"}
     instruction = provider.calls[0]["messages"][-1]["content"]
     assert isinstance(instruction, str)
@@ -772,6 +773,56 @@ def test_realtime_feedback_attribution_success_emits_events_and_consequences(
     assert session.total_tokens == 80
     assert session.completion_tokens == 12
     assert session.occupied_tokens == 64
+
+
+def test_realtime_feedback_attribution_reuses_runtime_tool_schema_without_calls(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    store.create_session_record("s1", created_at="2026-06-01T00:00:00+00:00")
+    provider = _RecordingFeedbackProvider(
+        _feedback_json(
+            {
+                "belief_id": "belief:python",
+                "verdict": "confirmed",
+                "evidence_quote": "I still prefer Python examples",
+            },
+        ),
+    )
+    service = RealtimeFeedbackAttributionService(
+        store=store,
+        llm_provider=provider,
+        max_workers=1,
+    )
+    tools = (
+        LLMToolDefinition(
+            name="memory_recall",
+            description="Recall durable memory.",
+            parameters={"type": "object", "properties": {}},
+        ),
+    )
+
+    assert service.submit(
+        _job(
+            user_message_text="I still prefer Python examples.",
+            recalled_beliefs=(
+                _handle("belief:python", "User prefers Python examples.", "msg_recall_1"),
+            ),
+            tools=tools,
+        )
+    )
+    service.shutdown(wait=True)
+
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["tools"] == tools
+    assert provider.calls[0]["tool_choice"] == "none"
+    assert provider.calls[0]["response_format"] == {"type": "json_object"}
+    instruction = provider.calls[0]["messages"][-1]["content"]
+    assert isinstance(instruction, str)
+    assert "belief:python" in instruction
+
+    events = list(SQLiteEventLog(store).iter(kinds=[CognitiveEventKind.RECEIVED_FEEDBACK]))
+    assert [event.payload["feedback_kind"] for event in events] == ["belief_confirmed"]
 
 
 def test_realtime_feedback_attribution_uses_message_time_when_processing_is_delayed(
@@ -1245,6 +1296,7 @@ def _job(
     user_message_text: str = "I still prefer Python examples.",
     recall_tool_message_ids: tuple[str, ...] = ("msg_recall_1",),
     recalled_beliefs: tuple[RecalledBeliefHandle, ...] | None = None,
+    tools: tuple[LLMToolDefinitionInput, ...] = (),
 ) -> FeedbackAttributionJob:
     return FeedbackAttributionJob(
         session_id="s1",
@@ -1259,6 +1311,7 @@ def _job(
         ),
         recalled_beliefs=recalled_beliefs or (_handle(),),
         recall_tool_message_ids=recall_tool_message_ids,
+        tools=tools,
     )
 
 
