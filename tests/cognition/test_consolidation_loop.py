@@ -2644,8 +2644,8 @@ def test_memory_consolidation_worker_creates_consolidated_belief_and_archives_dr
     consolidated = active[0]
     assert consolidated.id != extracted.id
     assert consolidated.derivation_stage == DerivationStage.BACKGROUND_CONSOLIDATED
-    assert consolidated.held_since == Instant(processing_time)
-    assert consolidated.validity.observed_at == Instant(processing_time)
+    assert consolidated.held_since == extracted.held_since
+    assert consolidated.validity.observed_at == extracted.held_since
     evidence = {(item.kind, item.id) for item in consolidated.sources}
     assert ("atomic_belief", str(extracted.id)) in evidence
     assert any(kind == "background_source_window" for kind, _ in evidence)
@@ -3564,7 +3564,7 @@ def test_memory_consolidation_prompt_uses_source_time_before_held_since_for_rece
     assert isinstance(instruction, str)
     assert isinstance(material, str)
     assert "prefer source message time over held_since" in instruction
-    assert "held_since is Alpha holding time, not evidence time" in instruction
+    assert "held_since is record holding time" in instruction
     assert "must not infer source recency from held_since" in instruction
     assert f'"id": "{extracted.id}"' in material
     assert f'"id": "{target.id}"' in material
@@ -4859,8 +4859,8 @@ def test_memory_extraction_worker_processes_direct_compact_job_with_program_prov
     assert len(beliefs) == 1
     belief = beliefs[0]
     assert belief.derivation_stage == DerivationStage.BACKGROUND_EXTRACTED
-    assert belief.held_since == Instant(processing_time)
-    assert belief.validity.observed_at == Instant(processing_time)
+    assert belief.held_since == Instant("2026-06-12T01:17:00+00:00")
+    assert belief.validity.observed_at == Instant("2026-06-12T01:17:00+00:00")
     evidence = {(item.kind, item.id) for item in belief.sources}
     assert ("background_source_window", window.window_id) in evidence
     assert ("session_message", user.id) in evidence

@@ -77,8 +77,9 @@ def test_self_memory_summary_worker_writes_validated_summary_with_program_source
     assert summary is not None
     assert summary.derivation_stage == DerivationStage.BACKGROUND_SUMMARIZED
     assert summary.content == "Agent solves root causes and validates changes with tests."
-    assert str(summary.held_since) == processing_time
-    assert str(summary.validity.observed_at) == processing_time
+    expected_source_time = max(str(first.held_since), str(second.held_since))
+    assert str(summary.held_since) == expected_source_time
+    assert str(summary.validity.observed_at) == expected_source_time
     assert set(summary.source_belief_ids) == {first.id, second.id}
     evidence = {(item.kind, item.id) for item in summary.sources}
     assert any(kind == "background_source_window" for kind, _ in evidence)

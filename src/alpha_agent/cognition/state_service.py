@@ -54,6 +54,10 @@ from alpha_agent.cognition.processing_ledger import (
     ProcessingLedger,
 )
 from alpha_agent.cognition.projections.belief import BeliefProjection
+from alpha_agent.cognition.source_time import (
+    resolve_belief_source_time_range,
+    resolve_source_time_range,
+)
 from alpha_agent.runtime.events import deterministic_json
 from alpha_agent.state.store import StateStore
 from alpha_agent.utils.ids import new_id
@@ -573,6 +577,7 @@ class CognitionStateStore:
                     context=context,
                     run_id=run_id,
                     now=now,
+                    conn=conn,
                 )
                 self.write_atomic_belief(
                     belief,
@@ -597,6 +602,7 @@ class CognitionStateStore:
                     context=context,
                     run_id=run_id,
                     now=now,
+                    conn=conn,
                 )
                 self.write_summary_belief(
                     summary_belief,
@@ -682,6 +688,7 @@ class CognitionStateStore:
                 context=context,
                 run_id=run_id,
                 now=now,
+                conn=conn,
             )
             self.write_atomic_belief(
                 belief,
@@ -713,6 +720,7 @@ class CognitionStateStore:
                 context=context,
                 run_id=run_id,
                 now=now,
+                conn=conn,
                 supersedes=targets[0].id,
             )
             self.supersede_atomic_beliefs(
@@ -847,6 +855,7 @@ class CognitionStateStore:
                     run_id=run_id,
                     now=now,
                     source_refs=decision_source_refs,
+                    conn=conn,
                 )
                 self.write_atomic_belief(
                     belief,
@@ -883,6 +892,7 @@ class CognitionStateStore:
                     run_id=run_id,
                     now=now,
                     source_refs=decision_source_refs,
+                    conn=conn,
                     supersedes=target.id,
                 )
                 self.supersede_atomic_beliefs(
@@ -1064,9 +1074,16 @@ class CognitionStateStore:
         run_id: str | None,
         now: str,
         source_refs: Sequence[BackgroundSourceRef] | None = None,
+        conn: sqlite3.Connection,
         supersedes: BeliefId | str | None = None,
     ) -> AtomicBelief:
         about = self._materialized_about(draft, context)
+        source_timestamp = self._background_belief_source_timestamp(
+            context,
+            source_refs=source_refs,
+            now=now,
+            conn=conn,
+        )
         return AtomicBelief(
             id=BeliefId(new_id("belief")),
             subject=unknown_subject_ref(),
@@ -1083,11 +1100,11 @@ class CognitionStateStore:
                 run_id=run_id,
                 source_refs=source_refs,
             ),
-            validity=draft.validity or ValidityWindow(observed_at=Instant(now)),
+            validity=draft.validity or ValidityWindow(observed_at=Instant(source_timestamp)),
             update_policy=draft.update_policy,
             formed_in=Reference("situation", "situation:background"),
             holder_role=Role("agent"),
-            held_since=Instant(now),
+            held_since=Instant(source_timestamp),
             derivation=DerivationTrace(
                 deterministic_json(
                     {
@@ -1111,8 +1128,15 @@ class CognitionStateStore:
         context: Any,
         run_id: str | None,
         now: str,
+        conn: sqlite3.Connection,
     ) -> SummaryBelief:
         about = self._materialized_about(draft, context)
+        source_timestamp = self._background_belief_source_timestamp(
+            context,
+            source_refs=None,
+            now=now,
+            conn=conn,
+        )
         return SummaryBelief(
             id=BeliefId(new_id("belief")),
             subject=unknown_subject_ref(),
@@ -1126,12 +1150,12 @@ class CognitionStateStore:
             lifecycle=BeliefLifecycle.ACTIVE,
             structure=draft.structure,
             sources=_program_attached_sources(context, run_id=run_id),
-            validity=draft.validity or ValidityWindow(observed_at=Instant(now)),
+            validity=draft.validity or ValidityWindow(observed_at=Instant(source_timestamp)),
             update_policy=draft.update_policy,
             source_belief_ids=[BeliefId(item) for item in sorted(context.input_belief_ids)],
             formed_in=Reference("situation", "situation:background"),
             holder_role=Role("agent"),
-            held_since=Instant(now),
+            held_since=Instant(source_timestamp),
             derivation=DerivationTrace(
                 deterministic_json(
                     {
@@ -1148,6 +1172,51 @@ class CognitionStateStore:
         if BeliefScope(draft.scope) == BeliefScope.PROJECT and draft.project_descriptor is not None:
             return [self.project_reference(draft.project_descriptor)]
         return list(draft.about)
+
+    def _background_belief_source_timestamp(
+        self,
+        context: Any,
+        *,
+        source_refs: Sequence[BackgroundSourceRef] | None,
+        now: str,
+        conn: sqlite3.Connection,
+    ) -> str:
+        selected_source_refs = (
+            tuple(source_refs)
+            if source_refs is not None
+            else tuple(context.source_window.source_refs)
+        )
+        candidates: list[str] = []
+        source_window = self.ledger.get_source_window(context.source_window.window_id, conn=conn)
+        candidates.extend(_source_window_time_candidates(source_window.metadata))
+
+        source_time = resolve_source_time_range(
+            self.store,
+            [
+                Reference(item.source_type, item.source_id)
+                for item in selected_source_refs
+                if item.source_type == "session_message"
+            ],
+        )
+        if source_time is not None:
+            candidates.append(source_time.source_time_end)
+
+        for source_ref in selected_source_refs:
+            if source_ref.source_type not in {"atomic_belief", "summary_belief"}:
+                continue
+            source_belief = self.beliefs.get_by_id(source_ref.source_id, conn=conn)
+            if not isinstance(source_belief, (AtomicBelief, SummaryBelief)):
+                continue
+            try:
+                source_time = resolve_belief_source_time_range(self.store, source_belief)
+            except (KeyError, ValueError):
+                source_time = None
+            if source_time is not None:
+                candidates.append(source_time.source_time_end)
+            else:
+                candidates.append(str(source_belief.held_since))
+
+        return _latest_utc_instant(candidates) or now
 
     def _mark_background_validation_failed(
         self,
@@ -1326,6 +1395,41 @@ def _utc_date(value: str) -> str:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC).date().isoformat()
+
+
+def _source_window_time_candidates(metadata: Mapping[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for key in ("source_time_end", "user_message_created_at"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value)
+    if not candidates:
+        value = metadata.get("source_time_start")
+        if isinstance(value, str) and value.strip():
+            candidates.append(value)
+    return candidates
+
+
+def _latest_utc_instant(values: Sequence[str]) -> str | None:
+    parsed = tuple(
+        item for item in (_parse_utc_instant(value) for value in values) if item is not None
+    )
+    if not parsed:
+        return None
+    return max(parsed).isoformat()
+
+
+def _parse_utc_instant(value: str) -> datetime | None:
+    raw_value = str(value).strip()
+    if not raw_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _program_attached_sources(

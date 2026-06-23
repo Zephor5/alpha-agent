@@ -127,7 +127,8 @@ Operation rules:
 
 Time rules:
 - Recency decisions prefer source message time over held_since when source_time_line is present.
-- held_since is Alpha holding time, not evidence time.
+- held_since is record holding time and may be inherited from source evidence;
+  it is not a replacement for source_time_line.
 - Supersede, retract, and archive decisions must not infer source recency from held_since."""
 
 _CONSOLIDATION_MATERIAL_MESSAGE = """Allowed update target belief ids:

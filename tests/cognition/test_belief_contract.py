@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import alpha_agent.cognition.state_service as state_service_module
 from alpha_agent.cognition.authority import CognitionSourceKind
 from alpha_agent.cognition.background_llm_contract import (
     BackgroundLLMValidationContext,
@@ -323,8 +324,17 @@ def test_state_service_persists_topic_without_object_columns(tmp_path) -> None:
 
 def test_state_service_accepts_background_topic_without_content_fallback(tmp_path) -> None:
     store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.ensure_session_record("s1", timezone="UTC")
+    message = store.append_session_message(
+        session_id="s1",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent uses uv.",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
     service = CognitionStateStore(store)
-    source = BackgroundSourceRef("session_message", "msg-1")
+    source = BackgroundSourceRef("session_message", message.id)
     window = service.ledger.create_source_window(
         stage=BackgroundStage.EXTRACTION,
         target_unit="session:s1",
@@ -355,6 +365,62 @@ def test_state_service_accepts_background_topic_without_content_fallback(tmp_pat
     assert len(accepted) == 1
     assert isinstance(accepted[0], AtomicBelief)
     assert accepted[0].topic == "package management"
+
+
+def test_state_service_uses_source_message_time_for_background_atomic_defaults(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = StateStore(tmp_path / "alpha.db")
+    store.initialize()
+    store.ensure_session_record("historical", timezone="Asia/Shanghai")
+    message = store.append_session_message(
+        session_id="historical",
+        kind="user_message",
+        llm_role="user",
+        raw_content="Alpha Agent used uv years ago.",
+        created_at="2021-03-04T10:20:30+08:00",
+    )
+    service = CognitionStateStore(store)
+    source = BackgroundSourceRef("session_message", message.id)
+    window = service.ledger.create_source_window(
+        stage=BackgroundStage.EXTRACTION,
+        target_unit="session:historical",
+        source_refs=(source,),
+        idempotency_key="extract:historical:source-time",
+    )
+    processing_time = "2026-06-23T00:00:00+00:00"
+    expected_source_time = Instant("2021-03-04T02:20:30+00:00")
+    monkeypatch.setattr(state_service_module, "utc_now_iso", lambda: processing_time)
+
+    accepted = service.accept_background_llm_json(
+        _llm_json(
+            payload={
+                "atomic_belief_inputs": [
+                    {
+                        "memory_kind": MemoryKind.FACT.value,
+                        "scope": BeliefScope.GLOBAL.value,
+                        "about": [],
+                        "topic": "package management",
+                        "content": "Alpha Agent uses uv.",
+                    }
+                ]
+            }
+        ),
+        _context(
+            window_id=window.window_id,
+            source_refs=(source,),
+            session_id="historical",
+        ),
+        window_id=window.window_id,
+        run_id=None,
+        checkpoint_id="checkpoint:source-time",
+    )
+
+    assert len(accepted) == 1
+    assert isinstance(accepted[0], AtomicBelief)
+    assert accepted[0].held_since == expected_source_time
+    assert accepted[0].validity.observed_at == expected_source_time
 
 
 def _atomic_belief(*, topic: str = "python") -> AtomicBelief:
@@ -403,6 +469,7 @@ def _context(
         BackgroundSourceRef("session_message", "msg-1"),
     ),
     stage: BackgroundStage = BackgroundStage.EXTRACTION,
+    session_id: str = "s1",
     allowed_summary_kinds: frozenset[SummaryKind] | None = None,
     required_summary_scope: BeliefScope | None = None,
     required_summary_target_domain: str | None = None,
@@ -414,8 +481,8 @@ def _context(
             window_id=window_id,
             source_refs=source_refs,
             stage=stage,
-            target_unit="session:s1",
-            session_id="s1",
+            target_unit=f"session:{session_id}",
+            session_id=session_id,
         ),
         allowed_summary_kinds=allowed_summary_kinds,
         required_summary_scope=required_summary_scope,
